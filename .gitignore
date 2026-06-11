@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Inputs/outputs (large binary files — add specific test images manually if needed)
+input/
+output/
+results/
+
+# DECIMER model cache (downloaded at runtime, ~570 MB)
+.data/
+
+# OS
+.DS_Store
+Thumbs.db
