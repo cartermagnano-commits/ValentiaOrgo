@@ -1,4 +1,4 @@
-# Orgo AI — Image Preprocessing & OSR Test Harness
+Image Preprocessing & OSR Test Harness
 
 Takes messy photos of organic chemistry problems (textbook scans, phone shots,
 handwritten structures) and prepares them for optical structure recognition (OSR).
