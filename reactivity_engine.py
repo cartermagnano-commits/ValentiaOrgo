@@ -124,6 +124,10 @@ class MolecularReactivityEngine:
             if atom.GetSymbol() == "C":
                 # Check for standard leaving groups or polarizable bonds
                 has_leaving_group = any(n.GetSymbol() in ["Cl", "Br", "I", "O"] for n in atom.GetNeighbors())
+                
+                # Check current valence to ensure we don't exceed it without a LG
+                current_valence = sum(bond.GetBondTypeAsDouble() for bond in atom.GetBonds())
+                
                 if has_leaving_group or atom.GetHybridization() == Chem.HybridizationType.SP2:
 
                     e_score = self.calculator.get_net_electronic_score(substrate_mol, atom.GetIdx())
@@ -132,30 +136,57 @@ class MolecularReactivityEngine:
                     electrophilic_sites.append({
                         "atom_idx": atom.GetIdx(),
                         "electronic_score": e_score,
-                        "sterics": sterics
+                        "sterics": sterics,
+                        "has_lg": has_leaving_group,
+                        "valence": current_valence
                     })
 
         if not electrophilic_sites:
             return None
 
         # 3. Apply Transition State Gating Heuristics
+        # Filter for sites that can actually accept a new bond
+        valid_sites = [s for s in electrophilic_sites if s["has_lg"] or s["valence"] < 4]
+        if not valid_sites:
+            return None
+
         if control_type == "Kinetic":
             # Sort primarily by lowest steric hindrance (path of least resistance)
-            target_site = sorted(electrophilic_sites, key=lambda x: x["sterics"])[0]
+            target_site = sorted(valid_sites, key=lambda x: x["sterics"])[0]
         else:
             # Sort primarily by highest electrophilic score (electron deficit)
-            target_site = sorted(electrophilic_sites, key=lambda x: x["electronic_score"], reverse=True)[0]
+            target_site = sorted(valid_sites, key=lambda x: x["electronic_score"], reverse=True)[0]
 
         # 4. Generate Product via Graph Editing (Procedural Bond Swapping)
         editable_substrate = Chem.RWMol(substrate_mol)
         target_carbon_idx = target_site["atom_idx"]
 
-        # Simulating a basic addition step: form a single bond between Nu and E+
+        # Identify a leaving group to remove to maintain valence
+        leaving_group_idx = None
+        for n in editable_substrate.GetAtomWithIdx(target_carbon_idx).GetNeighbors():
+            if n.GetSymbol() in ["Cl", "Br", "I"]:
+                leaving_group_idx = n.GetIdx()
+                break
+        
+        if leaving_group_idx is not None:
+            editable_substrate.RemoveBond(target_carbon_idx, leaving_group_idx)
+            # For simplicity, we won't delete the leaving group atom, just detach it 
+            # (or we could delete it if it becomes an isolated node)
+
+        # Simulating a basic addition/substitution step: form a single bond between Nu and E+
         new_atom_idx = editable_substrate.AddAtom(reagent_mol.GetAtomWithIdx(best_nu_idx))
         editable_substrate.AddBond(target_carbon_idx, new_atom_idx, Chem.BondType.SINGLE)
 
         # Standardize and return graph
         product_mol = editable_substrate.GetMol()
+        
+        # Cleanup isolated atoms (like the leaving group we just detached)
+        final_editable = Chem.RWMol(product_mol)
+        isolated_indices = [a.GetIdx() for a in final_editable.GetAtoms() if a.GetDegree() == 0]
+        for idx in sorted(isolated_indices, reverse=True):
+            final_editable.RemoveAtom(idx)
+        
+        product_mol = final_editable.GetMol()
         Chem.SanitizeMol(product_mol)
         return product_mol
 
