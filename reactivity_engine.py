@@ -13,12 +13,10 @@ class AdvancedPhysicalCalculator:
         Calculates a localized electronic score combining Gasteiger charge,
         direct resonance contributions, and distance-decayed induction.
         """
-        # 1. Compute baseline electronegativity via RDKit Gasteiger charges
         mol_copy = Chem.Mol(mol)
         AllChem.ComputeGasteigerCharges(mol_copy)
         baseline_charge = float(mol_copy.GetAtomWithIdx(carbon_idx).GetProp("_GasteigerCharge"))
 
-        # 2. Layer Resonance and Induction heuristics using topological distance
         resonance_weights = {"N": 1.5, "O": 1.0, "F": 0.2}
         induction_weights = {"N": 0.5, "O": 0.7, "F": 1.0}
 
@@ -31,10 +29,8 @@ class AdvancedPhysicalCalculator:
                 d = distance_matrix[carbon_idx][atom.GetIdx()]
 
                 if d == 1:
-                    # RESONANCE WINS: Directly attached heteroatoms pump electron density
                     electronic_modifier -= resonance_weights[sym]
                 elif d >= 2:
-                    # INDUCTION WINS: Pulls electron density away, decaying over distance
                     electronic_modifier += induction_weights[sym] / (d ** 2)
 
         return baseline_charge + electronic_modifier
@@ -57,149 +53,175 @@ class MolecularReactivityEngine:
     def __init__(self):
         self.calculator = AdvancedPhysicalCalculator()
 
-        # Environmental Inference Registry
-        self.kinetic_reagents = {"CC(C)[N-]C(C)C.[Li+]", "[O-]C(C)(C)C.[K+]"} # LDA, t-BuOK
-        self.thermodynamic_reagents = {"O=S(=O)(O)O", "O"} # Strong acids, equilibrium solvents
+        # Raw string inputs canonicalized on initialization to guarantee lookup matches
+        raw_kinetic = {"CC(C)[N-]C(C)C.[Li+]", "[O-]C(C)(C)C.[K+]"} # LDA, t-BuOK
+        raw_thermo = {"O=S(=O)(O)O", "O"} # Strong acids, solvents
+
+        # Fix 1: Canonicalization Mismatch Fix
+        # Ensuring all reagents are stored in their canonical fragment order via MolFromSmiles -> MolToSmiles
+        # this ensures that salt complexes like LDA match correctly regardless of raw string ordering.
+        self.kinetic_reagents = {Chem.MolToSmiles(Chem.MolFromSmiles(s)) for s in raw_kinetic if Chem.MolFromSmiles(s)}
+        self.thermodynamic_reagents = {Chem.MolToSmiles(Chem.MolFromSmiles(s)) for s in raw_thermo if Chem.MolFromSmiles(s)}
 
     def infer_environment(self, reagent_smiles):
         """Automatically determines thermodynamic vs kinetic control based on reagents."""
-        if reagent_smiles in self.kinetic_reagents:
+        # Consistently apply the same canonicalization logic to incoming strings
+        canonical_reagent = Chem.MolToSmiles(Chem.MolFromSmiles(reagent_smiles))
+        if canonical_reagent in self.kinetic_reagents:
             return "Kinetic"
-        if reagent_smiles in self.thermodynamic_reagents:
+        if canonical_reagent in self.thermodynamic_reagents:
             return "Thermodynamic"
-        return "Thermodynamic" # Fallback default
+        return "Thermodynamic"
 
     def is_reactive_intermediate(self, mol):
-        """
-        An advanced, element-agnostic safety valve that flags non-standard
-        formal charges, reactive ions, and unstable valence states.
-        """
-        # 1. Calculate the total net charge of the entire molecular graph system
+        """Flags non-standard formal charges and high-energy intermediate matrices."""
         net_molecule_charge = Chem.GetFormalCharge(mol)
         if net_molecule_charge != 0:
-            # If the system as a whole is charged (e.g., free Cl-, Br-, or isolated carbocation),
-            # it is inherently volatile and must keep reacting to resolve.
             return True
 
-        # 2. Scan atom-by-atom for high-energy localized formal charges
         for atom in mol.GetAtoms():
             charge = atom.GetFormalCharge()
             symbol = atom.GetSymbol()
 
             if charge != 0:
-                # Exception: Allow highly stable neutral zwitterions (like nitro groups),
-                # but flag reactive or high-energy isolated atoms.
                 if symbol in ["C", "S", "P"] and charge != 0:
-                    return True # Carbocations, sulfoniums, phosphonium intermediates
-
-                if symbol in ["Cl", "Br", "I"] and charge != 0:
-                    return True # Halonium ions or hypervalent halogen anomalies
-
-                if symbol == "O" and charge != 0:
-                    return True # Protonated oxonium (O+) or unstable local alkoxides (O-)
-
-                if symbol == "N" and charge != 0:
-                    # Capture un-neutralized iminium/ammonium states
                     return True
-
+                if symbol in ["Cl", "Br", "I"] and charge != 0:
+                    return True
+                if symbol == "O" and charge != 0:
+                    return True
+                if symbol == "N" and charge != 0:
+                    return True
         return False
 
     def execute_first_principles_step(self, substrate_mol, reagent_mol, control_type):
-        """Simulates an explicit arrow-pushing step using localized properties."""
+        """Simulates an explicit step using localized properties, gating by mechanism type."""
+        reagent_smiles = Chem.MolToSmiles(reagent_mol)
+        is_kinetic_base = reagent_smiles in self.kinetic_reagents
 
-        # 1. Identify best nucleophilic center in Reagent
-        best_nu_idx = None
-        for atom in reagent_mol.GetAtoms():
-            # If an atom has an explicit formal negative charge, prioritize it instantly
-            if atom.GetFormalCharge() < 0:
-                best_nu_idx = atom.GetIdx()
-                break
+        if is_kinetic_base:
+            # ── PATHWAY A: KINETIC DEPROTONATION (ENOLATE FORMATION) ──
+            pattern = Chem.MolFromSmarts("[CX3]=[OX1]")
+            match_indices = substrate_mol.GetSubstructMatches(pattern)
 
-        if best_nu_idx is None:
-            best_nu_idx = 0 # Fallback default to first atom if completely neutral
+            if not match_indices:
+                return None
 
-        # 2. Profile competing electrophilic centers in Substrate
-        electrophilic_sites = []
-        for atom in substrate_mol.GetAtoms():
-            if atom.GetSymbol() == "C":
-                # Check for standard leaving groups or polarizable bonds
-                has_leaving_group = any(n.GetSymbol() in ["Cl", "Br", "I", "O"] for n in atom.GetNeighbors())
-                
-                # Check current valence to ensure we don't exceed it without a LG
-                current_valence = sum(bond.GetBondTypeAsDouble() for bond in atom.GetBonds())
-                
-                if has_leaving_group or atom.GetHybridization() == Chem.HybridizationType.SP2:
+            carbonyl_idx = match_indices[0][0]
+            carbonyl_carbon = substrate_mol.GetAtomWithIdx(carbonyl_idx)
 
-                    e_score = self.calculator.get_net_electronic_score(substrate_mol, atom.GetIdx())
-                    sterics = self.calculator.calculate_sterics(atom)
+            alpha_sites = []
+            for n in carbonyl_carbon.GetNeighbors():
+                if n.GetSymbol() == "C" and n.GetHybridization() == Chem.HybridizationType.SP3:
+                    num_hs = n.GetTotalNumHs()
+                    if num_hs > 0:
+                        sterics = self.calculator.calculate_sterics(n)
+                        alpha_sites.append({"atom_idx": n.GetIdx(), "sterics": sterics})
 
-                    electrophilic_sites.append({
-                        "atom_idx": atom.GetIdx(),
-                        "electronic_score": e_score,
-                        "sterics": sterics,
-                        "has_lg": has_leaving_group,
-                        "valence": current_valence
-                    })
+            if not alpha_sites:
+                return None
 
-        if not electrophilic_sites:
-            return None
+            target_alpha = sorted(alpha_sites, key=lambda x: x["sterics"])[0]["atom_idx"]
+            editable_substrate = Chem.RWMol(substrate_mol)
 
-        # 3. Apply Transition State Gating Heuristics
-        # Filter for sites that can actually accept a new bond
-        valid_sites = [s for s in electrophilic_sites if s["has_lg"] or s["valence"] < 4]
-        if not valid_sites:
-            return None
+            for bond in editable_substrate.GetAtomWithIdx(carbonyl_idx).GetBonds():
+                if bond.GetOtherAtomIdx(carbonyl_idx) != target_alpha and bond.GetBondType() == Chem.BondType.DOUBLE:
+                    oxygen_idx = bond.GetOtherAtomIdx(carbonyl_idx)
+                    # Corrected RDKit API: Use GetBondBetweenAtoms().SetBondType()
+                    editable_substrate.GetBondBetweenAtoms(carbonyl_idx, oxygen_idx).SetBondType(Chem.BondType.SINGLE)
+                    editable_substrate.GetAtomWithIdx(oxygen_idx).SetFormalCharge(-1)
 
-        if control_type == "Kinetic":
-            # Sort primarily by lowest steric hindrance (path of least resistance)
-            target_site = sorted(valid_sites, key=lambda x: x["sterics"])[0]
+            # Corrected RDKit API: Use GetBondBetweenAtoms().SetBondType()
+            editable_substrate.GetBondBetweenAtoms(carbonyl_idx, target_alpha).SetBondType(Chem.BondType.DOUBLE)
+
+            # Fix 2: Valence Violation Fix
+            # Instead of GetNumExplicitHs, use GetNumImplicitHs to check for available hydrogens.
+            # We decrement the count by setting the explicit count and disabling further implicit updates,
+            # which prevents valence violations (e.g. 5-valent carbon) during sanitization.
+            alpha_atom = editable_substrate.GetAtomWithIdx(target_alpha)
+            current_hs = alpha_atom.GetNumImplicitHs()
+            if current_hs > 0:
+                alpha_atom.SetNumExplicitHs(current_hs - 1)
+                alpha_atom.SetNoImplicit(True)
+
+            product_mol = editable_substrate.GetMol()
+            Chem.SanitizeMol(product_mol)
+            return product_mol
+
         else:
-            # Sort primarily by highest electrophilic score (electron deficit)
-            target_site = sorted(valid_sites, key=lambda x: x["electronic_score"], reverse=True)[0]
+            # ── PATHWAY B: NUCLEOPHILIC ATTACK / SUBSTITUTION ──
+            best_nu_idx = None
+            for atom in reagent_mol.GetAtoms():
+                if atom.GetFormalCharge() < 0:
+                    best_nu_idx = atom.GetIdx()
+                    break
 
-        # 4. Generate Product via Graph Editing (Procedural Bond Swapping)
-        editable_substrate = Chem.RWMol(substrate_mol)
-        target_carbon_idx = target_site["atom_idx"]
+            if best_nu_idx is None:
+                best_nu_idx = 0
 
-        # Identify a leaving group to remove to maintain valence
-        leaving_group_idx = None
-        for n in editable_substrate.GetAtomWithIdx(target_carbon_idx).GetNeighbors():
-            if n.GetSymbol() in ["Cl", "Br", "I"]:
-                leaving_group_idx = n.GetIdx()
-                break
-        
-        if leaving_group_idx is not None:
-            editable_substrate.RemoveBond(target_carbon_idx, leaving_group_idx)
-            # For simplicity, we won't delete the leaving group atom, just detach it 
-            # (or we could delete it if it becomes an isolated node)
+            electrophilic_sites = []
+            for atom in substrate_mol.GetAtoms():
+                if atom.GetSymbol() == "C":
+                    has_leaving_group = any(n.GetSymbol() in ["Cl", "Br", "I", "O"] for n in atom.GetNeighbors())
+                    current_valence = sum(bond.GetBondTypeAsDouble() for bond in atom.GetBonds())
 
-        # Simulating a basic addition/substitution step: form a single bond between Nu and E+
-        new_atom_idx = editable_substrate.AddAtom(reagent_mol.GetAtomWithIdx(best_nu_idx))
-        editable_substrate.AddBond(target_carbon_idx, new_atom_idx, Chem.BondType.SINGLE)
+                    if has_leaving_group or atom.GetHybridization() == Chem.HybridizationType.SP2:
+                        e_score = self.calculator.get_net_electronic_score(substrate_mol, atom.GetIdx())
+                        sterics = self.calculator.calculate_sterics(atom)
 
-        # Standardize and return graph
-        product_mol = editable_substrate.GetMol()
-        
-        # Cleanup isolated atoms (like the leaving group we just detached)
-        final_editable = Chem.RWMol(product_mol)
-        isolated_indices = [a.GetIdx() for a in final_editable.GetAtoms() if a.GetDegree() == 0]
-        for idx in sorted(isolated_indices, reverse=True):
-            final_editable.RemoveAtom(idx)
-        
-        product_mol = final_editable.GetMol()
-        Chem.SanitizeMol(product_mol)
-        return product_mol
+                        electrophilic_sites.append({
+                            "atom_idx": atom.GetIdx(),
+                            "electronic_score": e_score,
+                            "sterics": sterics,
+                            "has_lg": has_leaving_group,
+                            "valence": current_valence
+                        })
+
+            if not electrophilic_sites:
+                return None
+
+            valid_sites = [s for s in electrophilic_sites if s["has_lg"] or s["valence"] < 4]
+            if not valid_sites:
+                return None
+
+            if control_type == "Kinetic":
+                target_site = sorted(valid_sites, key=lambda x: x["sterics"])[0]
+            else:
+                target_site = sorted(valid_sites, key=lambda x: x["electronic_score"], reverse=True)[0]
+
+            editable_substrate = Chem.RWMol(substrate_mol)
+            target_carbon_idx = target_site["atom_idx"]
+
+            leaving_group_idx = None
+            for n in editable_substrate.GetAtomWithIdx(target_carbon_idx).GetNeighbors():
+                if n.GetSymbol() in ["Cl", "Br", "I"]:
+                    leaving_group_idx = n.GetIdx()
+                    break
+
+            if leaving_group_idx is not None:
+                editable_substrate.RemoveBond(target_carbon_idx, leaving_group_idx)
+
+            nu_symbol = reagent_mol.GetAtomWithIdx(best_nu_idx).GetSymbol()
+            new_atom_idx = editable_substrate.AddAtom(Chem.Atom(nu_symbol))
+            editable_substrate.AddBond(target_carbon_idx, new_atom_idx, Chem.BondType.SINGLE)
+
+            product_mol = editable_substrate.GetMol()
+
+            final_editable = Chem.RWMol(product_mol)
+            isolated_indices = [a.GetIdx() for a in final_editable.GetAtoms() if a.GetDegree() == 0]
+            for idx in sorted(isolated_indices, reverse=True):
+                final_editable.RemoveAtom(idx)
+
+            product_mol = final_editable.GetMol()
+            Chem.SanitizeMol(product_mol)
+            return product_mol
 
     def process_reaction_pipeline(self, substrate_smiles, reagent_smiles):
         """The Master Execution Loop managing state resolution and intermediate rerouting."""
-
-        # Parse inputs
         substrate_mol = Chem.MolFromSmiles(substrate_smiles)
         reagent_mol = Chem.MolFromSmiles(reagent_smiles)
 
-        # Deduce environmental conditions algorithmically
         control_type = self.infer_environment(reagent_smiles)
-
         current_substrate = substrate_mol
         max_loops = 3
         loop_count = 0
@@ -207,11 +229,8 @@ class MolecularReactivityEngine:
 
         print(f"[Pipeline Activated] Conditions Deduced: {control_type} Control")
 
-        # THE STATE VALVE LOOP
         while loop_count < max_loops:
             loop_count += 1
-
-            # Run simulation step
             result_mol = self.execute_first_principles_step(current_substrate, reagent_mol, control_type)
 
             if not result_mol:
@@ -219,14 +238,11 @@ class MolecularReactivityEngine:
 
             current_smiles = Chem.MolToSmiles(result_mol)
 
-            # Check if our output molecule is actually an unstable transient intermediate
             if self.is_reactive_intermediate(result_mol):
                 execution_history.append(f"Step {loop_count} (Intermediate State Generated): {current_smiles}")
-                # Reroute intermediate as the incoming substrate for the next cycle
                 current_substrate = result_mol
                 continue
             else:
-                # The molecule is safe, neutral, and complete! Break out.
                 execution_history.append(f"Step {loop_count} (Stable Product Finalized): {current_smiles}")
                 break
 
@@ -238,7 +254,6 @@ class MolecularReactivityEngine:
             "final_product_smiles": current_smiles
         }
 
-
 # ==============================================================================
 # 3. VERIFICATION RUN
 # ==============================================================================
@@ -247,19 +262,25 @@ if __name__ == "__main__":
 
     print("=== SCENARIO A: KINETIC CONTROL WITH LDA ===")
     output_a = engine.process_reaction_pipeline(
-        substrate_smiles="CC(Cl)C",
+        substrate_smiles="CC(=O)CCBr",
         reagent_smiles="CC(C)[N-]C(C)C.[Li+]"
     )
-    for log in output_a["execution_history"]:
-        print(log)
-    print(f"Final Output: {output_a['final_product_smiles']}\n")
+    if "error" in output_a:
+        print(f"Reaction Status: {output_a['error']}")
+    else:
+        for log in output_a["execution_history"]:
+            print(log)
+        print(f"Final Output: {output_a['final_product_smiles']}")
+    print()
 
-    print("=== SCENARIO B: HALOGEN INTERMEDIATE VERIFICATION ===")
-    # Inputs: Testing an iodinated hydrocarbon matrix under default thermodynamic rules
+    print("=== SCENARIO B: THERMODYNAMIC SUBSTITUTION ===")
     output_b = engine.process_reaction_pipeline(
         substrate_smiles="CCI",
         reagent_smiles="O"
     )
-    for log in output_b["execution_history"]:
-        print(log)
-    print(f"Final Output: {output_b['final_product_smiles']}")
+    if "error" in output_b:
+        print(f"Reaction Status: {output_b['error']}")
+    else:
+        for log in output_b["execution_history"]:
+            print(log)
+        print(f"Final Output: {output_b['final_product_smiles']}")
