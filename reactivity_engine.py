@@ -57,20 +57,19 @@ class MolecularReactivityEngine:
         raw_kinetic = {"CC(C)[N-]C(C)C.[Li+]", "[O-]C(C)(C)C.[K+]"} # LDA, t-BuOK
         raw_thermo = {"O=S(=O)(O)O", "O"} # Strong acids, solvents
 
-        # Fix 1: Canonicalization Mismatch Fix
-        # Ensuring all reagents are stored in their canonical fragment order via MolFromSmiles -> MolToSmiles
-        # this ensures that salt complexes like LDA match correctly regardless of raw string ordering.
         self.kinetic_reagents = {Chem.MolToSmiles(Chem.MolFromSmiles(s)) for s in raw_kinetic if Chem.MolFromSmiles(s)}
         self.thermodynamic_reagents = {Chem.MolToSmiles(Chem.MolFromSmiles(s)) for s in raw_thermo if Chem.MolFromSmiles(s)}
 
     def infer_environment(self, reagent_smiles):
         """Automatically determines thermodynamic vs kinetic control based on reagents."""
-        # Consistently apply the same canonicalization logic to incoming strings
-        canonical_reagent = Chem.MolToSmiles(Chem.MolFromSmiles(reagent_smiles))
-        if canonical_reagent in self.kinetic_reagents:
-            return "Kinetic"
-        if canonical_reagent in self.thermodynamic_reagents:
-            return "Thermodynamic"
+        try:
+            canonical_reagent = Chem.MolToSmiles(Chem.MolFromSmiles(reagent_smiles))
+            if canonical_reagent in self.kinetic_reagents:
+                return "Kinetic"
+            if canonical_reagent in self.thermodynamic_reagents:
+                return "Thermodynamic"
+        except Exception:
+            pass
         return "Thermodynamic"
 
     def is_reactive_intermediate(self, mol):
@@ -96,6 +95,8 @@ class MolecularReactivityEngine:
 
     def execute_first_principles_step(self, substrate_mol, reagent_mol, control_type):
         """Simulates an explicit step using localized properties, gating by mechanism type."""
+
+        # FIX 1: Ensure incoming reagent string canonicalization matches our __init__ sets perfectly
         reagent_smiles = Chem.MolToSmiles(reagent_mol)
         is_kinetic_base = reagent_smiles in self.kinetic_reagents
 
@@ -107,7 +108,15 @@ class MolecularReactivityEngine:
             if not match_indices:
                 return None
 
-            carbonyl_idx = match_indices[0][0]
+            # FIX 2: Explicitly verify which index belongs to the Carbon atom to resolve the indexing blindspot
+            atom_0 = substrate_mol.GetAtomWithIdx(match_indices[0][0])
+            if atom_0.GetSymbol() == "C":
+                carbonyl_idx = match_indices[0][0]
+                oxygen_idx = match_indices[0][1]
+            else:
+                carbonyl_idx = match_indices[0][1]
+                oxygen_idx = match_indices[0][0]
+
             carbonyl_carbon = substrate_mol.GetAtomWithIdx(carbonyl_idx)
 
             alpha_sites = []
@@ -124,20 +133,14 @@ class MolecularReactivityEngine:
             target_alpha = sorted(alpha_sites, key=lambda x: x["sterics"])[0]["atom_idx"]
             editable_substrate = Chem.RWMol(substrate_mol)
 
-            for bond in editable_substrate.GetAtomWithIdx(carbonyl_idx).GetBonds():
-                if bond.GetOtherAtomIdx(carbonyl_idx) != target_alpha and bond.GetBondType() == Chem.BondType.DOUBLE:
-                    oxygen_idx = bond.GetOtherAtomIdx(carbonyl_idx)
-                    # Corrected RDKit API: Use GetBondBetweenAtoms().SetBondType()
-                    editable_substrate.GetBondBetweenAtoms(carbonyl_idx, oxygen_idx).SetBondType(Chem.BondType.SINGLE)
-                    editable_substrate.GetAtomWithIdx(oxygen_idx).SetFormalCharge(-1)
+            # Change C=O to C-O(-) safely using verified explicit indices
+            editable_substrate.GetBondBetweenAtoms(carbonyl_idx, oxygen_idx).SetBondType(Chem.BondType.SINGLE)
+            editable_substrate.GetAtomWithIdx(oxygen_idx).SetFormalCharge(-1)
 
-            # Corrected RDKit API: Use GetBondBetweenAtoms().SetBondType()
+            # Form C=C double bond at the kinetic alpha position
             editable_substrate.GetBondBetweenAtoms(carbonyl_idx, target_alpha).SetBondType(Chem.BondType.DOUBLE)
 
-            # Fix 2: Valence Violation Fix
-            # Instead of GetNumExplicitHs, use GetNumImplicitHs to check for available hydrogens.
-            # We decrement the count by setting the explicit count and disabling further implicit updates,
-            # which prevents valence violations (e.g. 5-valent carbon) during sanitization.
+            # Adjust implicit/explicit hydrogens cleanly to pass sanitization
             alpha_atom = editable_substrate.GetAtomWithIdx(target_alpha)
             current_hs = alpha_atom.GetNumImplicitHs()
             if current_hs > 0:
@@ -254,9 +257,7 @@ class MolecularReactivityEngine:
             "final_product_smiles": current_smiles
         }
 
-# ==============================================================================
-# 3. VERIFICATION RUN
-# ==============================================================================
+
 if __name__ == "__main__":
     engine = MolecularReactivityEngine()
 
