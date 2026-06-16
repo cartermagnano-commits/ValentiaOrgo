@@ -1,393 +1,947 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Orgo AI — Structure Analyzer</title>
-  <style>
-    :root {
-      --bg:       #0d1117;
-      --surface:  #161b22;
-      --border:   #30363d;
-      --blue:     #388bfd;
-      --blue-dim: rgba(56,139,253,.12);
-      --green:    #3fb950;
-      --red:      #f85149;
-      --text:     #c9d1d9;
-      --muted:    #8b949e;
-    }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orgo AI</title>
+<style>
+:root {
+  --bg:#0d1117; --surface:#161b22; --surface2:#21262d; --border:#30363d;
+  --blue:#388bfd; --blue-dim:rgba(56,139,253,.12); --green:#3fb950;
+  --red:#f85149; --yellow:#d29922; --purple:#a371f7;
+  --text:#c9d1d9; --muted:#8b949e;
+  --nav:220px; --chat:320px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);display:flex;min-height:100vh}
 
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+/* NAV */
+#sidebar{width:var(--nav);background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100}
+.nav-logo{padding:18px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.nav-logo .icon{font-size:26px}.nav-logo h1{font-size:15px;font-weight:700}.nav-logo p{font-size:11px;color:var(--muted)}
+.nav-sec{padding:14px 16px 4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
+.nav-link{display:flex;align-items:center;gap:9px;padding:9px 14px;font-size:13px;cursor:pointer;border-radius:6px;margin:1px 8px;color:var(--muted);transition:background .15s,color .15s;border:none;background:none;width:calc(100% - 16px);text-align:left}
+.nav-link:hover{background:var(--surface2);color:var(--text)}.nav-link.active{background:var(--blue-dim);color:var(--blue)}
+.nav-link .ni{font-size:15px;width:18px;text-align:center}
+.nav-bottom{margin-top:auto;padding:10px 8px;border-top:1px solid var(--border)}
 
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      min-height: 100dvh;
-    }
+/* MAIN */
+#main{margin-left:var(--nav);flex:1;min-height:100vh;transition:margin-right .3s}
+#main.chat-open{margin-right:var(--chat)}
+.page{display:none}.page.active{display:block}
 
-    /* ── Header ── */
-    header {
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      padding: 14px 20px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      position: sticky;
-      top: 0;
-      z-index: 10;
-    }
-    .logo {
-      font-size: 24px;
-      line-height: 1;
-    }
-    .header-text h1 { font-size: 16px; font-weight: 600; letter-spacing: -.2px; }
-    .header-text p  { font-size: 12px; color: var(--muted); }
+/* PAGE HEADER */
+.ph{background:var(--surface);border-bottom:1px solid var(--border);padding:18px 26px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+.ph-left h2{font-size:17px;font-weight:600}.ph-left p{font-size:12px;color:var(--muted);margin-top:2px}
+.ai-btn{display:flex;align-items:center;gap:7px;padding:7px 13px;background:var(--blue-dim);border:1px solid rgba(56,139,253,.3);color:var(--blue);border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;transition:background .2s}
+.ai-btn:hover{background:rgba(56,139,253,.2)}
+.pc{padding:22px 26px}
 
-    /* ── Main ── */
-    main { max-width: 680px; margin: 0 auto; padding: 24px 16px 48px; }
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 15px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:filter .15s,transform .1s}
+.btn:active{transform:scale(.97)}
+.btn-p{background:var(--blue);color:#fff}.btn-p:hover{filter:brightness(1.1)}
+.btn-s{background:var(--surface2);color:var(--text);border:1px solid var(--border)}.btn-s:hover{filter:brightness(1.1)}
+.btn-g{background:transparent;color:var(--muted);border:1px solid var(--border)}.btn-g:hover{color:var(--text);border-color:var(--text)}
+.btn-sm{padding:5px 11px;font-size:12px}
 
-    /* ── Drop zone ── */
-    #drop-zone {
-      border: 2px dashed var(--border);
-      border-radius: 14px;
-      padding: 48px 24px 40px;
-      text-align: center;
-      cursor: pointer;
-      transition: border-color .2s, background .2s;
-      user-select: none;
-    }
-    #drop-zone.drag-over {
-      border-color: var(--blue);
-      background: var(--blue-dim);
-    }
-    .dz-icon { font-size: 52px; margin-bottom: 16px; }
-    #drop-zone h2 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
-    #drop-zone p  { color: var(--muted); font-size: 14px; line-height: 1.5; max-width: 380px; margin: 0 auto 28px; }
+/* HOME */
+.welcome{background:linear-gradient(135deg,rgba(56,139,253,.13),rgba(163,113,247,.08));border:1px solid rgba(56,139,253,.2);border-radius:14px;padding:26px;margin-bottom:22px}
+.welcome h2{font-size:21px;font-weight:700;margin-bottom:7px}.welcome p{color:var(--muted);font-size:13px;line-height:1.7;max-width:580px}
+.home-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+.fc{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:22px;cursor:pointer;transition:border-color .2s,transform .15s}
+.fc:hover{border-color:var(--blue);transform:translateY(-2px)}
+.fc .icon{font-size:34px;margin-bottom:12px}.fc h3{font-size:15px;font-weight:600;margin-bottom:7px}.fc p{font-size:12px;color:var(--muted);line-height:1.6}
+.fc .badge{display:inline-block;margin-top:12px;font-size:10px;padding:2px 9px;border-radius:20px;font-weight:600}
+.b-blue{background:var(--blue-dim);color:var(--blue)}.b-green{background:rgba(63,185,80,.1);color:var(--green)}.b-purple{background:rgba(163,113,247,.1);color:var(--purple)}
 
-    .btn-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-    .btn {
-      display: inline-flex; align-items: center; gap: 8px;
-      padding: 13px 22px; border-radius: 10px; font-size: 15px; font-weight: 500;
-      cursor: pointer; border: none; transition: filter .15s, transform .1s;
-      min-width: 148px; justify-content: center; -webkit-tap-highlight-color: transparent;
-    }
-    .btn:active { transform: scale(.97); }
-    .btn-primary   { background: var(--blue); color: #fff; }
-    .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
-    .btn-primary:hover   { filter: brightness(1.12); }
-    .btn-secondary:hover { background: #21262d; }
+/* MECHANISM */
+.mech-grid{display:grid;grid-template-columns:1fr 270px;gap:18px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px}
+.rxn-types{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:10px}
+.rt{padding:9px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;text-align:center;cursor:pointer;font-size:11px;color:var(--muted);transition:all .2s}
+.rt:hover,.rt.active{border-color:var(--blue);color:var(--blue);background:var(--blue-dim)}
+.rt .ri{font-size:18px;display:block;margin-bottom:3px}
+.svg-area{background:#000;border:1px solid var(--border);border-radius:9px;min-height:190px;display:flex;align-items:center;justify-content:center;margin:14px 0;overflow:hidden}
+.step-track{display:flex;gap:7px;margin:12px 0}
+.sd{width:26px;height:26px;border-radius:50%;border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer;transition:all .2s}
+.sd.active{border-color:var(--blue);color:var(--blue);background:var(--blue-dim)}
+.sd.done{border-color:var(--green);color:var(--green);background:rgba(63,185,80,.1)}
+.step-box{background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:13px;font-size:13px;line-height:1.7;margin:12px 0}
+.mech-btns{display:flex;gap:9px;flex-wrap:wrap}
+.fact-row{display:flex;justify-content:space-between;margin-bottom:5px;font-size:12px}
+.fact-row span:last-child.ok{color:var(--green)}.fact-row span:last-child.no{color:var(--red)}
+.card h4{font-size:13px;font-weight:600;margin-bottom:8px}.card p{font-size:12px;color:var(--muted);line-height:1.6}
+.card p+p{margin-top:6px}
 
-    /* hidden file inputs */
-    #file-input, #camera-input { display: none; }
+/* PREDICT */
+.pred-row{display:grid;grid-template-columns:1fr 170px 1fr;gap:0;align-items:start}
+.mol-box{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:18px}
+.mol-box .lbl{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:11px}
+.mol-display{background:#000;border:1px solid var(--border);border-radius:9px;height:155px;display:flex;align-items:center;justify-content:center;margin-bottom:10px;overflow:hidden}
+.smiles-in{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 11px;color:var(--text);font-size:12px;font-family:monospace;margin-top:8px}
+.smiles-in:focus{outline:none;border-color:var(--blue)}
+.smiles-in::placeholder{color:var(--muted)}
+.arrow-col{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 10px;min-width:150px}
+.arrow-line{display:flex;align-items:center;width:100%;margin:14px 0}
+.ashaft{flex:1;height:2px;background:var(--muted)}
+.ahead{width:0;height:0;border-left:9px solid var(--muted);border-top:5px solid transparent;border-bottom:5px solid transparent}
+.chips{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;margin-top:10px}
+.chip{padding:3px 9px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;font-size:11px;cursor:pointer;transition:all .15s}
+.chip:hover,.chip.sel{border-color:var(--blue);color:var(--blue);background:var(--blue-dim)}
+.prod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-top:14px}
+.pc-card{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center;cursor:pointer;transition:border-color .2s}
+.pc-card:hover{border-color:var(--blue)}
+.pc-card .pimg{height:95px;display:flex;align-items:center;justify-content:center;margin-bottom:8px}
+.pc-card .pname{font-size:12px;font-weight:600;margin-bottom:3px}
+.pc-card .psmi{font-size:9px;color:var(--muted);font-family:monospace;word-break:break-all}
+.pc-card .pconf{display:inline-block;margin-top:7px;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600}
+.ch{background:rgba(63,185,80,.12);color:var(--green)}.cm{background:rgba(210,153,34,.12);color:var(--yellow)}
 
-    /* ── Loading ── */
-    #loading {
-      display: none;
-      flex-direction: column; align-items: center; justify-content: center;
-      padding: 64px 24px; text-align: center;
-    }
-    .spinner {
-      width: 52px; height: 52px;
-      border: 3px solid var(--border); border-top-color: var(--blue);
-      border-radius: 50%; animation: spin .7s linear infinite; margin-bottom: 20px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #loading p { color: var(--muted); font-size: 14px; line-height: 1.6; }
-    #loading small { font-size: 12px; }
+/* SYNTHESIS */
+.synth-tb{display:flex;gap:10px;align-items:center;background:var(--surface);border-bottom:1px solid var(--border);padding:12px 26px}
+.sig{display:flex;align-items:center;gap:7px;flex:1}
+.sig label{font-size:11px;color:var(--muted);white-space:nowrap}
+.si{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 11px;color:var(--text);font-size:12px;font-family:monospace}
+.si:focus{outline:none;border-color:var(--blue)}.si::placeholder{color:var(--muted)}
+.synth-sep{color:var(--muted);font-size:16px;padding:0 3px}
+.canvas-wrap{position:relative;height:calc(100vh - 195px);overflow:hidden;background:var(--bg);background-image:radial-gradient(circle,#30363d 1px,transparent 1px);background-size:24px 24px;cursor:default}
+#synth-svg{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:3}
+.legend{position:absolute;top:14px;left:14px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:11px 15px;z-index:10;min-width:200px}
+.legend h4{font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px}
+.leg-item{display:flex;align-items:center;gap:7px;font-size:12px;margin-bottom:5px;cursor:pointer;padding:3px;border-radius:5px;transition:background .15s}
+.leg-item:hover{background:var(--surface2)}
+.leg-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.leg-best{margin-left:auto;font-size:10px;color:var(--green)}
+.zoom-ctrl{position:absolute;bottom:14px;right:14px;display:flex;flex-direction:column;gap:5px;z-index:10}
+.zb{width:34px;height:34px;background:var(--surface);border:1px solid var(--border);border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:15px;color:var(--muted);transition:all .15s;user-select:none}
+.zb:hover{color:var(--text);border-color:var(--text)}
+.snode{position:absolute;background:var(--surface);border:2px solid var(--border);border-radius:11px;width:155px;cursor:grab;user-select:none;z-index:5;transition:box-shadow .2s}
+.snode:hover{box-shadow:0 4px 18px rgba(0,0,0,.45)}
+.snode.dragging{cursor:grabbing;box-shadow:0 8px 28px rgba(0,0,0,.65);z-index:20}
+.node-hd{padding:7px 11px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:space-between}
+.node-type{font-size:9px}
+.node-mol{height:85px;display:flex;align-items:center;justify-content:center;padding:6px;background:#000}
+.node-ft{padding:5px 11px;font-size:9px;color:var(--muted);font-family:monospace;word-break:break-all;border-top:1px solid var(--border)}
+.edge-lbl{position:absolute;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:3px 7px;font-size:10px;pointer-events:none;z-index:6;white-space:nowrap;line-height:1.4}
 
-    /* ── Results ── */
-    #results { display: none; margin-top: 0; }
-
-    .card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px; padding: 18px 20px; margin-bottom: 14px;
-    }
-    .card-label {
-      font-size: 11px; font-weight: 600; text-transform: uppercase;
-      letter-spacing: .7px; color: var(--muted); margin-bottom: 12px;
-    }
-
-    /* SMILES */
-    .smiles-row { display: flex; align-items: flex-start; gap: 10px; }
-    #smiles-text {
-      flex: 1; font-family: "SF Mono", "Fira Code", Consolas, monospace;
-      font-size: 13px; background: var(--bg); border: 1px solid var(--border);
-      border-radius: 8px; padding: 10px 12px; word-break: break-all; line-height: 1.6;
-      user-select: all;
-    }
-    #copy-btn {
-      flex-shrink: 0; padding: 10px 14px; background: var(--surface);
-      border: 1px solid var(--border); border-radius: 8px; color: var(--muted);
-      cursor: pointer; font-size: 13px; transition: all .2s; white-space: nowrap;
-    }
-    #copy-btn:hover { border-color: var(--blue); color: var(--blue); }
-
-    .badge {
-      display: inline-flex; align-items: center; gap: 5px;
-      padding: 4px 10px; border-radius: 20px; font-size: 12px;
-      font-weight: 600; margin-top: 10px;
-    }
-    .badge-ok  { background: rgba(63,185,80,.15); color: var(--green); }
-    .badge-bad { background: rgba(248,81,73,.15);  color: var(--red); }
-
-    /* Final image */
-    #final-img {
-      width: 100%; max-height: 380px; object-fit: contain;
-      border-radius: 8px; background: #000;
-    }
-
-    /* Stages grid */
-    .stages-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
-    }
-    @media (max-width: 420px) {
-      .stages-grid { grid-template-columns: repeat(2, 1fr); }
-    }
-    .stage-cell { text-align: center; }
-    .stage-cell img {
-      width: 100%; aspect-ratio: 1; object-fit: contain;
-      background: #000; border: 1px solid var(--border);
-      border-radius: 8px; padding: 4px; display: block;
-    }
-    .stage-cell span { font-size: 11px; color: var(--muted); margin-top: 5px; display: block; }
-
-    /* Error */
-    #error-box {
-      display: none; font-size: 13px; color: var(--red); line-height: 1.5;
-      background: rgba(248,81,73,.08); border: 1px solid rgba(248,81,73,.3);
-      border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;
-    }
-
-    /* Reset */
-    #reset-btn {
-      display: block; width: 100%; padding: 13px;
-      background: transparent; border: 1px solid var(--border);
-      border-radius: 10px; color: var(--muted); cursor: pointer;
-      font-size: 14px; transition: all .2s; margin-top: 4px;
-    }
-    #reset-btn:hover { border-color: var(--text); color: var(--text); }
-
-    /* Tips line */
-    .tips { font-size: 12px; color: var(--muted); text-align: center; margin-top: 16px; line-height: 1.6; }
-  </style>
+/* CHATBOT */
+#chatbot{position:fixed;top:0;right:0;bottom:0;width:var(--chat);background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;z-index:200;transform:translateX(100%);transition:transform .3s ease}
+#chatbot.open{transform:translateX(0)}
+.chat-hd{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.chat-hd-l{display:flex;align-items:center;gap:9px}
+.avatar{width:30px;height:30px;background:linear-gradient(135deg,var(--blue),var(--purple));border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px}
+.chat-hd h3{font-size:13px;font-weight:600}.chat-hd p{font-size:10px;color:var(--green)}
+.close-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px;border-radius:5px;transition:all .15s}
+.close-btn:hover{color:var(--text);background:var(--surface2)}
+.ctx-bar{padding:7px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px}
+.ctx-pill{font-size:10px;padding:2px 9px;border-radius:20px;background:var(--blue-dim);color:var(--blue);font-weight:500}
+.ctx-lbl{font-size:10px;color:var(--muted)}
+#chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+#chat-msgs::-webkit-scrollbar{width:3px}
+#chat-msgs::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.msg{display:flex;flex-direction:column;gap:3px;max-width:92%}
+.msg.user{align-self:flex-end;align-items:flex-end}.msg.ai{align-self:flex-start;align-items:flex-start}
+.bubble{padding:9px 13px;border-radius:13px;font-size:12px;line-height:1.65}
+.msg.user .bubble{background:var(--blue);color:#fff;border-bottom-right-radius:3px}
+.msg.ai .bubble{background:var(--surface2);color:var(--text);border-bottom-left-radius:3px;border:1px solid var(--border)}
+.mtime{font-size:9px;color:var(--muted);padding:0 3px}
+.chat-sugs{padding:7px 14px;display:flex;flex-wrap:wrap;gap:5px;border-top:1px solid var(--border)}
+.sug{font-size:10px;padding:4px 9px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;cursor:pointer;color:var(--muted);transition:all .15s;white-space:nowrap}
+.sug:hover{border-color:var(--blue);color:var(--blue)}
+.chat-ia{padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:7px}
+.chat-ia textarea{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:9px 11px;color:var(--text);font-size:12px;font-family:inherit;resize:none;height:40px;line-height:1.4}
+.chat-ia textarea:focus{outline:none;border-color:var(--blue)}
+.chat-ia textarea::placeholder{color:var(--muted)}
+.send{width:38px;height:40px;background:var(--blue);border:none;border-radius:9px;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
+.send:hover{filter:brightness(1.1)}
+.typing .bubble{display:flex;gap:4px;align-items:center;padding:13px}
+.tdot{width:5px;height:5px;border-radius:50%;background:var(--muted);animation:tb .6s infinite}
+.tdot:nth-child(2){animation-delay:.1s}.tdot:nth-child(3){animation-delay:.2s}
+@keyframes tb{0%,60%,100%{transform:translateY(0)}30%{transform:translateY(-5px)}}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
 </head>
 <body>
 
-<header>
-  <div class="logo">⚗️</div>
-  <div class="header-text">
-    <h1>Orgo AI</h1>
-    <p>Chemical Structure Analyzer</p>
+<!-- ═══════════════════════════ SIDEBAR ═══════════════════════════ -->
+<nav id="sidebar">
+  <div class="nav-logo">
+    <div class="icon">⚗️</div>
+    <div><h1>Orgo AI</h1><p>Chemistry Assistant</p></div>
   </div>
-</header>
+  <div class="nav-sec">Tools</div>
+  <button class="nav-link active" id="nav-home"      onclick="nav('home')"><span class="ni">🏠</span>Home</button>
+  <button class="nav-link"        id="nav-mechanism" onclick="nav('mechanism')"><span class="ni">⚡</span>Mechanisms</button>
+  <button class="nav-link"        id="nav-predict"   onclick="nav('predict')"><span class="ni">🔮</span>Predict Products</button>
+  <button class="nav-link"        id="nav-synthesis" onclick="nav('synthesis')"><span class="ni">🔗</span>Synthesis Pipeline</button>
+  <div class="nav-sec">Analysis</div>
+  <button class="nav-link"        id="nav-analyzer"  onclick="nav('analyzer')"><span class="ni">🔬</span>Structure Analyzer</button>
+  <div class="nav-bottom">
+    <button class="nav-link" style="color:var(--muted)"><span class="ni">⚙️</span>Settings</button>
+  </div>
+</nav>
 
-<main>
+<!-- ═══════════════════════════ MAIN ═══════════════════════════ -->
+<div id="main">
 
-  <!-- ── Upload UI ── -->
-  <div id="upload-ui">
-    <div id="drop-zone">
-      <input type="file" id="file-input"   accept="image/*,.heic,.heif">
-      <input type="file" id="camera-input" accept="image/*" capture="environment">
+<!-- ───────────────── HOME ───────────────── -->
+<div id="page-home" class="page active">
+<div class="pc" style="max-width:860px">
+  <div class="welcome">
+    <h2>Welcome to Orgo AI</h2>
+    <p>Your AI-powered organic chemistry assistant. Practice mechanisms with step-by-step arrow-pushing, predict reaction products, and explore multi-step synthesis routes as an interactive node graph — with an AI tutor available on every page.</p>
+  </div>
+  <div class="home-grid">
+    <div class="fc" onclick="nav('mechanism')">
+      <div class="icon">⚡</div><h3>Mechanism Practice</h3>
+      <p>Step through SN1, SN2, E1, E2, addition, and more with animated arrow-pushing. Get instant feedback on each step.</p>
+      <span class="badge b-blue">Interactive</span>
+    </div>
+    <div class="fc" onclick="nav('predict')">
+      <div class="icon">🔮</div><h3>Predict Products</h3>
+      <p>Input a reactant SMILES and choose reagents. See predicted major and minor products with selectivity scores.</p>
+      <span class="badge b-green">AI-Powered</span>
+    </div>
+    <div class="fc" onclick="nav('synthesis')">
+      <div class="icon">🔗</div><h3>Synthesis Pipeline</h3>
+      <p>Enter a starting material and target molecule. Explore multiple retrosynthetic routes as a draggable node graph.</p>
+      <span class="badge b-purple">Node Editor</span>
+    </div>
+    <div class="fc" onclick="nav('analyzer')">
+      <div class="icon">🔬</div><h3>Structure Analyzer</h3>
+      <p>Upload a photo of any drawn structure and extract SMILES instantly using DECIMER AI.</p>
+      <span class="badge b-blue">DECIMER</span>
+    </div>
+  </div>
+</div>
+</div>
 
-      <div class="dz-icon">🔬</div>
-      <h2>Analyze a Structure</h2>
-      <p>Upload a photo of a molecule from a textbook or problem set — or take one right now on your phone.</p>
+<!-- ───────────────── MECHANISMS ───────────────── -->
+<div id="page-mechanism" class="page">
+  <div class="ph">
+    <div class="ph-left"><h2>⚡ Mechanism Practice</h2><p>Step through arrow-pushing mechanisms with instant feedback</p></div>
+    <button class="ai-btn" onclick="openChat('mechanism')">🤖 Ask AI Tutor</button>
+  </div>
+  <div class="pc">
+    <div class="mech-grid">
+      <div>
+        <!-- Reaction type picker -->
+        <div class="card" style="margin-bottom:14px">
+          <h4>Reaction Type</h4>
+          <div class="rxn-types">
+            <div class="rt active" onclick="setRxn(this,'sn2')"><span class="ri">💥</span>SN2</div>
+            <div class="rt"        onclick="setRxn(this,'sn1')"><span class="ri">🌀</span>SN1</div>
+            <div class="rt"        onclick="setRxn(this,'e2')"><span class="ri">↗️</span>E2</div>
+            <div class="rt"        onclick="setRxn(this,'add')"><span class="ri">➕</span>Addition</div>
+          </div>
+        </div>
 
-      <div class="btn-row">
-        <button class="btn btn-primary"   id="browse-btn">📁 Choose File</button>
-        <button class="btn btn-secondary" id="camera-btn">📷 Take Photo</button>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+            <div>
+              <div style="font-size:14px;font-weight:600" id="rxn-title">SN2 — Backside Attack</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:2px" id="rxn-sub">CH₃Br + OH⁻ → CH₃OH + Br⁻</div>
+            </div>
+            <div style="display:flex;gap:6px">
+              <span style="padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:var(--blue-dim);color:var(--blue)">Bimolecular</span>
+              <span style="padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:rgba(63,185,80,.1);color:var(--green)">Concerted</span>
+            </div>
+          </div>
+
+          <div class="step-track" id="step-track">
+            <div class="sd done">1</div>
+            <div class="sd active">2</div>
+            <div class="sd">3</div>
+          </div>
+
+          <div class="svg-area" id="mech-svg"></div>
+
+          <div class="step-box" id="step-box">
+            <strong style="color:var(--blue)">Step 2 of 3 — Transition State</strong><br>
+            The nucleophile (OH⁻) attacks the back of the electrophilic carbon, forming a pentacoordinate transition state.
+            The C–Br bond stretches and weakens as the C–O bond begins to form.
+          </div>
+
+          <div class="mech-btns">
+            <button class="btn btn-s" onclick="mechStep(-1)">← Previous</button>
+            <button class="btn btn-p" onclick="mechStep(1)">Next Step →</button>
+            <button class="btn btn-g btn-sm" style="margin-left:auto" onclick="resetMech()">↩ Reset</button>
+          </div>
+
+          <div id="mech-done" style="display:none;margin-top:12px;padding:12px;background:rgba(63,185,80,.07);border:1px solid rgba(63,185,80,.22);border-radius:8px;font-size:12px;color:var(--green)">
+            ✓ Complete — SN2 proceeds via a single concerted step. Configuration inverts (Walden inversion). No carbocation intermediate.
+          </div>
+        </div>
+      </div>
+
+      <!-- Sidebar -->
+      <div style="display:flex;flex-direction:column;gap:13px">
+        <div class="card">
+          <h4>Key Facts</h4>
+          <p>SN2 is a concerted substitution — bond formation and breaking are simultaneous, giving clean stereochemical inversion.</p>
+        </div>
+        <div class="card">
+          <h4>Rate Law</h4>
+          <p>Rate = k[Nu][Substrate]</p>
+          <p style="margin-top:6px">Second-order overall. Both concentrations affect the rate.</p>
+        </div>
+        <div class="card">
+          <h4>Favorability</h4>
+          <div style="margin-top:8px">
+            <div class="fact-row"><span>Strong nucleophile</span><span class="ok">✓ Favors</span></div>
+            <div class="fact-row"><span>Primary substrate</span><span class="ok">✓ Favors</span></div>
+            <div class="fact-row"><span>Tertiary substrate</span><span class="no">✗ Hinders</span></div>
+            <div class="fact-row"><span>Polar aprotic solvent</span><span class="ok">✓ Favors</span></div>
+            <div class="fact-row" style="margin:0"><span>Steric bulk</span><span class="no">✗ Hinders</span></div>
+          </div>
+        </div>
+        <button class="btn btn-p" style="width:100%;justify-content:center" onclick="openChat('sn2')">🤖 Ask about SN2</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ───────────────── PREDICT PRODUCTS ───────────────── -->
+<div id="page-predict" class="page">
+  <div class="ph">
+    <div class="ph-left"><h2>🔮 Predict Products</h2><p>Select a reactant and reagents to see predicted products</p></div>
+    <button class="ai-btn" onclick="openChat('predict')">🤖 Ask AI Tutor</button>
+  </div>
+  <div class="pc">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:22px;margin-bottom:18px">
+      <div class="pred-row">
+        <!-- Reactant -->
+        <div class="mol-box" style="background:transparent;border:none;padding:0">
+          <div class="lbl">Reactant</div>
+          <div class="mol-display" id="reactant-box">
+            <svg viewBox="0 0 100 100" width="90" height="90">
+              <polygon points="50,10 84,30 84,70 50,90 16,70 16,30" fill="none" stroke="#c9d1d9" stroke-width="2.5"/>
+              <circle cx="50" cy="50" r="18" fill="none" stroke="#388bfd" stroke-width="1.8" opacity=".65"/>
+            </svg>
+          </div>
+          <input class="smiles-in" type="text" value="c1ccccc1" placeholder="SMILES…" id="r-smiles">
+        </div>
+
+        <!-- Arrow + reagents -->
+        <div class="arrow-col">
+          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:9px">Reagents</div>
+          <div class="arrow-line"><div class="ashaft"></div><div class="ahead"></div></div>
+          <div class="chips">
+            <div class="chip sel" onclick="toggleChip(this)">HNO₃</div>
+            <div class="chip sel" onclick="toggleChip(this)">H₂SO₄</div>
+            <div class="chip" onclick="toggleChip(this)">Br₂/FeBr₃</div>
+          </div>
+          <div style="margin-top:11px;text-align:center">
+            <button class="btn btn-p btn-sm" onclick="runPredict()">Predict →</button>
+          </div>
+        </div>
+
+        <!-- Product -->
+        <div>
+          <div class="lbl">Major Product</div>
+          <div class="mol-display" id="product-box" style="transition:opacity .4s">
+            <svg viewBox="0 0 130 100" width="120" height="90">
+              <polygon points="50,10 84,30 84,70 50,90 16,70 16,30" fill="none" stroke="#c9d1d9" stroke-width="2.5"/>
+              <circle cx="50" cy="50" r="18" fill="none" stroke="#388bfd" stroke-width="1.8" opacity=".65"/>
+              <line x1="84" y1="50" x2="98" y2="50" stroke="#c9d1d9" stroke-width="2"/>
+              <text x="100" y="46" font-size="11" fill="#f85149" font-family="monospace">N</text>
+              <line x1="108" y1="43" x2="114" y2="37" stroke="#f85149" stroke-width="1.5"/>
+              <text x="116" y="36" font-size="9" fill="#d29922" font-family="monospace">O</text>
+              <line x1="108" y1="48" x2="114" y2="54" stroke="#f85149" stroke-width="1.5"/>
+              <text x="116" y="58" font-size="9" fill="#d29922" font-family="monospace">O</text>
+            </svg>
+          </div>
+          <div id="prod-smiles" style="font-family:monospace;font-size:10px;color:var(--muted);text-align:center;margin-top:6px">c1ccc(cc1)[N+](=O)[O-]</div>
+        </div>
       </div>
     </div>
 
-    <p class="tips">
-      Works with JPG, PNG, HEIC (iPhone) · Drop an image anywhere · DECIMER takes ~20 s
-    </p>
-
-    <!-- Loading lives inside upload-ui so it replaces the drop zone -->
-    <div id="loading">
-      <div class="spinner"></div>
-      <p>Analyzing structure…<br><small>Running preprocessing + DECIMER (~20 s)</small></p>
-    </div>
-  </div>
-
-  <!-- ── Results ── -->
-  <div id="results">
-
-    <div id="error-box"></div>
-
-    <div class="card" id="smiles-card">
-      <div class="card-label">SMILES</div>
-      <div class="smiles-row">
-        <div id="smiles-text">—</div>
-        <button id="copy-btn" onclick="copySMILES()">Copy</button>
+    <!-- Product cards -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:18px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:14px;font-weight:600">Predicted Products</div>
+        <div style="font-size:11px;color:var(--muted)">Electrophilic Aromatic Substitution (EAS)</div>
       </div>
-      <div id="validity"></div>
+      <div class="prod-grid">
+        <div class="pc-card" onclick="pickProd(this)">
+          <div class="pimg">
+            <svg viewBox="0 0 110 90" width="100" height="80">
+              <polygon points="45,8 76,24 76,56 45,72 14,56 14,24" fill="none" stroke="#c9d1d9" stroke-width="2"/>
+              <circle cx="45" cy="40" r="14" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".6"/>
+              <line x1="76" y1="40" x2="90" y2="40" stroke="#c9d1d9" stroke-width="1.8"/>
+              <text x="92" y="37" font-size="10" fill="#f85149" font-family="monospace">NO₂</text>
+            </svg>
+          </div>
+          <div class="pname">Nitrobenzene</div>
+          <div class="psmi">c1ccc(cc1)[N+](=O)[O-]</div>
+          <span class="pconf ch">Major · 94%</span>
+        </div>
+        <div class="pc-card" onclick="pickProd(this)">
+          <div class="pimg">
+            <svg viewBox="0 0 120 90" width="108" height="80">
+              <polygon points="50,8 81,24 81,56 50,72 19,56 19,24" fill="none" stroke="#c9d1d9" stroke-width="2"/>
+              <circle cx="50" cy="40" r="14" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".6"/>
+              <text x="19" y="22" font-size="9" fill="#f85149" font-family="monospace">O₂N</text>
+              <line x1="81" y1="40" x2="95" y2="40" stroke="#c9d1d9" stroke-width="1.8"/>
+              <text x="97" y="37" font-size="9" fill="#f85149" font-family="monospace">NO₂</text>
+            </svg>
+          </div>
+          <div class="pname">1,3-Dinitrobenzene</div>
+          <div class="psmi">c1cc([N+]...)cc([N+]...)c1</div>
+          <span class="pconf cm">Minor · 5%</span>
+        </div>
+        <div class="pc-card" onclick="pickProd(this)">
+          <div class="pimg">
+            <svg viewBox="0 0 110 100" width="100" height="90">
+              <polygon points="50,14 81,30 81,62 50,78 19,62 19,30" fill="none" stroke="#c9d1d9" stroke-width="2"/>
+              <circle cx="50" cy="46" r="14" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".6"/>
+              <line x1="50" y1="14" x2="50" y2="4" stroke="#c9d1d9" stroke-width="1.8"/>
+              <text x="38" y="2" font-size="9" fill="#f85149" font-family="monospace">NO₂</text>
+            </svg>
+          </div>
+          <div class="pname">ortho-Nitrobenzene</div>
+          <div class="psmi">Oc1ccccc1[N+](=O)[O-]</div>
+          <span class="pconf cm">Trace · 1%</span>
+        </div>
+      </div>
     </div>
-
-    <div class="card">
-      <div class="card-label">Processed Image</div>
-      <img id="final-img" src="" alt="Processed image">
-    </div>
-
-    <div class="card">
-      <div class="card-label">Pipeline Stages</div>
-      <div class="stages-grid" id="stages-grid"></div>
-    </div>
-
-    <button id="reset-btn" onclick="reset()">↩ Analyze Another Structure</button>
   </div>
+</div>
 
-</main>
+<!-- ───────────────── SYNTHESIS PIPELINE ───────────────── -->
+<div id="page-synthesis" class="page">
+  <div class="ph">
+    <div class="ph-left"><h2>🔗 Synthesis Pipeline</h2><p>Drag nodes, explore routes — retrosynthesis from start to target</p></div>
+    <button class="ai-btn" onclick="openChat('synthesis')">🤖 Ask AI Tutor</button>
+  </div>
+  <div class="synth-tb">
+    <div class="sig"><label>Start</label><input class="si" id="s-start" type="text" value="c1ccccc1" placeholder="Reactant SMILES…"></div>
+    <div class="synth-sep">→</div>
+    <div class="sig"><label>Target</label><input class="si" id="s-target" type="text" value="CC(=O)Oc1ccccc1C(=O)O" placeholder="Target SMILES…"></div>
+    <button class="btn btn-p" onclick="buildGraph()">Find Routes</button>
+    <button class="btn btn-g btn-sm" onclick="resetGraph()">Reset</button>
+  </div>
+  <div class="canvas-wrap" id="synth-canvas">
+    <svg id="synth-svg"></svg>
+    <div class="legend">
+      <h4>Routes</h4>
+      <div class="leg-item" onclick="toggleRoute('r1')">
+        <div class="leg-dot" style="background:#388bfd"></div>
+        Route 1 — Kolbe-Schmitt
+        <span class="leg-best">★ Best</span>
+      </div>
+      <div class="leg-item" onclick="toggleRoute('r2')">
+        <div class="leg-dot" style="background:#a371f7"></div>
+        Route 2 — Via Toluene
+      </div>
+    </div>
+    <div class="zoom-ctrl">
+      <div class="zb" onclick="doZoom(1.15)" title="Zoom in">+</div>
+      <div class="zb" onclick="doZoom(1/1.15)" title="Zoom out">−</div>
+      <div class="zb" onclick="resetZoom()" title="Reset view">⊡</div>
+    </div>
+  </div>
+</div>
 
+<!-- ───────────────── ANALYZER ───────────────── -->
+<div id="page-analyzer" class="page">
+  <div class="ph">
+    <div class="ph-left"><h2>🔬 Structure Analyzer</h2><p>Upload a molecule image to extract SMILES via DECIMER AI</p></div>
+  </div>
+  <div class="pc" style="max-width:660px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:26px">
+      <div id="ana-drop"
+           style="border:2px dashed var(--border);border-radius:11px;padding:44px;text-align:center;cursor:pointer;transition:all .2s"
+           onclick="document.getElementById('ana-file').click()"
+           ondragover="event.preventDefault();this.style.borderColor='var(--blue)';this.style.background='var(--blue-dim)'"
+           ondragleave="this.style.borderColor='var(--border)';this.style.background=''"
+           ondrop="anaDrop(event)">
+        <input type="file" id="ana-file" accept="image/*,.heic,.heif" style="display:none" onchange="anaFile(this.files[0])">
+        <div style="font-size:44px;margin-bottom:14px">🔬</div>
+        <div style="font-size:15px;font-weight:600;margin-bottom:7px">Drop a Molecule Image</div>
+        <p style="color:var(--muted);font-size:13px;line-height:1.6">Supports JPG, PNG, HEIC (iPhone photos).<br>Runs your preprocessing pipeline + DECIMER (~20 s).</p>
+        <button class="btn btn-p" style="margin-top:16px;pointer-events:none">📁 Choose File</button>
+      </div>
+      <div id="ana-loading" style="display:none;text-align:center;padding:32px">
+        <div style="width:44px;height:44px;border:3px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 14px"></div>
+        <p style="color:var(--muted);font-size:13px">Analyzing structure…<br><small>Preprocessing + DECIMER (~20 s)</small></p>
+      </div>
+      <div id="ana-result" style="display:none;margin-top:18px">
+        <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:8px">SMILES Result</div>
+        <div id="ana-smiles" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:11px;font-family:monospace;font-size:13px;word-break:break-all"></div>
+        <button class="btn btn-s btn-sm" style="margin-top:10px" onclick="anaReset()">↩ Analyze Another</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- #main -->
+
+<!-- ═══════════════════════════ CHATBOT ═══════════════════════════ -->
+<div id="chatbot">
+  <div class="chat-hd">
+    <div class="chat-hd-l">
+      <div class="avatar">🤖</div>
+      <div><h3>Orgo AI Tutor</h3><p>● Online</p></div>
+    </div>
+    <button class="close-btn" onclick="closeChat()">✕</button>
+  </div>
+  <div class="ctx-bar">
+    <span class="ctx-lbl">Context:</span>
+    <span class="ctx-pill" id="ctx-pill">General</span>
+  </div>
+  <div id="chat-msgs">
+    <div class="msg ai">
+      <div class="bubble">Hi! I'm your Orgo AI tutor. Ask me anything — mechanisms, selectivity, reaction conditions, synthesis strategy. What are you working on?</div>
+      <div class="mtime">Now</div>
+    </div>
+  </div>
+  <div class="chat-sugs" id="chat-sugs">
+    <div class="sug" onclick="sendSug(this)">Why SN2 not SN1?</div>
+    <div class="sug" onclick="sendSug(this)">Walden inversion?</div>
+    <div class="sug" onclick="sendSug(this)">Markovnikov's rule?</div>
+    <div class="sug" onclick="sendSug(this)">Explain EAS</div>
+  </div>
+  <div class="chat-ia">
+    <textarea id="chat-in" placeholder="Ask about this reaction…"
+              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"></textarea>
+    <button class="send" onclick="sendMsg()">↑</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════ SCRIPT ═══════════════════════════ -->
 <script>
-  const dropZone   = document.getElementById('drop-zone');
-  const fileInput  = document.getElementById('file-input');
-  const camInput   = document.getElementById('camera-input');
-  const loading    = document.getElementById('loading');
-  const uploadUI   = document.getElementById('upload-ui');
-  const results    = document.getElementById('results');
-  const errorBox   = document.getElementById('error-box');
+// ── Navigation ──────────────────────────────────────────────────────────────
+function nav(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  const nl = document.getElementById('nav-' + page);
+  if (nl) nl.classList.add('active');
+  if (page === 'synthesis' && !synthReady) { synthReady = true; setTimeout(buildGraph, 60); }
+}
 
-  // ── Wire up buttons ──
-  document.getElementById('browse-btn').addEventListener('click', () => fileInput.click());
-  document.getElementById('camera-btn').addEventListener('click', () => camInput.click());
-  fileInput.addEventListener('change',  () => fileInput.files[0]  && submit(fileInput.files[0]));
-  camInput.addEventListener('change',   () => camInput.files[0]   && submit(camInput.files[0]));
+// ── Mechanism ────────────────────────────────────────────────────────────────
+const STEPS = [
+  {
+    title: 'Step 1 of 3 — Reactants',
+    body: 'The nucleophile OH⁻ and substrate CH₃Br are in solution. OH⁻ is a strong, small nucleophile. The C–Br bond is polarized (C<sup>δ+</sup>–Br<sup>δ−</sup>) making carbon electrophilic.',
+    svg: `<svg viewBox="0 0 600 190" style="width:100%;max-height:175px">
+      <text x="70"  y="100" font-family="monospace" font-size="17" fill="#3fb950" text-anchor="middle">HO⁻</text>
+      <text x="70"  y="120" font-family="sans-serif" font-size="10" fill="#8b949e" text-anchor="middle">nucleophile</text>
+      <text x="300" y="55"  font-family="monospace" font-size="13" fill="#c9d1d9" text-anchor="middle">H</text>
+      <text x="300" y="108" font-family="monospace" font-size="18" fill="#c9d1d9" text-anchor="middle">C</text>
+      <text x="260" y="138" font-family="monospace" font-size="13" fill="#c9d1d9" text-anchor="middle">H</text>
+      <text x="340" y="138" font-family="monospace" font-size="13" fill="#c9d1d9" text-anchor="middle">H</text>
+      <line x1="300" y1="60" x2="300" y2="102" stroke="#c9d1d9" stroke-width="2"/>
+      <line x1="267" y1="127" x2="290" y2="112" stroke="#c9d1d9" stroke-width="2"/>
+      <line x1="310" y1="112" x2="334" y2="127" stroke="#c9d1d9" stroke-width="2"/>
+      <line x1="313" y1="105" x2="375" y2="105" stroke="#c9d1d9" stroke-width="2"/>
+      <text x="90" y="100" font-family="monospace" font-size="14" fill="#8b949e">· · · · · · · · · · · · ·</text>
+      <text x="410" y="102" font-family="monospace" font-size="16" fill="#f85149" text-anchor="middle">Br</text>
+      <text x="410" y="120" font-family="sans-serif" font-size="10" fill="#8b949e" text-anchor="middle">leaving group</text>
+      <text x="300" y="180" font-family="sans-serif" font-size="11" fill="#8b949e" text-anchor="middle">Nucleophile approaching — C is electrophilic due to C–Br polarisation</text>
+    </svg>`
+  },
+  {
+    title: 'Step 2 of 3 — Transition State [‡]',
+    body: 'OH⁻ attacks from the <strong>back</strong> (anti to Br). A pentacoordinate transition state forms — carbon has partial bonds to both O and Br simultaneously (δ−). This is the highest-energy point on the reaction coordinate.',
+    svg: `<svg viewBox="0 0 600 190" style="width:100%;max-height:175px">
+      <defs>
+        <marker id="ab" markerWidth="8" markerHeight="7" refX="7" refY="3.5" orient="auto"><polygon points="0 0,8 3.5,0 7" fill="#388bfd"/></marker>
+        <marker id="ar" markerWidth="8" markerHeight="7" refX="7" refY="3.5" orient="auto"><polygon points="0 0,8 3.5,0 7" fill="#f85149"/></marker>
+      </defs>
+      <text x="62" y="98" font-family="monospace" font-size="16" fill="#3fb950" text-anchor="middle">HO⁻</text>
+      <path d="M98,93 Q185,55 243,93" stroke="#388bfd" stroke-width="2" fill="none" marker-end="url(#ab)"/>
+      <circle cx="300" cy="95" r="30" fill="#161b22" stroke="#d29922" stroke-width="2" stroke-dasharray="5,3"/>
+      <text x="300" y="100" font-family="monospace" font-size="15" fill="#d29922" text-anchor="middle">C‡</text>
+      <text x="300" y="78"  font-family="monospace" font-size="11" fill="#8b949e" text-anchor="middle">δ−</text>
+      <text x="300" y="52"  font-family="monospace" font-size="12" fill="#c9d1d9" text-anchor="middle">H</text>
+      <text x="264" y="126" font-family="monospace" font-size="12" fill="#c9d1d9" text-anchor="middle">H</text>
+      <text x="336" y="126" font-family="monospace" font-size="12" fill="#c9d1d9" text-anchor="middle">H</text>
+      <path d="M356,92 Q435,55 494,92" stroke="#f85149" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+      <text x="530" y="98" font-family="monospace" font-size="16" fill="#f85149" text-anchor="middle">Br⁻</text>
+      <text x="300" y="148" font-family="sans-serif" font-size="10" fill="#d29922" text-anchor="middle">[ transition state — no intermediate ]</text>
+      <text x="300" y="178" font-family="sans-serif" font-size="11" fill="#388bfd" text-anchor="middle">Configuration inverting (Walden inversion)</text>
+    </svg>`
+  },
+  {
+    title: 'Step 3 of 3 — Products',
+    body: 'The C–Br bond breaks completely and Br⁻ departs. The C–O bond forms fully. The three hydrogen substituents have <strong>inverted</strong> — the molecule is like an umbrella flipping in the wind. Product: methanol.',
+    svg: `<svg viewBox="0 0 600 190" style="width:100%;max-height:175px">
+      <text x="170" y="75" font-family="monospace" font-size="16" fill="#3fb950" text-anchor="middle">HO</text>
+      <line x1="195" y1="70" x2="255" y2="93" stroke="#c9d1d9" stroke-width="2"/>
+      <text x="300" y="106" font-family="monospace" font-size="18" fill="#c9d1d9" text-anchor="middle">C</text>
+      <text x="300" y="55"  font-family="monospace" font-size="13" fill="#c9d1d9" text-anchor="middle">H</text>
+      <text x="262" y="134" font-family="monospace" font-size="13" fill="#c9d1d9" text-anchor="middle">H</text>
+      <text x="338" y="134" font-family="monospace" font-size="13" fill="#c9d1d9" text-anchor="middle">H</text>
+      <line x1="300" y1="60" x2="300" y2="100" stroke="#c9d1d9" stroke-width="2"/>
+      <line x1="268" y1="125" x2="292" y2="110" stroke="#c9d1d9" stroke-width="2"/>
+      <line x1="310" y1="110" x2="334" y2="125" stroke="#c9d1d9" stroke-width="2"/>
+      <circle cx="300" cy="105" r="38" fill="none" stroke="#3fb950" stroke-width="1.5" opacity=".35"/>
+      <text x="460" y="98" font-family="monospace" font-size="16" fill="#f85149" text-anchor="middle">Br⁻</text>
+      <text x="460" y="116" font-family="sans-serif" font-size="10" fill="#8b949e" text-anchor="middle">departed</text>
+      <text x="300" y="178" font-family="sans-serif" font-size="11" fill="#3fb950" text-anchor="middle">✓ Methanol formed — configuration fully inverted</text>
+    </svg>`
+  }
+];
 
-  // ── Drag and drop ──
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-  dropZone.addEventListener('dragleave', ()  => dropZone.classList.remove('drag-over'));
-  dropZone.addEventListener('drop', e => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-over');
-    const f = e.dataTransfer.files[0];
-    if (f) submit(f);
+let step = 1;
+renderStep();
+
+function renderStep() {
+  const s = STEPS[step];
+  document.getElementById('mech-svg').innerHTML = s.svg;
+  document.getElementById('step-box').innerHTML = `<strong style="color:var(--blue)">${s.title}</strong><br>${s.body}`;
+  document.querySelectorAll('.sd').forEach((d, i) => {
+    d.classList.remove('active','done');
+    if (i < step) d.classList.add('done');
+    else if (i === step) d.classList.add('active');
   });
+  document.getElementById('mech-done').style.display = step === STEPS.length - 1 ? 'block' : 'none';
+}
 
-  // ── Submit ──
-  async function submit(file) {
-    dropZone.style.display = 'none';
-    loading.style.display  = 'flex';
-    results.style.display  = 'none';
-    errorBox.style.display = 'none';
+function mechStep(dir) {
+  const ns = step + dir;
+  if (ns < 0 || ns >= STEPS.length) return;
+  step = ns;
+  renderStep();
+}
 
-    const fd = new FormData();
-    fd.append('file', file);
+function resetMech() { step = 0; document.getElementById('mech-done').style.display='none'; renderStep(); }
+function setRxn(el, type) {
+  document.querySelectorAll('.rt').forEach(r => r.classList.remove('active'));
+  el.classList.add('active');
+  step = 0;
+  renderStep();
+}
 
-    try {
-      const res = await fetch('/analyze', { method: 'POST', body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Analysis failed');
-      showResults(data);
-    } catch (err) {
-      showError(err.message);
-    }
+// ── Predict ──────────────────────────────────────────────────────────────────
+function toggleChip(el) { el.classList.toggle('sel'); }
+function runPredict() {
+  const pb = document.getElementById('product-box');
+  pb.style.opacity = '.25';
+  setTimeout(() => { pb.style.opacity = '1'; pb.style.transition = 'opacity .45s'; }, 350);
+}
+function pickProd(card) {
+  document.querySelectorAll('.pc-card').forEach(c => c.style.borderColor = '');
+  card.style.borderColor = 'var(--blue)';
+}
+
+// ── Synthesis node graph ─────────────────────────────────────────────────────
+let synthReady = false;
+let dragging = null, doff = {x:0,y:0};
+let synthScale = 1, synthTx = 0, synthTy = 0;
+
+const ROUTES = {
+  r1: {
+    color:'#388bfd', hidden:false,
+    nodes:[
+      {id:'benz',   name:'Benzene',       smiles:'c1ccccc1',               x:60,  y:160, role:'start'},
+      {id:'phenol', name:'Phenol',         smiles:'Oc1ccccc1',              x:280, y:160},
+      {id:'salic',  name:'Salicylic Acid', smiles:'OC(=O)c1ccccc1O',       x:500, y:160},
+      {id:'aspirin',name:'Aspirin',        smiles:'CC(=O)Oc1ccccc1C(=O)O', x:720, y:160, role:'end'},
+    ],
+    edges:[
+      {f:'benz',   t:'phenol', lbl:'H₂SO₄/SO₃\nthen NaOH, 300°C'},
+      {f:'phenol', t:'salic',  lbl:'CO₂, NaOH\n125°C (Kolbe)'},
+      {f:'salic',  t:'aspirin',lbl:'Ac₂O, H⁺'},
+    ]
+  },
+  r2: {
+    color:'#a371f7', hidden:false,
+    nodes:[
+      {id:'benz2',   name:'Benzene',     smiles:'c1ccccc1',               x:60,  y:360, role:'start'},
+      {id:'toluene', name:'Toluene',     smiles:'Cc1ccccc1',              x:280, y:360},
+      {id:'benzoic', name:'Benzoic Acid',smiles:'OC(=O)c1ccccc1',        x:500, y:360},
+      {id:'asp2',    name:'Aspirin',     smiles:'CC(=O)Oc1ccccc1C(=O)O', x:720, y:360, role:'end'},
+    ],
+    edges:[
+      {f:'benz2',   t:'toluene', lbl:'CH₃Cl/AlCl₃\nFriedel-Crafts'},
+      {f:'toluene', t:'benzoic', lbl:'KMnO₄\noxidation'},
+      {f:'benzoic', t:'asp2',    lbl:'ortho-OH then\nAc₂O'},
+    ]
   }
+};
 
-  // ── Render results ──
-  function showResults(data) {
-    loading.style.display = 'none';
-    results.style.display = 'block';
+const MOL_SVG = {
+  'c1ccccc1': `<svg viewBox="0 0 80 80" width="68" height="68"><polygon points="40,6 66,21 66,51 40,66 14,51 14,21" fill="none" stroke="#c9d1d9" stroke-width="2.5"/><circle cx="40" cy="36" r="13" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".65"/></svg>`,
+  'Oc1ccccc1': `<svg viewBox="0 0 96 80" width="86" height="68"><polygon points="46,6 72,21 72,51 46,66 20,51 20,21" fill="none" stroke="#c9d1d9" stroke-width="2.5"/><circle cx="46" cy="36" r="13" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".65"/><line x1="20" y1="36" x2="6" y2="36" stroke="#c9d1d9" stroke-width="2"/><text x="2" y="32" font-size="11" fill="#3fb950" font-family="monospace">OH</text></svg>`,
+  'OC(=O)c1ccccc1O': `<svg viewBox="0 0 120 80" width="110" height="68"><polygon points="50,6 76,21 76,51 50,66 24,51 24,21" fill="none" stroke="#c9d1d9" stroke-width="2.5"/><circle cx="50" cy="36" r="13" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".65"/><line x1="24" y1="36" x2="10" y2="36" stroke="#c9d1d9" stroke-width="1.5"/><text x="0" y="32" font-size="9" fill="#3fb950" font-family="monospace">OH</text><line x1="76" y1="36" x2="92" y2="36" stroke="#c9d1d9" stroke-width="1.5"/><text x="93" y="30" font-size="9" fill="#d29922" font-family="monospace">COOH</text></svg>`,
+  'CC(=O)Oc1ccccc1C(=O)O': `<svg viewBox="0 0 140 80" width="128" height="68"><polygon points="60,6 86,21 86,51 60,66 34,51 34,21" fill="none" stroke="#c9d1d9" stroke-width="2.5"/><circle cx="60" cy="36" r="13" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".65"/><line x1="34" y1="36" x2="18" y2="36" stroke="#c9d1d9" stroke-width="1.5"/><text x="0" y="30" font-size="8" fill="#a371f7" font-family="monospace">OAc</text><line x1="86" y1="36" x2="102" y2="36" stroke="#c9d1d9" stroke-width="1.5"/><text x="104" y="30" font-size="8" fill="#d29922" font-family="monospace">COOH</text></svg>`,
+  'Cc1ccccc1': `<svg viewBox="0 0 86 80" width="76" height="68"><polygon points="44,6 70,21 70,51 44,66 18,51 18,21" fill="none" stroke="#c9d1d9" stroke-width="2.5"/><circle cx="44" cy="36" r="13" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".65"/><line x1="44" y1="6" x2="44" y2="0" stroke="#c9d1d9" stroke-width="2"/><text x="34" y="-2" font-size="10" fill="#c9d1d9" font-family="monospace">CH₃</text></svg>`,
+  'OC(=O)c1ccccc1': `<svg viewBox="0 0 120 80" width="110" height="68"><polygon points="50,6 76,21 76,51 50,66 24,51 24,21" fill="none" stroke="#c9d1d9" stroke-width="2.5"/><circle cx="50" cy="36" r="13" fill="none" stroke="#388bfd" stroke-width="1.5" opacity=".65"/><line x1="76" y1="36" x2="92" y2="36" stroke="#c9d1d9" stroke-width="1.5"/><text x="93" y="30" font-size="9" fill="#d29922" font-family="monospace">COOH</text></svg>`,
+};
 
-    // SMILES
-    const smiles = data.smiles || '—';
-    document.getElementById('smiles-text').textContent = smiles;
+function buildGraph() {
+  const canvas = document.getElementById('synth-canvas');
+  canvas.querySelectorAll('.snode,.edge-lbl').forEach(e => e.remove());
+  document.getElementById('synth-svg').innerHTML = '';
 
-    // Validity
-    const val = document.getElementById('validity');
-    if (data.smiles) {
-      val.innerHTML = data.valid
-        ? '<span class="badge badge-ok">✓ Valid SMILES</span>'
-        : '<span class="badge badge-bad">✗ Invalid SMILES — structure may be partial</span>';
-    } else {
-      val.innerHTML = '<span class="badge badge-bad">✗ No structure detected</span>';
-    }
-
-    // Final image
-    if (data.stages?.final) {
-      document.getElementById('final-img').src = 'data:image/png;base64,' + data.stages.final;
-    }
-
-    // Stage images
-    const grid = document.getElementById('stages-grid');
-    grid.innerHTML = '';
-    const labels = { original: 'Original', perspective: 'Perspective', deskew: 'Deskew',
-                     denoise: 'Denoise', binarize: 'Binarize', final: 'Final' };
-    if (data.stages) {
-      for (const [key, b64] of Object.entries(data.stages)) {
-        if (!b64) continue;
-        const cell = document.createElement('div');
-        cell.className = 'stage-cell';
-        cell.innerHTML = `<img src="data:image/png;base64,${b64}" alt="${key}">
-                          <span>${labels[key] || key}</span>`;
-        grid.appendChild(cell);
-      }
-    }
-
-    // Error (DECIMER-level, not HTTP)
-    if (data.error) {
-      errorBox.textContent = '⚠ ' + data.error;
-      errorBox.style.display = 'block';
-    }
+  const allEdges = [];
+  for (const [rid, route] of Object.entries(ROUTES)) {
+    if (route.hidden) continue;
+    route.nodes.forEach(n => {
+      const el = document.createElement('div');
+      el.className = 'snode';
+      el.id = 'sn-' + n.id;
+      el.dataset.id = n.id;
+      el.style.left = n.x + 'px';
+      el.style.top  = n.y + 'px';
+      const roleColor = n.role === 'start' ? '#3fb950' : n.role === 'end' ? '#a371f7' : route.color;
+      el.style.borderColor = roleColor;
+      el.innerHTML =
+        `<div class="node-hd" style="border-color:${roleColor}44">
+          <span>${n.name}</span>
+          <span class="node-type" style="color:${roleColor}">${n.role === 'start' ? 'START' : n.role === 'end' ? 'TARGET' : ''}</span>
+        </div>
+        <div class="node-mol">${MOL_SVG[n.smiles] || MOL_SVG['c1ccccc1']}</div>
+        <div class="node-ft">${n.smiles.length > 20 ? n.smiles.slice(0,20) + '…' : n.smiles}</div>`;
+      makeDrag(el, n, rid);
+      canvas.appendChild(el);
+    });
+    route.edges.forEach(e => allEdges.push({...e, color: route.color}));
   }
+  setTimeout(() => redrawEdges(allEdges), 50);
+}
 
-  function showError(msg) {
-    loading.style.display  = 'none';
-    dropZone.style.display = 'block';
-    errorBox.textContent   = '⚠ ' + msg;
-    errorBox.style.display = 'block';
-    results.style.display  = 'block';
-    document.getElementById('smiles-card').style.display = 'none';
-    document.getElementById('reset-btn').style.display   = 'block';
+function redrawEdges(edges) {
+  const canvas = document.getElementById('synth-canvas');
+  canvas.querySelectorAll('.edge-lbl').forEach(e => e.remove());
+  const svg = document.getElementById('synth-svg');
+  const cr = canvas.getBoundingClientRect();
+
+  let defs = `<defs>`;
+  ['#388bfd','#a371f7','#d29922'].forEach((c,i) => {
+    defs += `<marker id="am${i}" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0,9 3.5,0 7" fill="${c}"/></marker>`;
+  });
+  defs += `</defs>`;
+  svg.innerHTML = defs;
+
+  const colorIdx = {'#388bfd':0,'#a371f7':1,'#d29922':2};
+
+  edges.forEach(edge => {
+    const fe = document.getElementById('sn-' + edge.f);
+    const te = document.getElementById('sn-' + edge.t);
+    if (!fe || !te) return;
+    const fr = fe.getBoundingClientRect();
+    const tr = te.getBoundingClientRect();
+    const x1 = fr.right  - cr.left;
+    const y1 = fr.top + fr.height/2 - cr.top;
+    const x2 = tr.left   - cr.left;
+    const y2 = tr.top + tr.height/2 - cr.top;
+    const cx = (x1+x2)/2;
+    const ci = colorIdx[edge.color] ?? 0;
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    path.setAttribute('d',`M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`);
+    path.setAttribute('stroke', edge.color);
+    path.setAttribute('stroke-width','2');
+    path.setAttribute('fill','none');
+    path.setAttribute('marker-end',`url(#am${ci})`);
+    svg.appendChild(path);
+
+    const lbl = document.createElement('div');
+    lbl.className = 'edge-lbl';
+    lbl.style.left = (cx - 52) + 'px';
+    lbl.style.top  = ((y1+y2)/2 - 20) + 'px';
+    lbl.style.color = edge.color;
+    lbl.innerHTML = edge.lbl.replace('\n','<br>');
+    canvas.appendChild(lbl);
+  });
+}
+
+function getAllEdges() {
+  const edges = [];
+  for (const route of Object.values(ROUTES)) {
+    if (!route.hidden) route.edges.forEach(e => edges.push({...e, color:route.color}));
   }
+  return edges;
+}
 
-  // ── Copy SMILES ──
-  async function copySMILES() {
-    const text = document.getElementById('smiles-text').textContent;
-    if (text === '—') return;
-    const btn = document.getElementById('copy-btn');
+function makeDrag(el, nodeData, routeId) {
+  el.addEventListener('mousedown', e => {
+    dragging = {el, nodeData};
+    el.classList.add('dragging');
+    const r = el.getBoundingClientRect();
+    doff = {x: e.clientX - r.left, y: e.clientY - r.top};
+    e.preventDefault();
+  });
+}
 
-    const done = () => {
-      const orig = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => btn.textContent = orig, 2000);
-    };
+document.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const canvas = document.getElementById('synth-canvas');
+  const cr = canvas.getBoundingClientRect();
+  const x = e.clientX - cr.left - doff.x;
+  const y = e.clientY - cr.top  - doff.y;
+  dragging.el.style.left = x + 'px';
+  dragging.el.style.top  = y + 'px';
+  dragging.nodeData.x = x;
+  dragging.nodeData.y = y;
+  redrawEdges(getAllEdges());
+});
 
-    if (navigator.clipboard?.writeText) {
-      try { await navigator.clipboard.writeText(text); done(); return; } catch(_) {}
-    }
-    // Fallback for HTTP (local network on iPhone)
-    try {
-      const el = Object.assign(document.createElement('textarea'), {
-        value: text, style: 'position:fixed;top:-9999px'
-      });
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand('copy');
-      document.body.removeChild(el);
-      done();
-    } catch(_) {
-      btn.textContent = 'Select text ↑';
-      setTimeout(() => btn.textContent = 'Copy', 3000);
-    }
+document.addEventListener('mouseup', () => {
+  if (dragging) { dragging.el.classList.remove('dragging'); dragging = null; }
+});
+
+function toggleRoute(rid) {
+  const route = ROUTES[rid];
+  if (!route) return;
+  route.hidden = !route.hidden;
+  buildGraph();
+}
+
+function resetGraph() {
+  ROUTES.r1.nodes.forEach((n,i) => { n.x=60+i*220; n.y=160; });
+  ROUTES.r2.nodes.forEach((n,i) => { n.x=60+i*220; n.y=360; });
+  buildGraph();
+}
+
+function doZoom(f) { synthScale *= f; }
+function resetZoom() { synthScale = 1; }
+
+// ── Analyzer ─────────────────────────────────────────────────────────────────
+function anaDrop(e) {
+  e.preventDefault();
+  e.currentTarget.style.borderColor = 'var(--border)';
+  e.currentTarget.style.background = '';
+  const f = e.dataTransfer.files[0];
+  if (f) anaFile(f);
+}
+
+async function anaFile(file) {
+  if (!file) return;
+  document.getElementById('ana-drop').style.display = 'none';
+  document.getElementById('ana-loading').style.display = 'block';
+  document.getElementById('ana-result').style.display = 'none';
+
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res = await fetch('/analyze', {method:'POST', body:fd});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Analysis failed');
+    document.getElementById('ana-smiles').textContent = data.smiles || '(no structure detected)';
+  } catch(err) {
+    document.getElementById('ana-smiles').textContent = '⚠ ' + err.message;
   }
+  document.getElementById('ana-loading').style.display = 'none';
+  document.getElementById('ana-result').style.display = 'block';
+}
 
-  // ── Reset ──
-  function reset() {
-    results.style.display  = 'none';
-    loading.style.display  = 'none';
-    dropZone.style.display = 'block';
-    document.getElementById('smiles-card').style.display = '';
-    errorBox.style.display = 'none';
-    fileInput.value = '';
-    camInput.value  = '';
-  }
+function anaReset() {
+  document.getElementById('ana-drop').style.display = 'block';
+  document.getElementById('ana-loading').style.display = 'none';
+  document.getElementById('ana-result').style.display = 'none';
+  document.getElementById('ana-file').value = '';
+}
+
+// ── Chatbot ──────────────────────────────────────────────────────────────────
+const AI = {
+  sn2:      ["SN2 requires a strong, small nucleophile that attacks the back of the electrophilic carbon. The reaction is concerted — no carbocation intermediate.",
+             "Rate = k[Nu][Substrate]. Both concentrations matter, hence 'bimolecular'. Primary substrates react fastest; tertiary are essentially unreactive via SN2.",
+             "Polar aprotic solvents (DMF, DMSO, acetone) are ideal for SN2 — they dissolve ionic nucleophiles without solvating them, keeping nucleophilicity high."],
+  mechanism:["Arrow pushing shows electron flow. The tail of a curved arrow starts at the electron source (lone pair or bond) and the head points to the new bond or leaving group.",
+             "In SN2, one arrow shows Nu: attacking C, and another shows the C–LG bond electrons flowing onto the leaving group — all in one concerted step."],
+  predict:  ["EAS on benzene is driven by the nitronium ion (NO₂⁺), generated when H₂SO₄ protonates HNO₃. It attacks the electron-rich ring as an electrophile.",
+             "Substituents on benzene control regioselectivity. OH and NH₂ are ortho/para directors (electron donors). NO₂ and COOH are meta directors (electron withdrawers)."],
+  synthesis:["The Kolbe-Schmitt reaction (phenol + CO₂/NaOH, ~125°C) is the key step for making salicylic acid — a direct precursor to aspirin.",
+             "Retrosynthesis: start from aspirin and work backwards. The acetyl ester suggests an acylation disconnect → salicylic acid. The carboxylic acid suggests Kolbe → phenol."],
+  default:  ["That's a great question! Electron-pair movement is at the heart of organic reactivity — focus on HOMO/LUMO interactions.",
+             "pKₐ values often decide which path a reaction takes. The stronger acid always has the weaker conjugate base — use this to evaluate proton-transfer steps.",
+             "Could you clarify which aspect you'd like to explore? I can cover mechanism steps, selectivity, stereochemistry, or reaction conditions."]
+};
+
+const SUGS = {
+  mechanism: ['Why backside attack?','SN1 vs SN2?','Walden inversion?','Rate law?'],
+  sn2:       ['Why backside attack?','SN1 vs SN2?','Walden inversion?','Polar aprotic?'],
+  predict:   ['What is EAS?','Nitronium ion?','ortho vs para?','Deactivating groups?'],
+  synthesis: ['Kolbe-Schmitt?','Why phenol first?','Acylation mechanism?','Cheaper route?'],
+  general:   ['Why SN2 not SN1?','Walden inversion?','Markovnikov rule?','Explain EAS']
+};
+
+const CTX_LABELS = {mechanism:'SN2 Mechanism',sn2:'SN2 Mechanism',predict:'EAS Prediction',synthesis:'Aspirin Synthesis',general:'General'};
+let ctx = 'general';
+
+function openChat(c) {
+  ctx = c || 'general';
+  document.getElementById('ctx-pill').textContent = CTX_LABELS[ctx] || 'General';
+  document.getElementById('chatbot').classList.add('open');
+  document.getElementById('main').classList.add('chat-open');
+  const sugs = SUGS[ctx] || SUGS.general;
+  document.getElementById('chat-sugs').innerHTML = sugs.map(s =>
+    `<div class="sug" onclick="sendSug(this)">${s}</div>`).join('');
+}
+
+function closeChat() {
+  document.getElementById('chatbot').classList.remove('open');
+  document.getElementById('main').classList.remove('chat-open');
+}
+
+function sendSug(el) {
+  addMsg(el.textContent, 'user');
+  reply(ctx);
+}
+
+function sendMsg() {
+  const ta = document.getElementById('chat-in');
+  const txt = ta.value.trim();
+  if (!txt) return;
+  ta.value = ''; ta.style.height = '40px';
+  addMsg(txt, 'user');
+  const lower = txt.toLowerCase();
+  let pool = 'default';
+  if (/sn2|backside|walden|bimolecular/.test(lower)) pool = 'sn2';
+  else if (/mechanism|arrow|push/.test(lower)) pool = 'mechanism';
+  else if (/predict|product|eas|nitro/.test(lower)) pool = 'predict';
+  else if (/synth|aspirin|kolbe|route/.test(lower)) pool = 'synthesis';
+  reply(pool);
+}
+
+function reply(pool) {
+  showTyping();
+  const arr = AI[pool] || AI.default;
+  const text = arr[Math.floor(Math.random() * arr.length)];
+  setTimeout(() => { rmTyping(); addMsg(text, 'ai'); }, 850 + Math.random() * 550);
+}
+
+function addMsg(text, role) {
+  const c = document.getElementById('chat-msgs');
+  const t = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  const d = document.createElement('div');
+  d.className = `msg ${role}`;
+  d.innerHTML = `<div class="bubble">${text}</div><div class="mtime">${t}</div>`;
+  c.appendChild(d);
+  c.scrollTop = c.scrollHeight;
+}
+
+function showTyping() {
+  const c = document.getElementById('chat-msgs');
+  const d = document.createElement('div');
+  d.className = 'msg ai typing'; d.id = 'typing';
+  d.innerHTML = `<div class="bubble"><div class="tdot"></div><div class="tdot"></div><div class="tdot"></div></div>`;
+  c.appendChild(d); c.scrollTop = c.scrollHeight;
+}
+
+function rmTyping() {
+  const el = document.getElementById('typing');
+  if (el) el.remove();
+}
+
+document.getElementById('chat-in').addEventListener('input', function() {
+  this.style.height = '40px';
+  this.style.height = Math.min(this.scrollHeight, 110) + 'px';
+});
+
+// Kick off step 2 SVG
+renderStep();
 </script>
-
+<style>
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
 </body>
 </html>
