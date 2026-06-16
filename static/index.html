@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Orgo AI — Structure Analyzer</title>
+  <style>
+    :root {
+      --bg:       #0d1117;
+      --surface:  #161b22;
+      --border:   #30363d;
+      --blue:     #388bfd;
+      --blue-dim: rgba(56,139,253,.12);
+      --green:    #3fb950;
+      --red:      #f85149;
+      --text:     #c9d1d9;
+      --muted:    #8b949e;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100dvh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .logo {
+      font-size: 24px;
+      line-height: 1;
+    }
+    .header-text h1 { font-size: 16px; font-weight: 600; letter-spacing: -.2px; }
+    .header-text p  { font-size: 12px; color: var(--muted); }
+
+    /* ── Main ── */
+    main { max-width: 680px; margin: 0 auto; padding: 24px 16px 48px; }
+
+    /* ── Drop zone ── */
+    #drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 14px;
+      padding: 48px 24px 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      user-select: none;
+    }
+    #drop-zone.drag-over {
+      border-color: var(--blue);
+      background: var(--blue-dim);
+    }
+    .dz-icon { font-size: 52px; margin-bottom: 16px; }
+    #drop-zone h2 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+    #drop-zone p  { color: var(--muted); font-size: 14px; line-height: 1.5; max-width: 380px; margin: 0 auto 28px; }
+
+    .btn-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 13px 22px; border-radius: 10px; font-size: 15px; font-weight: 500;
+      cursor: pointer; border: none; transition: filter .15s, transform .1s;
+      min-width: 148px; justify-content: center; -webkit-tap-highlight-color: transparent;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn-primary   { background: var(--blue); color: #fff; }
+    .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+    .btn-primary:hover   { filter: brightness(1.12); }
+    .btn-secondary:hover { background: #21262d; }
+
+    /* hidden file inputs */
+    #file-input, #camera-input { display: none; }
+
+    /* ── Loading ── */
+    #loading {
+      display: none;
+      flex-direction: column; align-items: center; justify-content: center;
+      padding: 64px 24px; text-align: center;
+    }
+    .spinner {
+      width: 52px; height: 52px;
+      border: 3px solid var(--border); border-top-color: var(--blue);
+      border-radius: 50%; animation: spin .7s linear infinite; margin-bottom: 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading p { color: var(--muted); font-size: 14px; line-height: 1.6; }
+    #loading small { font-size: 12px; }
+
+    /* ── Results ── */
+    #results { display: none; margin-top: 0; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px; padding: 18px 20px; margin-bottom: 14px;
+    }
+    .card-label {
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .7px; color: var(--muted); margin-bottom: 12px;
+    }
+
+    /* SMILES */
+    .smiles-row { display: flex; align-items: flex-start; gap: 10px; }
+    #smiles-text {
+      flex: 1; font-family: "SF Mono", "Fira Code", Consolas, monospace;
+      font-size: 13px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px; word-break: break-all; line-height: 1.6;
+      user-select: all;
+    }
+    #copy-btn {
+      flex-shrink: 0; padding: 10px 14px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 8px; color: var(--muted);
+      cursor: pointer; font-size: 13px; transition: all .2s; white-space: nowrap;
+    }
+    #copy-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 10px; border-radius: 20px; font-size: 12px;
+      font-weight: 600; margin-top: 10px;
+    }
+    .badge-ok  { background: rgba(63,185,80,.15); color: var(--green); }
+    .badge-bad { background: rgba(248,81,73,.15);  color: var(--red); }
+
+    /* Final image */
+    #final-img {
+      width: 100%; max-height: 380px; object-fit: contain;
+      border-radius: 8px; background: #000;
+    }
+
+    /* Stages grid */
+    .stages-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    @media (max-width: 420px) {
+      .stages-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .stage-cell { text-align: center; }
+    .stage-cell img {
+      width: 100%; aspect-ratio: 1; object-fit: contain;
+      background: #000; border: 1px solid var(--border);
+      border-radius: 8px; padding: 4px; display: block;
+    }
+    .stage-cell span { font-size: 11px; color: var(--muted); margin-top: 5px; display: block; }
+
+    /* Error */
+    #error-box {
+      display: none; font-size: 13px; color: var(--red); line-height: 1.5;
+      background: rgba(248,81,73,.08); border: 1px solid rgba(248,81,73,.3);
+      border-radius: 10px; padding: 12px 16px; margin-bottom: 14px;
+    }
+
+    /* Reset */
+    #reset-btn {
+      display: block; width: 100%; padding: 13px;
+      background: transparent; border: 1px solid var(--border);
+      border-radius: 10px; color: var(--muted); cursor: pointer;
+      font-size: 14px; transition: all .2s; margin-top: 4px;
+    }
+    #reset-btn:hover { border-color: var(--text); color: var(--text); }
+
+    /* Tips line */
+    .tips { font-size: 12px; color: var(--muted); text-align: center; margin-top: 16px; line-height: 1.6; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">⚗️</div>
+  <div class="header-text">
+    <h1>Orgo AI</h1>
+    <p>Chemical Structure Analyzer</p>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Upload UI ── -->
+  <div id="upload-ui">
+    <div id="drop-zone">
+      <input type="file" id="file-input"   accept="image/*,.heic,.heif">
+      <input type="file" id="camera-input" accept="image/*" capture="environment">
+
+      <div class="dz-icon">🔬</div>
+      <h2>Analyze a Structure</h2>
+      <p>Upload a photo of a molecule from a textbook or problem set — or take one right now on your phone.</p>
+
+      <div class="btn-row">
+        <button class="btn btn-primary"   id="browse-btn">📁 Choose File</button>
+        <button class="btn btn-secondary" id="camera-btn">📷 Take Photo</button>
+      </div>
+    </div>
+
+    <p class="tips">
+      Works with JPG, PNG, HEIC (iPhone) · Drop an image anywhere · DECIMER takes ~20 s
+    </p>
+
+    <!-- Loading lives inside upload-ui so it replaces the drop zone -->
+    <div id="loading">
+      <div class="spinner"></div>
+      <p>Analyzing structure…<br><small>Running preprocessing + DECIMER (~20 s)</small></p>
+    </div>
+  </div>
+
+  <!-- ── Results ── -->
+  <div id="results">
+
+    <div id="error-box"></div>
+
+    <div class="card" id="smiles-card">
+      <div class="card-label">SMILES</div>
+      <div class="smiles-row">
+        <div id="smiles-text">—</div>
+        <button id="copy-btn" onclick="copySMILES()">Copy</button>
+      </div>
+      <div id="validity"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-label">Processed Image</div>
+      <img id="final-img" src="" alt="Processed image">
+    </div>
+
+    <div class="card">
+      <div class="card-label">Pipeline Stages</div>
+      <div class="stages-grid" id="stages-grid"></div>
+    </div>
+
+    <button id="reset-btn" onclick="reset()">↩ Analyze Another Structure</button>
+  </div>
+
+</main>
+
+<script>
+  const dropZone   = document.getElementById('drop-zone');
+  const fileInput  = document.getElementById('file-input');
+  const camInput   = document.getElementById('camera-input');
+  const loading    = document.getElementById('loading');
+  const uploadUI   = document.getElementById('upload-ui');
+  const results    = document.getElementById('results');
+  const errorBox   = document.getElementById('error-box');
+
+  // ── Wire up buttons ──
+  document.getElementById('browse-btn').addEventListener('click', () => fileInput.click());
+  document.getElementById('camera-btn').addEventListener('click', () => camInput.click());
+  fileInput.addEventListener('change',  () => fileInput.files[0]  && submit(fileInput.files[0]));
+  camInput.addEventListener('change',   () => camInput.files[0]   && submit(camInput.files[0]));
+
+  // ── Drag and drop ──
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', ()  => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f) submit(f);
+  });
+
+  // ── Submit ──
+  async function submit(file) {
+    dropZone.style.display = 'none';
+    loading.style.display  = 'flex';
+    results.style.display  = 'none';
+    errorBox.style.display = 'none';
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    try {
+      const res = await fetch('/analyze', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Analysis failed');
+      showResults(data);
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  // ── Render results ──
+  function showResults(data) {
+    loading.style.display = 'none';
+    results.style.display = 'block';
+
+    // SMILES
+    const smiles = data.smiles || '—';
+    document.getElementById('smiles-text').textContent = smiles;
+
+    // Validity
+    const val = document.getElementById('validity');
+    if (data.smiles) {
+      val.innerHTML = data.valid
+        ? '<span class="badge badge-ok">✓ Valid SMILES</span>'
+        : '<span class="badge badge-bad">✗ Invalid SMILES — structure may be partial</span>';
+    } else {
+      val.innerHTML = '<span class="badge badge-bad">✗ No structure detected</span>';
+    }
+
+    // Final image
+    if (data.stages?.final) {
+      document.getElementById('final-img').src = 'data:image/png;base64,' + data.stages.final;
+    }
+
+    // Stage images
+    const grid = document.getElementById('stages-grid');
+    grid.innerHTML = '';
+    const labels = { original: 'Original', perspective: 'Perspective', deskew: 'Deskew',
+                     denoise: 'Denoise', binarize: 'Binarize', final: 'Final' };
+    if (data.stages) {
+      for (const [key, b64] of Object.entries(data.stages)) {
+        if (!b64) continue;
+        const cell = document.createElement('div');
+        cell.className = 'stage-cell';
+        cell.innerHTML = `<img src="data:image/png;base64,${b64}" alt="${key}">
+                          <span>${labels[key] || key}</span>`;
+        grid.appendChild(cell);
+      }
+    }
+
+    // Error (DECIMER-level, not HTTP)
+    if (data.error) {
+      errorBox.textContent = '⚠ ' + data.error;
+      errorBox.style.display = 'block';
+    }
+  }
+
+  function showError(msg) {
+    loading.style.display  = 'none';
+    dropZone.style.display = 'block';
+    errorBox.textContent   = '⚠ ' + msg;
+    errorBox.style.display = 'block';
+    results.style.display  = 'block';
+    document.getElementById('smiles-card').style.display = 'none';
+    document.getElementById('reset-btn').style.display   = 'block';
+  }
+
+  // ── Copy SMILES ──
+  async function copySMILES() {
+    const text = document.getElementById('smiles-text').textContent;
+    if (text === '—') return;
+    const btn = document.getElementById('copy-btn');
+
+    const done = () => {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = orig, 2000);
+    };
+
+    if (navigator.clipboard?.writeText) {
+      try { await navigator.clipboard.writeText(text); done(); return; } catch(_) {}
+    }
+    // Fallback for HTTP (local network on iPhone)
+    try {
+      const el = Object.assign(document.createElement('textarea'), {
+        value: text, style: 'position:fixed;top:-9999px'
+      });
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+      done();
+    } catch(_) {
+      btn.textContent = 'Select text ↑';
+      setTimeout(() => btn.textContent = 'Copy', 3000);
+    }
+  }
+
+  // ── Reset ──
+  function reset() {
+    results.style.display  = 'none';
+    loading.style.display  = 'none';
+    dropZone.style.display = 'block';
+    document.getElementById('smiles-card').style.display = '';
+    errorBox.style.display = 'none';
+    fileInput.value = '';
+    camInput.value  = '';
+  }
+</script>
+
+</body>
+</html>

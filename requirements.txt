@@ -3,3 +3,7 @@ numpy>=1.24.0
 decimer>=2.3.0
 rdkit>=2023.9.1
 Pillow>=10.0.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+pillow-heif>=0.13.0
