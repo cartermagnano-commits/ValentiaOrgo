@@ -216,13 +216,95 @@ function BranchInfoView({ branch, substrateSMILES }) {
 
 // ── Export ────────────────────────────────────────────────────────────────────
 
-export default function InfoPanel({ branch, substrateSMILES, selectedNode, selectedNodeData }) {
+// ── DAG node view (target-search / convergent mode) ──────────────────────────
+
+function DAGNodeInfoView({ nodeData, substrateSMILES }) {
+  if (!nodeData) return null
+
+  const role = ROLE_LABEL[nodeData.nodeType] ?? nodeData.nodeType
+  const isCoupling = nodeData.isCoupling
+
+  return (
+    <div className="panel-body">
+      <div>
+        <div className="panel-header" style={{ padding: '0 0 8px', border: 'none' }}>Selected Step</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{
+            background: nodeData.nodeType === 'start'
+              ? 'rgba(188,140,255,0.15)' : nodeData.nodeType === 'product'
+              ? 'rgba(63,185,80,0.15)' : isCoupling
+              ? 'rgba(188,140,255,0.15)' : 'rgba(88,166,255,0.12)',
+            color: nodeData.nodeType === 'start'
+              ? 'var(--accent2)' : nodeData.nodeType === 'product'
+              ? 'var(--success)' : isCoupling
+              ? 'var(--accent2)' : 'var(--accent)',
+            border: `1px solid ${nodeData.nodeType === 'start'
+              ? 'rgba(188,140,255,0.35)' : nodeData.nodeType === 'product'
+              ? 'rgba(63,185,80,0.35)' : isCoupling
+              ? 'rgba(188,140,255,0.35)' : 'rgba(88,166,255,0.3)'}`,
+            borderRadius: 20, padding: '3px 12px', fontSize: 11, fontWeight: 600,
+            textTransform: 'uppercase', letterSpacing: '0.07em',
+          }}>
+            {isCoupling ? 'Coupling step' : role}
+          </span>
+        </div>
+      </div>
+
+      <div>
+        <div className="panel-header" style={{ padding: '0 0 8px', border: 'none' }}>Structure</div>
+        <div className="product-structure-preview">
+          <StructureView smiles={nodeData.smiles} width={300} height={130} />
+        </div>
+        <div style={{
+          marginTop: 6, fontFamily: 'SFMono-Regular, Consolas, monospace',
+          fontSize: 10, color: 'var(--muted)', wordBreak: 'break-all', lineHeight: 1.4,
+        }}>
+          {nodeData.smiles}
+        </div>
+      </div>
+
+      {nodeData.reactionName && (
+        <div>
+          <div className="panel-header" style={{ padding: '0 0 8px', border: 'none' }}>Reaction</div>
+          <div className="rxn-name-badge">
+            <span className="confidence-dot conf-high" />
+            {nodeData.reactionName}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--muted)' }}>
+            {nodeData.reagentName && `Reagent: ${nodeData.reagentName}`}
+            {nodeData.environment && ` · ${nodeData.environment} control`}
+            {isCoupling && ' · Convergent coupling'}
+          </div>
+        </div>
+      )}
+
+      {nodeData.stepText && nodeData.stepText !== 'Starting material' && (
+        <div>
+          <div className="panel-header" style={{ padding: '0 0 6px', border: 'none' }}>Engine step</div>
+          <div style={{
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: 6, padding: '8px 10px', fontSize: 11,
+            color: 'var(--muted)', lineHeight: 1.5, fontFamily: 'SFMono-Regular, Consolas, monospace',
+          }}>
+            {nodeData.stepText}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function InfoPanel({ branch, route, substrateSMILES, selectedNode, selectedNodeData }) {
+  // DAG node selected (target-search mode)
+  if (selectedNode && selectedNodeData && selectedNodeData.dagNodeId !== undefined) {
+    return <DAGNodeInfoView nodeData={selectedNodeData} substrateSMILES={substrateSMILES} />
+  }
+  // Branch node selected (fanout mode)
   if (selectedNode && selectedNodeData) {
-    const nodeBranch = branch  // branch is already the one matching selectedNode's branchId
     return (
       <NodeInfoView
         nodeData={selectedNodeData}
-        branch={nodeBranch}
+        branch={branch}
         substrateSMILES={substrateSMILES}
       />
     )

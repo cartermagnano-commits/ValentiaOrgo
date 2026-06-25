@@ -25,6 +25,7 @@ class TemplateEngine:
 
     def __init__(self, template_path: str | Path | None = None):
         self.templates: list[dict] = []
+        self.coupling_templates: list[dict] = []
         path = Path(template_path) if template_path else _TEMPLATE_FILE
         self._load_templates(path)
 
@@ -52,14 +53,19 @@ class TemplateEngine:
                 if rxn is None:
                     raise ValueError("ReactionFromSmarts returned None")
                 rxn.Initialize()
-                self.templates.append({
+                t = {
                     "id": tid,
                     "name": entry["name"],
                     "rxn": rxn,
                     "n_reactants": rxn.GetNumReactantTemplates(),
                     "conditions": entry.get("conditions", []),
                     "provenance": entry.get("provenance", ""),
-                })
+                    "coupling": entry.get("coupling", False),
+                }
+                if t["coupling"]:
+                    self.coupling_templates.append(t)
+                else:
+                    self.templates.append(t)
                 loaded += 1
             except Exception as exc:
                 logger.warning("Skipping template '%s': %s", tid, exc)
@@ -68,7 +74,10 @@ class TemplateEngine:
         if loaded == 0:
             logger.warning("No valid templates loaded from %s.", path)
         else:
-            logger.info("Loaded %d templates from %s.", loaded, path)
+            logger.info(
+                "Loaded %d templates from %s (%d reagent-based, %d coupling).",
+                loaded, path, len(self.templates), len(self.coupling_templates),
+            )
 
     # ── Template selection ────────────────────────────────────────────────────
 
@@ -290,6 +299,56 @@ class TemplateEngine:
             })
 
         return branches
+
+    # ── Coupling (both reactants from synthesis pool) ─────────────────────────
+
+    def run_coupling(self, mol_a_smiles: str, mol_b_smiles: str) -> list[dict]:
+        """
+        Try all coupling templates on the ordered pair (A, B) AND (B, A).
+
+        Returns a list of dicts with keys: template_id, reaction_name, product_smiles.
+        Each product is RDKit-validated; invalid outputs are silently dropped.
+        Deduplicates results by canonical product SMILES.
+        """
+        if not self.coupling_templates:
+            return []
+
+        mol_a = Chem.MolFromSmiles(mol_a_smiles)
+        mol_b = Chem.MolFromSmiles(mol_b_smiles)
+        if mol_a is None or mol_b is None:
+            return []
+
+        seen: set[str] = set()
+        results: list[dict] = []
+
+        for template in self.coupling_templates:
+            for reactants in [(mol_a, mol_b), (mol_b, mol_a)]:
+                try:
+                    products_list = template["rxn"].RunReactants(reactants)
+                except Exception as exc:
+                    logger.debug("Coupling template '%s' RunReactants error: %s", template["id"], exc)
+                    continue
+
+                for prod_tuple in products_list:
+                    try:
+                        combined = prod_tuple[0]
+                        for p in prod_tuple[1:]:
+                            combined = Chem.CombineMols(combined, p)
+                        Chem.SanitizeMol(combined)
+                        frags = Chem.GetMolFrags(combined, asMols=True)
+                        main = max(frags, key=lambda m: m.GetNumHeavyAtoms())
+                        smi = Chem.MolToSmiles(main)
+                        if smi and smi not in seen:
+                            seen.add(smi)
+                            results.append({
+                                "template_id": template["id"],
+                                "reaction_name": template["name"],
+                                "product_smiles": smi,
+                            })
+                    except Exception as exc:
+                        logger.debug("Coupling template '%s' product error: %s", template["id"], exc)
+
+        return results
 
     # ── Condition inference (used by backward-compat wrapper) ─────────────────
 

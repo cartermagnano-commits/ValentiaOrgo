@@ -129,6 +129,105 @@
       "conditions": ["protic"],
       "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Reversible nucleophilic addition of water to carbonyl to give gem-diol. Equilibrium strongly disfavored for ketones (Keq << 1) but thermodynamically accessible for aldehydes.",
       "enabled": true
+    },
+    {
+      "id": "alpha_alkylation_br",
+      "name": "α-Alkylation: enolate + alkyl bromide",
+      "smarts": "[CX3:1]([O-:2])=[CX3:3].[CX4:4][Br:5]>>[CX3:1](=O)[CX4:3][CX4:4].[Br-:5]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. SN2 C-alkylation: enolate anion (produced by kinetic_enolate template) acts as carbon nucleophile attacking an alkyl bromide from the molecule pool. Produces alpha-alkylated carbonyl compound with C-C bond formation. Both reactants come from the synthesis pool, not the reagent list — this is a convergent coupling step.",
+      "enabled": true
+    },
+    {
+      "id": "alpha_alkylation_cl",
+      "name": "α-Alkylation: enolate + alkyl chloride",
+      "smarts": "[CX3:1]([O-:2])=[CX3:3].[CX4:4][Cl:5]>>[CX3:1](=O)[CX4:3][CX4:4].[Cl-:5]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Same as alpha_alkylation_br but on alkyl chloride electrophile. Less reactive than bromide but still viable under forcing conditions with a stabilized enolate nucleophile.",
+      "enabled": true
+    },
+    {
+      "id": "acetylide_deprotonation",
+      "name": "Terminal alkyne deprotonation (acetylide formation)",
+      "smarts": "[CX2H:1]#[CX2:2]>>[CX1-:1]#[CX2:2]",
+      "conditions": ["kinetic_base"],
+      "coupling": false,
+      "provenance": "Clayden, J. 'Organic Chemistry' 2nd ed. Strong bases (LDA, t-BuOK, NaNH2) deprotonate terminal alkynes (pKa ~25) to give acetylide anions, which are strong carbon nucleophiles for SN2 on primary alkyl halides.",
+      "enabled": true
+    },
+    {
+      "id": "acetylide_alkylation_br",
+      "name": "Acetylide SN2: acetylide + primary alkyl bromide",
+      "smarts": "[CX1-:1]#[CX2:2].[CX4;H2,H3:3][Br:4]>>[CX4:3][C+0:1]#[CX2:2].[Br-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Clayden, J. 'Organic Chemistry' 2nd ed. Acetylide anion (from acetylide_deprotonation) performs SN2 on a primary or methyl alkyl bromide ([CX4;H2,H3]) to form an internal alkyne with C-C bond formation. Secondary/tertiary halides are excluded ([H0,H1]) because SN2 is not viable there.",
+      "enabled": true
+    },
+    {
+      "id": "acetylide_alkylation_cl",
+      "name": "Acetylide SN2: acetylide + primary alkyl chloride",
+      "smarts": "[CX1-:1]#[CX2:2].[CX4;H2,H3:3][Cl:4]>>[CX4:3][C+0:1]#[CX2:2].[Cl-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Clayden, J. 'Organic Chemistry' 2nd ed. Same as acetylide_alkylation_br but on primary alkyl chloride. Less reactive than bromide but viable with the highly nucleophilic acetylide. Primary/methyl restriction enforced.",
+      "enabled": true
+    },
+    {
+      "id": "alcohol_deprotonation",
+      "name": "Alcohol deprotonation (alkoxide formation)",
+      "smarts": "[CX4:1][OH:2]>>[CX4:1][O-:2]",
+      "conditions": ["strong_base"],
+      "coupling": false,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Strong bases (NaH, NaOEt, t-BuOK) deprotonate alcohols (pKa ~16-18) to give alkoxide anions. Prerequisite for Williamson ether synthesis when the alkoxide comes from within the synthesis pool rather than from the reagent list.",
+      "enabled": true
+    },
+    {
+      "id": "williamson_coupling_br",
+      "name": "Williamson ether (pool-pool): alkoxide + primary alkyl bromide",
+      "smarts": "[CX4:1][O-].[CX4;H2,H3:3][Br:4]>>[CX4:1]O[CX4:3].[Br-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Williamson, A.W. J. Chem. Soc. 1852, 4, 229. Pool-pool variant: alkoxide generated from alcohol_deprotonation attacks a primary/methyl alkyl bromide from the synthesis pool. O- (unmapped in reactant) is consumed; a fresh neutral ether O is created in the product, avoiding charge inheritance. Primary halide restriction prevents E2 competition.",
+      "enabled": true
+    },
+    {
+      "id": "williamson_coupling_cl",
+      "name": "Williamson ether (pool-pool): alkoxide + primary alkyl chloride",
+      "smarts": "[CX4:1][O-].[CX4;H2,H3:3][Cl:4]>>[CX4:1]O[CX4:3].[Cl-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Williamson, A.W. J. Chem. Soc. 1852, 4, 229. Same as williamson_coupling_br but on primary alkyl chloride. Less reactive than bromide but viable with alkoxide nucleophile.",
+      "enabled": true
+    },
+    {
+      "id": "grignard_aldehyde",
+      "name": "Grignard addition: RMgX + aldehyde → secondary alcohol",
+      "smarts": "[CX4:1][Mg][X].[CX3H:2]=[OX1:3]>>[CX4:2]([OH:3])([CX4:1])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Grignard, V. C. R. Acad. Sci. 1900, 130, 1322. The Grignard carbanion (C:1, from RMgX provided as starting material) performs 1,2-addition to an aldehyde carbonyl. Mg and X are unmapped and deleted in the product (simulates aqueous workup). Net: C=O → C-OH with new C-C bond; secondary alcohol. [CX3H:2] restricts to aldehydes (1 H on carbonyl C); [OX1:3] ensures the carbonyl O.",
+      "enabled": true
+    },
+    {
+      "id": "grignard_ketone",
+      "name": "Grignard addition: RMgX + ketone → tertiary alcohol",
+      "smarts": "[CX4:1][Mg][X].[C:5][CX3H0:2](=[OX1:3])[C:6]>>[C:5][CX4:2]([OH:3])([C:6])([CX4:1])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Grignard, V. C. R. Acad. Sci. 1900, 130, 1322. Same mechanism as grignard_aldehyde but on a disubstituted ketone. [CX3H0:2] requires 0 H on carbonyl C (distinguishes ketone from aldehyde). ([C])[C] flanking constraint ensures both substituents are carbons, excluding esters (one O neighbor) and amides (N neighbor). Product is a tertiary alcohol.",
+      "enabled": true
+    },
+    {
+      "id": "grignard_formaldehyde",
+      "name": "Grignard addition: RMgX + formaldehyde → primary alcohol",
+      "smarts": "[CX4:1][Mg][X].[CX3H2:2]=[OX1:3]>>[CX4:2]([OH:3])([CX4:1])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Grignard, V. C. R. Acad. Sci. 1900, 130, 1322. Grignard addition to formaldehyde (the only carbonyl with 2 H's on C, [CX3H2:2]) gives a primary alcohol after workup. Product has one more carbon than the Grignard R group: RMgX + HCHO → RCH2OH.",
+      "enabled": true
     }
   ]
 }

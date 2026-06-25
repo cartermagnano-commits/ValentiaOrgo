@@ -28,11 +28,11 @@ export function structureUrl(smiles, width = 200, height = 150) {
   return `/structure?smiles=${encodeURIComponent(smiles)}&width=${width}&height=${height}`
 }
 
-export async function fetchPathways(substrateSMILES, targetSMILES, maxDepth = 5) {
+export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth = 5) {
   return post('/pathways', {
-    substrate_smiles: substrateSMILES,
+    start_smiles: Array.isArray(startSmilesList) ? startSmilesList : [startSmilesList],
     target_smiles: targetSMILES || null,
-    max_depth: Math.max(1, Math.min(10, Math.round(maxDepth))),
+    desired_depth: Math.max(1, Math.min(10, Math.round(desiredDepth))),
   })
 }
 

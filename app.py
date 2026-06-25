@@ -116,6 +116,12 @@ REAGENT_LIST = [
         "description": "Sodium chloride — chloride nucleophile",
         "conditions": ["halide_nucleophile"],
     },
+    {
+        "name": "NaH",
+        "smiles": "[Na+].[H-]",
+        "description": "Sodium hydride — strong base for alcohol deprotonation (Williamson ether synthesis)",
+        "conditions": ["strong_base"],
+    },
 ]
 
 
@@ -377,64 +383,187 @@ async def structure(
 
 
 MAX_SEARCH_DEPTH = 10   # hard cap enforced server-side
-MAX_SEARCH_NODES = 200  # unique molecules explored before aborting
+MAX_POOL_SIZE    = 600  # unique molecules in pool before aborting convergent search
 
 
-def _bfs_to_target(
-    substrate: str,
+class PathwaysRequest(BaseModel):
+    # Accept either a single substrate (legacy) or a list of starting materials.
+    # If start_smiles is provided it takes priority; substrate_smiles kept for
+    # backward compatibility with the old frontend.
+    start_smiles: list[str] = []
+    substrate_smiles: str = ""
+    target_smiles: Optional[str] = None
+    desired_depth: int = 5   # user's requested depth; server always searches to MAX_SEARCH_DEPTH
+
+
+# ── MoleculeInfo tracks every molecule in the synthesis pool ──────────────────
+
+class _MolInfo:
+    """Provenance record for one molecule in the BFS pool."""
+    __slots__ = ("smiles", "depth", "prov_type", "parent_a", "parent_b",
+                 "reaction_name", "template_id", "reagent_name", "reagent_smiles",
+                 "environment", "source_index", "step_text")
+
+    def __init__(
+        self, smiles, depth, prov_type,
+        parent_a=None, parent_b=None,
+        reaction_name=None, template_id=None,
+        reagent_name=None, reagent_smiles=None,
+        environment=None, source_index=None,
+        step_text=None,
+    ):
+        self.smiles        = smiles
+        self.depth         = depth
+        self.prov_type     = prov_type   # "start" | "reagent" | "coupling"
+        self.parent_a      = parent_a    # canonical SMILES of first parent
+        self.parent_b      = parent_b    # canonical SMILES of second parent (coupling only)
+        self.reaction_name = reaction_name
+        self.template_id   = template_id
+        self.reagent_name  = reagent_name
+        self.reagent_smiles = reagent_smiles
+        self.environment   = environment
+        self.source_index  = source_index   # only for "start" nodes
+        self.step_text     = step_text
+
+
+def _trace_dag(pool: dict, target_smiles: str) -> tuple[list[dict], list[dict]]:
+    """
+    Trace backwards from target through provenance to collect the minimal DAG.
+    Returns (dag_nodes, dag_edges) in React Flow-friendly format.
+    """
+    # BFS backwards
+    visited = set()
+    queue = [target_smiles]
+    node_order = []
+
+    while queue:
+        smi = queue.pop(0)
+        if smi in visited:
+            continue
+        visited.add(smi)
+        node_order.append(smi)
+        info = pool.get(smi)
+        if info is None:
+            continue
+        if info.parent_a and info.parent_a not in visited:
+            queue.append(info.parent_a)
+        if info.parent_b and info.parent_b not in visited:
+            queue.append(info.parent_b)
+
+    # Assign stable node IDs
+    node_ids = {smi: f"n{i}" for i, smi in enumerate(node_order)}
+
+    dag_nodes = []
+    dag_edges = []
+    edge_idx  = 0
+
+    for smi in node_order:
+        info = pool[smi]
+        nid  = node_ids[smi]
+        is_target = (smi == target_smiles)
+
+        if info.prov_type == "start":
+            label = f"Starting Material {info.source_index + 1}" if info.source_index else "Starting Material"
+            node_type = "start"
+        elif is_target:
+            label = "Target"
+            node_type = "product"
+        else:
+            label = info.reaction_name or "Intermediate"
+            node_type = "intermediate"
+
+        dag_nodes.append({
+            "id": nid,
+            "smiles": smi,
+            "type": node_type,
+            "label": label,
+            "is_coupling": info.prov_type == "coupling",
+            "step_text": info.step_text or "",
+            "reaction_name": info.reaction_name,
+            "reagent_name": info.reagent_name,
+            "reagent_smiles": info.reagent_smiles,
+            "environment": info.environment,
+            "source_index": info.source_index,
+        })
+
+        if info.parent_a:
+            dag_edges.append({
+                "id": f"e{edge_idx}",
+                "source": node_ids[info.parent_a],
+                "target": nid,
+                "reaction_name": info.reaction_name or "",
+                "reagent_name": info.reagent_name or "",
+                "is_coupling": info.prov_type == "coupling",
+            })
+            edge_idx += 1
+
+        if info.parent_b:
+            dag_edges.append({
+                "id": f"e{edge_idx}",
+                "source": node_ids[info.parent_b],
+                "target": nid,
+                "reaction_name": info.reaction_name or "",
+                "reagent_name": info.reagent_name or "",
+                "is_coupling": info.prov_type == "coupling",
+            })
+            edge_idx += 1
+
+    return dag_nodes, dag_edges
+
+
+def _bfs_convergent(
+    start_smiles_list: list[str],
     target_canon: str,
-    max_depth: int,
+    desired_depth: int,
 ) -> dict:
     """
-    Breadth-first search from substrate toward target_canon.
+    Convergent BFS from one or more starting materials toward target_canon.
 
-    Each BFS layer = one reagent application (run_for_reagent).
-    run_for_reagent's internal MAX_STEPS chaining is treated as a single layer.
+    Supports:
+    - Unimolecular reagent-based templates (run_for_reagent)
+    - Bimolecular coupling templates (run_coupling) between any two pool molecules
 
-    Returns a dict with:
-      routes          — list of branch dicts for every path that reached target
-      nodes_explored  — count of unique molecules visited
-      target_found    — bool
-      terminated_early — bool (node ceiling was hit)
+    Always searches to MAX_SEARCH_DEPTH regardless of desired_depth; routes are
+    partitioned into within/beyond desired_depth so the caller can report correctly.
+
+    Returns:
+      routes          — list of route dicts (dag_nodes, dag_edges, depth, …)
+      nodes_explored  — int
+      terminated_early — bool (pool ceiling hit)
+      result_status   — "found" | "found_beyond_depth" | "not_found" | "ceiling_hit"
     """
     from collections import deque
     from rdkit import Chem
 
-    # Each queue entry: (current_smiles, steps_so_far)
-    # steps_so_far is the accumulated step list for this route (start node included)
-    start_step = {
-        "smiles": substrate,
-        "label": "Starting Material",
-        "type": "start",
-        "step_index": 0,
-        "step_text": "Starting material",
-        "template_id": None,
-        "reaction_name": None,
-        "reagent_name": None,
-        "reagent_smiles": None,
-        "environment": None,
-    }
+    # Pool: canonical SMILES → _MolInfo
+    pool: dict[str, _MolInfo] = {}
+    for i, smi in enumerate(start_smiles_list):
+        pool[smi] = _MolInfo(
+            smiles=smi, depth=0, prov_type="start", source_index=i,
+            step_text="Starting material",
+        )
 
-    queue: deque = deque()
-    queue.append((substrate, [start_step]))
+    # BFS queue: (smiles, depth)
+    queue: deque = deque((smi, 0) for smi in start_smiles_list)
 
-    visited: set[str] = {substrate}
-    routes: list[dict] = []
-    nodes_explored = 1
+    found_routes: list[dict] = []
     terminated_early = False
 
     while queue and not terminated_early:
-        current_smiles, path = queue.popleft()
-        current_depth = len(path) - 1  # start node is depth 0
+        current_smiles, depth = queue.popleft()
 
-        if current_depth >= max_depth:
+        if depth >= MAX_SEARCH_DEPTH:
             continue
 
+        current_mol = Chem.MolFromSmiles(current_smiles)
+        if current_mol is None:
+            continue
+
+        # ── 1. Unimolecular / reagent-based templates ─────────────────────────
         for reagent in REAGENT_LIST:
             if terminated_early:
                 break
-
-            conditions = reagent.get("conditions", [])
+            conditions  = reagent.get("conditions", [])
             environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
 
             try:
@@ -444,76 +573,170 @@ def _bfs_to_target(
                 continue
 
             for branch in branches:
-                product_smiles = branch["final_product"]
+                product = branch["final_product"]
+                new_depth = depth + branch["steps_taken"]
 
-                # Re-index steps from this branch into the growing route
-                base_idx = len(path)
-                new_steps = []
-                for i, step in enumerate(branch["steps"][1:], start=base_idx):
-                    new_steps.append({
-                        **step,
-                        "step_index": i,
-                        "reagent_name": reagent["name"],
-                        "reagent_smiles": reagent["smiles"],
-                        "environment": environment,
+                step_text = (
+                    branch["execution_history"][-1]
+                    if branch["execution_history"]
+                    else f"Reagent {reagent['name']} applied"
+                )
+
+                if product == target_canon:
+                    # Build and record this route
+                    if product not in pool:
+                        pool[product] = _MolInfo(
+                            smiles=product, depth=new_depth, prov_type="reagent",
+                            parent_a=current_smiles,
+                            reaction_name=branch["reaction_name"],
+                            template_id=branch["template_id"],
+                            reagent_name=reagent["name"],
+                            reagent_smiles=reagent["smiles"],
+                            environment=environment,
+                            step_text=step_text,
+                        )
+                    dag_nodes, dag_edges = _trace_dag(pool, target_canon)
+                    found_routes.append({
+                        "depth": new_depth,
+                        "dag_nodes": dag_nodes,
+                        "dag_edges": dag_edges,
                     })
-
-                full_path = path + new_steps
-
-                if product_smiles == target_canon:
-                    # Build a branch dict matching the format _run_all_pathways_for_reagent returns
-                    routes.append({
-                        "reagent": {k: v for k, v in reagent.items() if k != "conditions"},
-                        "environment": environment,
-                        "steps_taken": len(full_path) - 1,
-                        "execution_history": [s["step_text"] for s in full_path if s.get("step_text") and s["step_index"] > 0],
-                        "product_smiles": product_smiles,
-                        "steps": full_path,
-                        "reaction_classification": {
-                            "name": branch["reaction_name"],
-                            "confidence": "template",
-                        },
-                        "template_id": branch["template_id"],
-                        "reaction_name": branch["reaction_name"],
-                        "matches_target": True,
-                        "route_depth": len(full_path) - 1,
-                    })
-                    # Don't add the target to the frontier; it's a terminal node
                     continue
 
-                if product_smiles not in visited:
-                    visited.add(product_smiles)
-                    nodes_explored += 1
-                    if nodes_explored >= MAX_SEARCH_NODES:
+                if product not in pool:
+                    pool[product] = _MolInfo(
+                        smiles=product, depth=new_depth, prov_type="reagent",
+                        parent_a=current_smiles,
+                        reaction_name=branch["reaction_name"],
+                        template_id=branch["template_id"],
+                        reagent_name=reagent["name"],
+                        reagent_smiles=reagent["smiles"],
+                        environment=environment,
+                        step_text=step_text,
+                    )
+                    if len(pool) >= MAX_POOL_SIZE:
                         terminated_early = True
                         break
-                    queue.append((product_smiles, full_path))
+                    queue.append((product, new_depth))
+
+        # ── 2. Coupling templates (both reactants from pool) ──────────────────
+        if not terminated_early and _engine.coupling_templates:
+            pool_snapshot = list(pool.keys())  # snapshot to avoid mutation during iteration
+            for other_smiles in pool_snapshot:
+                if other_smiles == current_smiles:
+                    continue
+                try:
+                    coupling_results = _engine.run_coupling(current_smiles, other_smiles)
+                except Exception:
+                    logger.exception("BFS: coupling error %s + %s", current_smiles, other_smiles)
+                    continue
+
+                other_depth = pool[other_smiles].depth
+                new_depth = max(depth, other_depth) + 1
+
+                for cr in coupling_results:
+                    product = cr["product_smiles"]
+
+                    if product == target_canon:
+                        if product not in pool:
+                            pool[product] = _MolInfo(
+                                smiles=product, depth=new_depth, prov_type="coupling",
+                                parent_a=current_smiles, parent_b=other_smiles,
+                                reaction_name=cr["reaction_name"],
+                                template_id=cr["template_id"],
+                                step_text=f"Coupling: {cr['reaction_name']}",
+                            )
+                        dag_nodes, dag_edges = _trace_dag(pool, target_canon)
+                        found_routes.append({
+                            "depth": new_depth,
+                            "dag_nodes": dag_nodes,
+                            "dag_edges": dag_edges,
+                        })
+                        continue
+
+                    if product not in pool:
+                        pool[product] = _MolInfo(
+                            smiles=product, depth=new_depth, prov_type="coupling",
+                            parent_a=current_smiles, parent_b=other_smiles,
+                            reaction_name=cr["reaction_name"],
+                            template_id=cr["template_id"],
+                            step_text=f"Coupling: {cr['reaction_name']}",
+                        )
+                        if len(pool) >= MAX_POOL_SIZE:
+                            terminated_early = True
+                            break
+                        queue.append((product, new_depth))
+
+    # ── Classify result ───────────────────────────────────────────────────────
+    if found_routes:
+        # Sort by depth ascending (shortest first)
+        found_routes.sort(key=lambda r: r["depth"])
+        # De-duplicate routes by DAG node set
+        seen_dag: set[frozenset] = set()
+        unique_routes = []
+        for r in found_routes:
+            key = frozenset(n["smiles"] for n in r["dag_nodes"])
+            if key not in seen_dag:
+                seen_dag.add(key)
+                unique_routes.append(r)
+        found_routes = unique_routes
+
+        within = [r for r in found_routes if r["depth"] <= desired_depth]
+        beyond = [r for r in found_routes if r["depth"] >  desired_depth]
+
+        if within:
+            result_status = "found"
+            best_routes = within
+        else:
+            result_status = "found_beyond_depth"
+            best_routes = [beyond[0]]   # shortest route beyond desired depth
+    else:
+        best_routes = []
+        result_status = "ceiling_hit" if terminated_early else "not_found"
+
+    # Annotate routes with is_shortest flag
+    for i, r in enumerate(best_routes):
+        r["is_shortest"] = (i == 0)
+        r["exceeds_desired_depth"] = r["depth"] > desired_depth
 
     return {
-        "routes": routes,
-        "nodes_explored": nodes_explored,
-        "target_found": len(routes) > 0,
+        "routes": best_routes,
+        "nodes_explored": len(pool),
         "terminated_early": terminated_early,
+        "result_status": result_status,
+        "shortest_route_depth": best_routes[0]["depth"] if best_routes else None,
     }
-
-
-class PathwaysRequest(BaseModel):
-    substrate_smiles: str
-    target_smiles: Optional[str] = None
-    max_depth: int = 5
 
 
 @app.post("/pathways")
 async def pathways(req: PathwaysRequest):
     from rdkit import Chem
 
-    sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
-    if sub_mol is None:
-        raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
-    substrate = Chem.MolToSmiles(sub_mol)
+    # ── Resolve starting materials (support legacy single-substrate field) ─────
+    raw_starts = req.start_smiles if req.start_smiles else (
+        [req.substrate_smiles] if req.substrate_smiles.strip() else []
+    )
+    if not raw_starts:
+        raise HTTPException(status_code=422, detail="At least one starting material is required")
 
-    # Server-side clamp — client value is not trusted for the hard cap
-    max_depth = max(1, min(MAX_SEARCH_DEPTH, req.max_depth))
+    canon_starts: list[str] = []
+    for smi in raw_starts:
+        mol = Chem.MolFromSmiles(smi.strip())
+        if mol is None:
+            raise HTTPException(status_code=422, detail=f"Invalid starting material SMILES: {smi!r}")
+        canon_starts.append(Chem.MolToSmiles(mol))
+
+    # Remove duplicates, preserve order
+    seen_starts: set[str] = set()
+    unique_starts: list[str] = []
+    for s in canon_starts:
+        if s not in seen_starts:
+            seen_starts.add(s)
+            unique_starts.append(s)
+    canon_starts = unique_starts
+
+    # Server-side clamp on desired_depth
+    desired_depth = max(1, min(MAX_SEARCH_DEPTH, req.desired_depth))
 
     # Canonicalize optional target
     target_canon: str | None = None
@@ -524,76 +747,86 @@ async def pathways(req: PathwaysRequest):
 
     loop = asyncio.get_event_loop()
 
-    # ── Target given: BFS toward target ───────────────────────────────────────
+    # ── Target given: convergent BFS ──────────────────────────────────────────
     if target_canon:
         search_result = await loop.run_in_executor(
-            _executor, _bfs_to_target, substrate, target_canon, max_depth
+            _executor, _bfs_convergent, canon_starts, target_canon, desired_depth
         )
 
-        branches: list[dict] = []
-        branch_idx = 0
+        status = search_result["result_status"]
+        routes = search_result["routes"]
 
-        if search_result["target_found"]:
-            # Emit found routes as highlighted branches
-            for route in search_result["routes"]:
-                route["id"] = f"route_{branch_idx}_{route['template_id']}"
-                branch_idx += 1
-                branches.append(route)
-            no_match_message = None
-        else:
-            # No route found — fall back to the 1-step fan-out for context
-            for reagent in REAGENT_LIST:
-                reagent_branches = await loop.run_in_executor(
-                    _executor, _run_all_pathways_for_reagent, substrate, reagent
+        # Build the human-readable no-match message
+        if status in ("not_found", "ceiling_hit"):
+            if status == "ceiling_hit":
+                no_match_message = (
+                    f"The search space exceeded {MAX_POOL_SIZE} unique molecules before completing. "
+                    f"No route to the target was found within those bounds. "
+                    "Try reducing the number of starting materials or lowering the depth."
                 )
-                for branch in reagent_branches:
-                    branch["id"] = f"branch_{branch_idx}_{branch['template_id']}"
-                    branch_idx += 1
-                    branch["matches_target"] = False
-                    branches.append(branch)
-
-            termination_reason = (
-                "The search was stopped early because the molecule space grew too large at this depth."
-                if search_result["terminated_early"]
-                else f"within {max_depth} layer{'s' if max_depth != 1 else ''} using the current reaction set"
-            )
+            else:
+                no_match_message = (
+                    f"Searched all reaction pathways up to {MAX_SEARCH_DEPTH} steps "
+                    f"({search_result['nodes_explored']} unique molecules explored); "
+                    "no combination of the available templates converts the starting material(s) into the target. "
+                    "The required reaction may not be in the current template library, "
+                    "or the transformation may not be achievable under the available conditions."
+                )
+        elif status == "found_beyond_depth":
+            d = search_result["shortest_route_depth"]
             no_match_message = (
-                f"No pathway to the target product was found {termination_reason}. "
-                "Try increasing the depth, or the current templates may not cover this transformation."
+                f"No route within your requested depth of {desired_depth}. "
+                f"Shortest route found needs {d} step{'s' if d != 1 else ''} (shown below)."
             )
+        else:
+            no_match_message = None
+
+        # Tag routes with id for frontend selection
+        for i, route in enumerate(routes):
+            route["id"] = f"route_{i}"
+            route["matches_target"] = True
 
         return {
-            "start_smiles": substrate,
+            "start_smiles": canon_starts,
             "target_smiles": target_canon,
             "search_mode": "target_search",
+            "result_status": status,
+            "desired_depth": desired_depth,
+            "shortest_route_depth": search_result["shortest_route_depth"],
             "search_info": {
-                "max_depth": max_depth,
                 "nodes_explored": search_result["nodes_explored"],
-                "target_found": search_result["target_found"],
                 "terminated_early": search_result["terminated_early"],
+                "max_depth_searched": MAX_SEARCH_DEPTH,
             },
             "no_match_message": no_match_message,
-            "branches": branches,
+            "routes": routes,
+            "branches": [],   # empty in target-search mode
         }
 
-    # ── No target: unchanged fan-out ──────────────────────────────────────────
-    branches = []
+    # ── No target: fan-out from ALL starting materials ────────────────────────
+    branches: list[dict] = []
     branch_idx = 0
-    for reagent in REAGENT_LIST:
-        reagent_branches = await loop.run_in_executor(
-            _executor, _run_all_pathways_for_reagent, substrate, reagent
-        )
-        for branch in reagent_branches:
-            branch["id"] = f"branch_{branch_idx}_{branch['template_id']}"
-            branch_idx += 1
-            branches.append(branch)
+    for substrate in canon_starts:
+        for reagent in REAGENT_LIST:
+            reagent_branches = await loop.run_in_executor(
+                _executor, _run_all_pathways_for_reagent, substrate, reagent
+            )
+            for branch in reagent_branches:
+                branch["id"] = f"branch_{branch_idx}_{branch['template_id']}"
+                branch["start_smiles_used"] = substrate
+                branch_idx += 1
+                branches.append(branch)
 
     return {
-        "start_smiles": substrate,
+        "start_smiles": canon_starts,
         "target_smiles": None,
         "search_mode": "fanout",
+        "result_status": None,
+        "desired_depth": desired_depth,
+        "shortest_route_depth": None,
         "search_info": None,
         "no_match_message": None,
+        "routes": [],
         "branches": branches,
     }
 

@@ -75,39 +75,63 @@ function LoadingOverlay({ stage }) {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
+const MAX_STARTS = 4
+
 export default function App() {
-  const [startSmiles,    setStartSmiles]    = useState('')
-  const [targetSmiles,   setTargetSmiles]   = useState('')
-  const [maxDepth,       setMaxDepth]       = useState(5)
-  const [pathwaysData,   setPathwaysData]   = useState(null)
+  const [startSmilesList,  setStartSmilesList]  = useState([''])
+  const [targetSmiles,     setTargetSmiles]     = useState('')
+  const [desiredDepth,     setDesiredDepth]     = useState(5)
+  const [pathwaysData,     setPathwaysData]     = useState(null)
+  const [selectedRouteId,  setSelectedRouteId]  = useState(null)
   const [selectedBranchId, setSelectedBranchId] = useState(null)
   const [selectedNodeId,   setSelectedNodeId]   = useState(null)
   const [selectedNodeData, setSelectedNodeData] = useState(null)
-  const [loading,  setLoading]  = useState(false)
+  const [loading,   setLoading]   = useState(false)
   const [loadStage, setLoadStage] = useState('pathways')
-  const [error,    setError]    = useState(null)
+  const [error,     setError]     = useState(null)
   const [activeTab, setActiveTab] = useState('info')
 
+  // Helpers to find selected items
+  const selectedRoute  = pathwaysData?.routes?.find(r => r.id === selectedRouteId) ?? null
   const selectedBranch = pathwaysData?.branches?.find(b => b.id === selectedBranchId) ?? null
 
-  // If selected node belongs to a different branch than what's selected, find the right one
   const nodeBranch = selectedNodeData?.branchId
     ? (pathwaysData?.branches?.find(b => b.id === selectedNodeData.branchId) ?? selectedBranch)
     : selectedBranch
 
+  // Primary substrate for InfoPanel/chatbot context
+  const primaryStart = startSmilesList.find(s => s.trim()) ?? ''
+
+  // ── Multiple start inputs ──────────────────────────────────────────────────
+  function updateStart(idx, val) {
+    setStartSmilesList(prev => prev.map((s, i) => i === idx ? val : s))
+  }
+  function addStart() {
+    if (startSmilesList.length < MAX_STARTS)
+      setStartSmilesList(prev => [...prev, ''])
+  }
+  function removeStart(idx) {
+    setStartSmilesList(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev)
+  }
+
+  // ── Analyze ───────────────────────────────────────────────────────────────
   async function handleAnalyze() {
-    if (!startSmiles.trim()) return
+    const validStarts = startSmilesList.map(s => s.trim()).filter(Boolean)
+    if (!validStarts.length) return
     setLoading(true)
     setLoadStage('pathways')
     setError(null)
     setPathwaysData(null)
+    setSelectedRouteId(null)
     setSelectedBranchId(null)
     setSelectedNodeId(null)
     setSelectedNodeData(null)
     try {
-      const data = await fetchPathways(startSmiles.trim(), targetSmiles.trim(), maxDepth)
+      const data = await fetchPathways(validStarts, targetSmiles.trim(), desiredDepth)
       setPathwaysData(data)
-      if (data.branches?.length) {
+      if (data.routes?.length) {
+        setSelectedRouteId(data.routes[0].id)
+      } else if (data.branches?.length) {
         const match = data.branches.find(b => b.matches_target)
         setSelectedBranchId((match ?? data.branches[0]).id)
       }
@@ -122,6 +146,10 @@ export default function App() {
     setSelectedNodeId(nodeId)
     setSelectedNodeData(nodeData)
   }
+
+  const hasValidStart = startSmilesList.some(s => s.trim())
+  const isTargetMode  = pathwaysData?.search_mode === 'target_search'
+  const status        = pathwaysData?.result_status
 
   return (
     <div className="app">
@@ -149,39 +177,76 @@ export default function App() {
         <div className="panel">
           <div className="panel-header">Structures</div>
           <div className="panel-body">
-            <MoleculeInput
-              label="Starting Material"
-              value={startSmiles}
-              onChange={setStartSmiles}
-            />
+
+            {/* Starting materials — one or more */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Starting Material{startSmilesList.length > 1 ? 's' : ''}
+                </span>
+                {startSmilesList.length < MAX_STARTS && (
+                  <button
+                    onClick={addStart}
+                    title="Add another starting material"
+                    style={{
+                      background: 'none', border: '1px solid var(--border)', borderRadius: 4,
+                      color: 'var(--accent)', fontSize: 11, padding: '2px 8px', cursor: 'pointer',
+                    }}
+                  >
+                    + Add
+                  </button>
+                )}
+              </div>
+              {startSmilesList.map((smi, idx) => (
+                <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+                  <div style={{ flex: 1 }}>
+                    <MoleculeInput
+                      label={startSmilesList.length > 1 ? `Material ${idx + 1}` : 'SMILES / image'}
+                      value={smi}
+                      onChange={val => updateStart(idx, val)}
+                    />
+                  </div>
+                  {startSmilesList.length > 1 && (
+                    <button
+                      onClick={() => removeStart(idx)}
+                      title="Remove"
+                      style={{
+                        background: 'none', border: 'none', color: 'var(--muted)',
+                        fontSize: 16, cursor: 'pointer', padding: '4px 2px', lineHeight: 1,
+                        marginTop: 26,
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
             <MoleculeInput
               label="Target Product (optional)"
               value={targetSmiles}
               onChange={setTargetSmiles}
             />
 
-            {/* Depth control — only meaningful when a target is set */}
+            {/* Depth control — only when a target is set */}
             {targetSmiles.trim() && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    Search depth
+                    Desired depth
                   </span>
                   <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, minWidth: 16, textAlign: 'right' }}>
-                    {maxDepth}
+                    {desiredDepth}
                   </span>
                 </div>
                 <input
-                  type="range"
-                  min={1}
-                  max={10}
-                  step={1}
-                  value={maxDepth}
-                  onChange={e => setMaxDepth(Number(e.target.value))}
+                  type="range" min={1} max={10} step={1} value={desiredDepth}
+                  onChange={e => setDesiredDepth(Number(e.target.value))}
                   style={{ width: '100%', accentColor: 'var(--accent)', cursor: 'pointer' }}
                 />
                 <div style={{ fontSize: 10, color: 'var(--muted)', lineHeight: 1.4 }}>
-                  Max layers of reagents to apply. Deeper = slower and busier graph.
+                  Preferred route length. Search always continues to depth 10 to find the shortest possible route.
                 </div>
               </div>
             )}
@@ -189,7 +254,7 @@ export default function App() {
             <button
               className="analyze-btn"
               onClick={handleAnalyze}
-              disabled={loading || !startSmiles.trim()}
+              disabled={loading || !hasValidStart}
             >
               {loading ? (
                 <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
@@ -206,28 +271,42 @@ export default function App() {
               </div>
             )}
 
+            {/* Result status summary */}
             {pathwaysData && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>
-                  {pathwaysData.branches.length} pathway{pathwaysData.branches.length !== 1 ? 's' : ''} found
-                  {pathwaysData.branches.some(b => b.matches_target) && (
-                    <span style={{ color: 'var(--success)', marginLeft: 8 }}>✓ target matched</span>
+                  {isTargetMode ? (
+                    <>
+                      {status === 'found' && (
+                        <span style={{ color: 'var(--success)' }}>
+                          Target reached in {pathwaysData.shortest_route_depth} step{pathwaysData.shortest_route_depth !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                      {status === 'found_beyond_depth' && (
+                        <span style={{ color: '#d2961e' }}>
+                          Shortest route: {pathwaysData.shortest_route_depth} steps (exceeds your depth of {pathwaysData.desired_depth})
+                        </span>
+                      )}
+                      {(status === 'not_found' || status === 'ceiling_hit') && (
+                        <span style={{ color: 'var(--danger)' }}>Target not reachable</span>
+                      )}
+                    </>
+                  ) : (
+                    `${pathwaysData.branches?.length ?? 0} pathway${(pathwaysData.branches?.length ?? 0) !== 1 ? 's' : ''} found`
                   )}
                   {pathwaysData.search_info && (
                     <span style={{ color: 'var(--muted)', marginLeft: 8 }}>
-                      · {pathwaysData.search_info.nodes_explored} nodes explored
+                      · {pathwaysData.search_info.nodes_explored} molecules explored
                     </span>
                   )}
                 </div>
 
                 {pathwaysData.no_match_message && (
                   <div style={{
-                    background: 'rgba(210,153,34,0.08)',
-                    border: '1px solid rgba(210,153,34,0.3)',
-                    borderRadius: 6,
-                    padding: '8px 10px',
-                    fontSize: 11,
-                    color: '#d2961e',
+                    background: status === 'found_beyond_depth' ? 'rgba(210,153,34,0.08)' : 'rgba(248,81,73,0.08)',
+                    border: `1px solid ${status === 'found_beyond_depth' ? 'rgba(210,153,34,0.3)' : 'rgba(248,81,73,0.25)'}`,
+                    borderRadius: 6, padding: '8px 10px', fontSize: 11,
+                    color: status === 'found_beyond_depth' ? '#d2961e' : 'var(--danger)',
                     lineHeight: 1.5,
                   }}>
                     {pathwaysData.no_match_message}
@@ -236,12 +315,47 @@ export default function App() {
               </div>
             )}
 
-            {/* Branch list */}
-            {pathwaysData?.branches?.length > 0 && (
+            {/* Route list (target-search mode) */}
+            {isTargetMode && pathwaysData.routes?.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div className="panel-header" style={{ padding: '4px 0 4px', border: 'none' }}>
-                  Pathways
-                </div>
+                <div className="panel-header" style={{ padding: '4px 0 4px', border: 'none' }}>Routes</div>
+                {pathwaysData.routes.map(r => (
+                  <button
+                    key={r.id}
+                    onClick={() => { setSelectedRouteId(r.id); setSelectedNodeId(null); setSelectedNodeData(null) }}
+                    style={{
+                      background: r.id === selectedRouteId ? 'rgba(63,185,80,0.10)' : 'var(--card)',
+                      border: `1px solid ${r.id === selectedRouteId ? 'var(--success)' : 'var(--border)'}`,
+                      borderRadius: 6, padding: '8px 10px', textAlign: 'left',
+                      cursor: 'pointer', color: 'var(--text)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--success)' }}>
+                        {r.is_shortest ? 'Shortest route' : `Route (${r.depth} steps)`}
+                      </span>
+                      {r.exceeds_desired_depth && (
+                        <span style={{ fontSize: 10, color: '#d2961e', background: 'rgba(210,153,34,0.12)',
+                          border: '1px solid rgba(210,153,34,0.3)', borderRadius: 20, padding: '1px 7px' }}>
+                          exceeds depth
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
+                      {r.depth} step{r.depth !== 1 ? 's' : ''} ·{' '}
+                      {r.dag_nodes?.filter(n => n.is_coupling).length > 0
+                        ? `${r.dag_nodes.filter(n => n.is_coupling).length} coupling step(s)`
+                        : 'linear route'}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Branch list (fanout mode) */}
+            {!isTargetMode && pathwaysData?.branches?.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div className="panel-header" style={{ padding: '4px 0 4px', border: 'none' }}>Pathways</div>
                 {pathwaysData.branches.map(b => (
                   <button
                     key={b.id}
@@ -249,28 +363,24 @@ export default function App() {
                     style={{
                       background: b.id === selectedBranchId ? 'rgba(88,166,255,0.12)' : 'var(--card)',
                       border: `1px solid ${b.id === selectedBranchId ? 'var(--accent)' : 'var(--border)'}`,
-                      borderRadius: 6,
-                      padding: '8px 10px',
-                      textAlign: 'left',
-                      cursor: 'pointer',
-                      color: 'var(--text)',
+                      borderRadius: 6, padding: '8px 10px', textAlign: 'left',
+                      cursor: 'pointer', color: 'var(--text)',
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontWeight: 600, fontSize: 13 }}>{b.reagent.name}</span>
+                      <span style={{ fontWeight: 600, fontSize: 13 }}>{b.reagent?.name ?? '—'}</span>
                       <span className={`env-badge ${b.environment === 'Kinetic' ? 'env-kinetic' : 'env-thermodynamic'}`}>
                         {b.environment}
                       </span>
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
                       {b.reaction_classification?.name ?? 'Unknown reaction'}
-                      {b.matches_target && <span style={{ color: 'var(--success)', marginLeft: 6 }}>✓ target</span>}
                     </div>
                     <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
-                      {b.steps?.length - 1} step{(b.steps?.length - 1) !== 1 ? 's' : ''} ·
+                      {(b.steps?.length ?? 1) - 1} step{((b.steps?.length ?? 1) - 1) !== 1 ? 's' : ''} ·{' '}
                       {b.steps?.filter(s => s.type === 'intermediate').length > 0
-                        ? ` ${b.steps.filter(s => s.type === 'intermediate').length} intermediate(s)`
-                        : ' direct'}
+                        ? `${b.steps.filter(s => s.type === 'intermediate').length} intermediate(s)`
+                        : 'direct'}
                     </div>
                   </button>
                 ))}
@@ -292,8 +402,10 @@ export default function App() {
           <div className="graph-container">
             <PathwayGraph
               data={pathwaysData}
+              selectedRouteId={selectedRouteId}
               selectedBranchId={selectedBranchId}
               selectedNodeId={selectedNodeId}
+              onSelectRoute={setSelectedRouteId}
               onSelectBranch={setSelectedBranchId}
               onSelectNode={handleSelectNode}
             />
@@ -308,18 +420,12 @@ export default function App() {
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 style={{
-                  flex: 1,
-                  background: 'none',
-                  border: 'none',
+                  flex: 1, background: 'none', border: 'none',
                   borderBottom: `2px solid ${activeTab === tab ? 'var(--accent)' : 'transparent'}`,
                   borderRadius: 0,
                   color: activeTab === tab ? 'var(--accent)' : 'var(--muted)',
-                  padding: '12px 0',
-                  fontSize: 11,
-                  fontWeight: 600,
-                  letterSpacing: '0.08em',
-                  textTransform: 'uppercase',
-                  cursor: 'pointer',
+                  padding: '12px 0', fontSize: 11, fontWeight: 600,
+                  letterSpacing: '0.08em', textTransform: 'uppercase', cursor: 'pointer',
                 }}
               >
                 {tab === 'info' ? 'Reaction Info' : 'Chatbot'}
@@ -330,12 +436,13 @@ export default function App() {
           {activeTab === 'info' ? (
             <InfoPanel
               branch={nodeBranch}
-              substrateSMILES={startSmiles}
+              route={selectedRoute}
+              substrateSMILES={primaryStart}
               selectedNode={selectedNodeId}
               selectedNodeData={selectedNodeData}
             />
           ) : (
-            <Chatbot branch={selectedBranch} substrateSMILES={startSmiles} />
+            <Chatbot branch={selectedBranch} substrateSMILES={primaryStart} />
           )}
         </div>
 
