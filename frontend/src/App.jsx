@@ -3,6 +3,8 @@ import MoleculeInput from './components/MoleculeInput'
 import PathwayGraph from './components/PathwayGraph'
 import InfoPanel from './components/InfoPanel'
 import Chatbot from './components/Chatbot'
+import ReactPredict from './components/ReactPredict'
+import DirectReact from './components/DirectReact'
 import { fetchPathways } from './api'
 
 // ── Loading overlay ───────────────────────────────────────────────────────────
@@ -78,6 +80,7 @@ function LoadingOverlay({ stage }) {
 const MAX_STARTS = 4
 
 export default function App() {
+  const [appMode, setAppMode] = useState('explorer')  // 'explorer' | 'predict'
   const [startSmilesList,  setStartSmilesList]  = useState([''])
   const [targetSmiles,     setTargetSmiles]     = useState('')
   const [desiredDepth,     setDesiredDepth]     = useState(5)
@@ -169,9 +172,54 @@ export default function App() {
           <h1>Orgo AI</h1>
           <div className="subtitle">Reaction pathway explorer</div>
         </div>
+
+        {/* Mode toggle */}
+        <div style={{
+          marginLeft: 'auto',
+          display: 'flex',
+          background: 'var(--card)',
+          border: '1px solid var(--border)',
+          borderRadius: 8,
+          overflow: 'hidden',
+        }}>
+          {[
+            { key: 'explorer', label: 'Pathway Explorer' },
+            { key: 'react',    label: '⚗ React' },
+            { key: 'predict',  label: '📷 Predict from Photo' },
+          ].map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setAppMode(key)}
+              style={{
+                background: appMode === key ? 'var(--accent)' : 'none',
+                border: 'none',
+                color: appMode === key ? '#fff' : 'var(--muted)',
+                fontSize: 12,
+                fontWeight: 600,
+                padding: '6px 14px',
+                cursor: 'pointer',
+                transition: 'background 0.15s, color 0.15s',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </header>
 
-      <div className="main-content">
+      {appMode === 'react' && (
+        <div style={{ overflowY: 'auto', height: 'calc(100vh - 57px)' }}>
+          <DirectReact />
+        </div>
+      )}
+
+      {appMode === 'predict' && (
+        <div style={{ overflowY: 'auto', height: 'calc(100vh - 57px)' }}>
+          <ReactPredict />
+        </div>
+      )}
+
+      <div className="main-content" style={{ display: appMode !== 'explorer' ? 'none' : undefined }}>
 
         {/* ── Left: inputs ─────────────────────────────────────────── */}
         <div className="panel">

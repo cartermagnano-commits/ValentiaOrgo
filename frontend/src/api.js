@@ -24,6 +24,21 @@ export async function analyzeImage(file) {
   return res.json()
 }
 
+export async function reactDirect(substrateSMILES, reagentSMILES) {
+  return post('/react', { substrate_smiles: substrateSMILES, reagent_smiles: reagentSMILES })
+}
+
+export async function reactFromImage(file) {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(BASE + '/react-from-image', { method: 'POST', body: form })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || 'Prediction failed')
+  }
+  return res.json()
+}
+
 export function structureUrl(smiles, width = 200, height = 150) {
   return `/structure?smiles=${encodeURIComponent(smiles)}&width=${width}&height=${height}`
 }

@@ -120,7 +120,12 @@ class TemplateEngine:
         else:
             if not reagent_fragments:
                 return []
-            reactant_sets = [(substrate_mol, frag) for frag in reagent_fragments]
+            # Try both orderings so the user doesn't need to worry about which
+            # molecule is "substrate" vs "reagent" for 2-reactant templates.
+            reactant_sets = []
+            for frag in reagent_fragments:
+                reactant_sets.append((substrate_mol, frag))
+                reactant_sets.append((frag, substrate_mol))
 
         seen: set[str] = set()
         results: list[str] = []
@@ -389,6 +394,48 @@ class TemplateEngine:
 
                 elif sym in ("I", "Cl", "Br") and charge < 0:
                     conds.add("halide_nucleophile")
+
+                elif sym == "Br" and charge == 0:
+                    if any(n.GetSymbol() == "Br" for n in atom.GetNeighbors()):
+                        conds.add("halogenation")   # Br2
+                    else:
+                        conds.add("hbr")            # HBr
+
+                elif sym == "Cl" and charge == 0:
+                    if any(n.GetSymbol() == "Cl" for n in atom.GetNeighbors()):
+                        conds.add("halogenation")   # Cl2
+                    else:
+                        conds.add("hcl")            # HCl
+
+                elif sym == "I" and charge == 0:
+                    conds.add("hi")                 # HI
+
+                elif sym == "B" and charge < 0:
+                    conds.add("hydride")            # BH4- (NaBH4)
+
+                elif sym == "Al" and charge < 0:
+                    conds.add("hydride")            # AlH4- (LiAlH4)
+
+                elif sym == "N" and charge == 0:
+                    conds.add("amine_nucleophile")  # NH3 or amine
+
+                elif sym == "S" and charge == 0:
+                    # H2SO4 or sulfonic acid → acid catalyst
+                    for n in atom.GetNeighbors():
+                        if n.GetSymbol() == "O" and n.GetFormalCharge() < 0:
+                            conds.add("acid")
+                            break
+                    else:
+                        # S bonded to multiple O's with no charge (H2SO4 neutral form)
+                        o_count = sum(1 for n in atom.GetNeighbors() if n.GetSymbol() == "O")
+                        if o_count >= 3:
+                            conds.add("acid")
+
+                elif sym == "P" and charge == 0:
+                    # H3PO4 → acid catalyst
+                    o_count = sum(1 for n in atom.GetNeighbors() if n.GetSymbol() == "O")
+                    if o_count >= 3:
+                        conds.add("acid")
 
         # Water (single O, no charge, no heavy neighbors)
         canon = Chem.MolToSmiles(mol)

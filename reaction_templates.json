@@ -120,7 +120,15 @@
       "smarts": "[CX4:1][Br:2].[NH3]>>[CX4:1][NH3+].[Br-:2]",
       "conditions": ["amine_nucleophile"],
       "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. N-alkylation producing ammonium salt; proton transfer gives amine.",
-      "enabled": false
+      "enabled": true
+    },
+    {
+      "id": "sn2_cl_nh3",
+      "name": "N-alkylation: alkyl chloride + ammonia",
+      "smarts": "[CX4:1][Cl:2].[NH3]>>[CX4:1][NH3+].[Cl-:2]",
+      "conditions": ["amine_nucleophile"],
+      "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. N-alkylation of an alkyl chloride with ammonia.",
+      "enabled": true
     },
     {
       "id": "carbonyl_hydration",
@@ -227,6 +235,135 @@
       "conditions": [],
       "coupling": true,
       "provenance": "Grignard, V. C. R. Acad. Sci. 1900, 130, 1322. Grignard addition to formaldehyde (the only carbonyl with 2 H's on C, [CX3H2:2]) gives a primary alcohol after workup. Product has one more carbon than the Grignard R group: RMgX + HCHO → RCH2OH.",
+      "enabled": true
+    },
+    {
+      "id": "nabh4_aldehyde",
+      "name": "NaBH4 reduction: aldehyde → primary alcohol",
+      "smarts": "[CX3H1:1](=[OX1:2]).[BH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. NaBH4 delivers hydride to the carbonyl carbon of an aldehyde; aqueous workup gives the primary alcohol. Net: RCHO → RCH2OH.",
+      "enabled": true
+    },
+    {
+      "id": "nabh4_ketone",
+      "name": "NaBH4 reduction: ketone → secondary alcohol",
+      "smarts": "[CX3H0:1](=[OX1:2]).[BH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. NaBH4 reduces a ketone to a secondary alcohol via 1,2-hydride delivery. Net: RCOR' → RCHOHR'.",
+      "enabled": true
+    },
+    {
+      "id": "lialh4_aldehyde",
+      "name": "LiAlH4 reduction: aldehyde → primary alcohol",
+      "smarts": "[CX3H1:1](=[OX1:2]).[AlH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 is a more powerful reducing agent than NaBH4; reduces aldehydes to primary alcohols.",
+      "enabled": true
+    },
+    {
+      "id": "lialh4_ketone",
+      "name": "LiAlH4 reduction: ketone → secondary alcohol",
+      "smarts": "[CX3H0:1](=[OX1:2]).[AlH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 reduces ketones to secondary alcohols.",
+      "enabled": true
+    },
+    {
+      "id": "lialh4_carboxylic_acid",
+      "name": "LiAlH4 reduction: carboxylic acid → primary alcohol",
+      "smarts": "[CX3H0:1](=[OX1:2])[OX2H:3].[AlH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 (but not NaBH4) reduces carboxylic acids to primary alcohols. Net: RCOOH → RCH2OH.",
+      "enabled": true
+    },
+    {
+      "id": "hbr_markovnikov_terminal",
+      "name": "HBr addition: terminal alkene → secondary bromide (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H1:2].[Br:3]>>[CX4:1][CX4:2][Br:3]",
+      "conditions": ["hbr"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic HBr addition to CH2=CHR. Markovnikov: proton to terminal CH2 (→ CH3), Br to internal C (→ secondary bromide).",
+      "enabled": true
+    },
+    {
+      "id": "hbr_markovnikov_disubstituted",
+      "name": "HBr addition: trisubstituted alkene → tertiary bromide (Markovnikov)",
+      "smarts": "[CX3H1:1]=[CX3H0:2].[Br:3]>>[CX4:1][CX4:2][Br:3]",
+      "conditions": ["hbr"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HBr addition to CHR=CR'R''. Markovnikov: Br goes to more substituted C (→ tertiary bromide).",
+      "enabled": true
+    },
+    {
+      "id": "hcl_markovnikov_terminal",
+      "name": "HCl addition: terminal alkene → secondary chloride (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H1:2].[Cl:3]>>[CX4:1][CX4:2][Cl:3]",
+      "conditions": ["hcl"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic HCl addition to CH2=CHR with Markovnikov regiochemistry.",
+      "enabled": true
+    },
+    {
+      "id": "hcl_markovnikov_disubstituted",
+      "name": "HCl addition: trisubstituted alkene → tertiary chloride (Markovnikov)",
+      "smarts": "[CX3H1:1]=[CX3H0:2].[Cl:3]>>[CX4:1][CX4:2][Cl:3]",
+      "conditions": ["hcl"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HCl Markovnikov addition to trisubstituted alkene.",
+      "enabled": true
+    },
+    {
+      "id": "hi_markovnikov_terminal",
+      "name": "HI addition: terminal alkene → secondary iodide (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H1:2].[I:3]>>[CX4:1][CX4:2][I:3]",
+      "conditions": ["hi"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HI is the most reactive HX for electrophilic addition; Markovnikov regiochemistry.",
+      "enabled": true
+    },
+    {
+      "id": "br2_addition_alkene",
+      "name": "Br2 addition: alkene → vicinal dibromide",
+      "smarts": "[CX3:1]=[CX3:2].[Br:3][Br:4]>>[CX4:1]([Br:3])[CX4:2][Br:4]",
+      "conditions": ["halogenation"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic Br2 addition via bromonium ion; anti addition (stereo not tracked). Net: C=C → C(Br)-C(Br) vicinal dibromide.",
+      "enabled": true
+    },
+    {
+      "id": "cl2_addition_alkene",
+      "name": "Cl2 addition: alkene → vicinal dichloride",
+      "smarts": "[CX3:1]=[CX3:2].[Cl:3][Cl:4]>>[CX4:1]([Cl:3])[CX4:2][Cl:4]",
+      "conditions": ["halogenation"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic Cl2 addition to alkene. Net: C=C → C(Cl)-C(Cl) vicinal dichloride.",
+      "enabled": true
+    },
+    {
+      "id": "carboxylate_deprotonation",
+      "name": "Carboxylic acid deprotonation → carboxylate",
+      "smarts": "[CX3:1](=[OX1:2])[OH:3]>>[CX3:1](=[OX1:2])[O-:3]",
+      "conditions": ["strong_base", "hydroxide"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Carboxylic acids (pKa ~5) are deprotonated by strong bases or hydroxide to give the resonance-stabilized carboxylate anion.",
+      "enabled": true
+    },
+    {
+      "id": "alcohol_dehydration",
+      "name": "Acid-catalyzed dehydration: secondary/tertiary alcohol → alkene",
+      "smarts": "[CX4:1]([OH:3])[CX4:2]>>[CX3:1]=[CX3:2].[OH2:3]",
+      "conditions": ["acid"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. E1 dehydration of a secondary or tertiary alcohol under acid catalysis (H2SO4, H3PO4) via carbocation intermediate. Net: -CHOH-CH- → -C=C- + H2O.",
+      "enabled": true
+    },
+    {
+      "id": "aldol_condensation",
+      "name": "Aldol addition: enolate + aldehyde → beta-hydroxy carbonyl",
+      "smarts": "[CX3:1]([O-:2])=[CX3:3].[CX3H1:4]=[OX1:5]>>[CX3:1](=[OX1:2])[CX4:3][CX4H1:4]([OH:5])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. C-C bond-forming aldol reaction: enolate (from kinetic_enolate) attacks the carbonyl of an aldehyde. Net: C=C-O- + RCHO → C(=O)-CH-CH(OH)R (beta-hydroxy carbonyl).",
+      "enabled": true
+    },
+    {
+      "id": "ester_saponification",
+      "name": "Ester saponification: ester + hydroxide → carboxylate + alcohol",
+      "smarts": "[CX4:1][OX2:2][CX3:3](=[OX1:4]).[OH-]>>[CX4:1][OH].[CX3:3](=[OX1:4])[O-]",
+      "conditions": ["hydroxide"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Base-promoted ester hydrolysis (saponification): hydroxide attacks carbonyl C, alkoxide leaves, gives carboxylate + alcohol.",
       "enabled": true
     }
   ]

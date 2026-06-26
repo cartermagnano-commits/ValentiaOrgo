@@ -179,6 +179,60 @@ REAGENT_LIST = [
         "description": "Sodium hydride — strong base for alcohol deprotonation (Williamson ether synthesis)",
         "conditions": ["strong_base"],
     },
+    {
+        "name": "NaBH4",
+        "smiles": "[BH4-].[Na+]",
+        "description": "Sodium borohydride — mild hydride reducing agent (aldehydes and ketones → alcohols)",
+        "conditions": ["hydride"],
+    },
+    {
+        "name": "LiAlH4",
+        "smiles": "[AlH4-].[Li+]",
+        "description": "Lithium aluminium hydride — strong reducing agent (aldehydes, ketones, esters, carboxylic acids → alcohols)",
+        "conditions": ["hydride"],
+    },
+    {
+        "name": "HBr",
+        "smiles": "Br",
+        "description": "Hydrogen bromide — Markovnikov addition to alkenes; SN2 on alcohols",
+        "conditions": ["hbr"],
+    },
+    {
+        "name": "HCl",
+        "smiles": "Cl",
+        "description": "Hydrogen chloride — Markovnikov addition to alkenes",
+        "conditions": ["hcl"],
+    },
+    {
+        "name": "HI",
+        "smiles": "I",
+        "description": "Hydrogen iodide — Markovnikov addition to alkenes; most reactive HX",
+        "conditions": ["hi"],
+    },
+    {
+        "name": "Br2",
+        "smiles": "BrBr",
+        "description": "Bromine — anti addition to alkenes → vicinal dibromide",
+        "conditions": ["halogenation"],
+    },
+    {
+        "name": "Cl2",
+        "smiles": "ClCl",
+        "description": "Chlorine — anti addition to alkenes → vicinal dichloride",
+        "conditions": ["halogenation"],
+    },
+    {
+        "name": "NH3",
+        "smiles": "N",
+        "description": "Ammonia — nucleophilic N-alkylation with alkyl halides",
+        "conditions": ["amine_nucleophile"],
+    },
+    {
+        "name": "H2SO4",
+        "smiles": "OS(=O)(=O)O",
+        "description": "Sulfuric acid — acid catalyst for alcohol dehydration and alkene hydration",
+        "conditions": ["acid"],
+    },
 ]
 
 
@@ -1003,6 +1057,189 @@ async def chat(req: ChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── /react-from-image ─────────────────────────────────────────────────────────
+
+def _react_from_image(raw_bytes: bytes) -> dict:
+    """
+    Full pipeline: raw image bytes → preprocessing → DECIMER → split
+    into substrate + reagent → template engine → product SMILES.
+
+    Returns a dict with keys:
+        recognized_smiles   — raw DECIMER output
+        components          — list of canonical component SMILES strings
+        substrate_smiles    — first component (canonical)
+        reagent_smiles      — remaining components joined with '.'
+        products            — list of {smiles, reaction_name, template_id,
+                               steps_taken, execution_history}
+        error               — str | None
+    """
+    from rdkit import Chem
+
+    # 1. Preprocess image
+    try:
+        pil = Image.open(io.BytesIO(raw_bytes))
+        try:
+            from PIL import ImageOps
+            pil = ImageOps.exif_transpose(pil)
+        except Exception:
+            pass
+        pil = pil.convert("RGB")
+        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    except Exception as exc:
+        return {"error": f"Could not decode image: {exc}", "products": []}
+
+    img = _resize(img)
+    current = img.copy()
+    for _, fn in [("perspective", perspective_correct), ("deskew", deskew),
+                  ("denoise", denoise), ("binarize", normalize_binarize)]:
+        try:
+            result = fn(current)
+            if result is not None and isinstance(result, np.ndarray):
+                current = result
+        except Exception:
+            pass
+
+    # 2. OSR via DECIMER
+    recognized_smiles: str | None = None
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+        cv2.imwrite(tmp_path, current)
+        recognized_smiles = _load_decimer()(tmp_path)
+    except Exception as exc:
+        return {"error": f"Structure recognition failed: {exc}", "products": []}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if not recognized_smiles:
+        return {"error": "No structure recognized in the image.", "products": []}
+
+    # 3. Parse all components — split on '.' but re-validate each fragment
+    raw_mol = Chem.MolFromSmiles(recognized_smiles)
+    if raw_mol is None:
+        # Try replacing '+' notation (some DECIMER outputs use '+' for fragment sep)
+        alt = recognized_smiles.replace("+", ".")
+        raw_mol = Chem.MolFromSmiles(alt)
+        if raw_mol is None:
+            return {
+                "recognized_smiles": recognized_smiles,
+                "error": "Recognized SMILES is invalid; try a clearer image.",
+                "products": [],
+            }
+
+    frags = Chem.GetMolFrags(raw_mol, asMols=True)
+    # Sort by heavy-atom count descending so the substrate (largest) comes first
+    frags_sorted = sorted(frags, key=lambda m: m.GetNumHeavyAtoms(), reverse=True)
+    components = [Chem.MolToSmiles(f) for f in frags_sorted]
+
+    if len(components) < 2:
+        return {
+            "recognized_smiles": recognized_smiles,
+            "components": components,
+            "substrate_smiles": components[0] if components else "",
+            "reagent_smiles": "",
+            "error": "Only one molecule was recognized. Upload an image containing both substrate and reagent.",
+            "products": [],
+        }
+
+    substrate_smiles = components[0]
+    reagent_smiles   = ".".join(components[1:])
+
+    # 4. Infer conditions and run engine
+    conditions = TemplateEngine._infer_conditions(reagent_smiles)
+    branches   = _engine.run_for_reagent(substrate_smiles, reagent_smiles, conditions)
+
+    products = [
+        {
+            "smiles":            b["final_product"],
+            "reaction_name":     b["reaction_name"],
+            "template_id":       b["template_id"],
+            "steps_taken":       b["steps_taken"],
+            "execution_history": b["execution_history"],
+        }
+        for b in branches
+    ]
+
+    return {
+        "recognized_smiles": recognized_smiles,
+        "components":        components,
+        "substrate_smiles":  substrate_smiles,
+        "reagent_smiles":    reagent_smiles,
+        "products":          products,
+        "error":             None if products else "No matching reaction templates for this substrate/reagent pair.",
+    }
+
+
+class ReactRequest(BaseModel):
+    substrate_smiles: str
+    reagent_smiles: str
+
+
+@app.post("/react")
+async def react(req: ReactRequest):
+    """Return all predicted products for a given substrate + reagent SMILES pair."""
+    from rdkit import Chem
+
+    sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
+    if sub_mol is None:
+        raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
+    rea_mol = Chem.MolFromSmiles(req.reagent_smiles.strip())
+    if rea_mol is None:
+        raise HTTPException(status_code=422, detail="Invalid reagent SMILES")
+
+    substrate = Chem.MolToSmiles(sub_mol)
+    reagent   = Chem.MolToSmiles(rea_mol)
+
+    conditions = TemplateEngine._infer_conditions(reagent)
+    # Also check REAGENT_LIST for explicit condition tags
+    for r in REAGENT_LIST:
+        r_mol = Chem.MolFromSmiles(r["smiles"])
+        if r_mol and Chem.MolToSmiles(r_mol) == reagent:
+            conditions = r.get("conditions", conditions)
+            break
+
+    def _run():
+        return _engine.run_for_reagent(substrate, reagent, conditions)
+
+    loop = asyncio.get_event_loop()
+    branches = await loop.run_in_executor(_executor, _run)
+
+    environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
+
+    products = [
+        {
+            "smiles":            b["final_product"],
+            "reaction_name":     b["reaction_name"],
+            "template_id":       b["template_id"],
+            "steps_taken":       b["steps_taken"],
+            "execution_history": b["execution_history"],
+        }
+        for b in branches
+    ]
+
+    return {
+        "substrate_smiles": substrate,
+        "reagent_smiles":   reagent,
+        "environment":      environment,
+        "products":         products,
+    }
+
+
+@app.post("/react-from-image")
+async def react_from_image(file: UploadFile = File(...)):
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file")
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(_executor, _react_from_image, contents)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}") from exc
+    return result
 
 
 # ── Static file serving — mount AFTER all API routes ─────────────────────────
