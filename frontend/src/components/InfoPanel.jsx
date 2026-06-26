@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import StructureView from './StructureView'
-import { fetchNodeExplanation, fetchExplanation } from '../api'
+import { streamNodeExplanation, streamExplanation } from '../api'
 
 const CONF_CLASS = { high: 'conf-high', medium: 'conf-medium', low: 'conf-low', unknown: 'conf-unknown' }
 
@@ -14,9 +14,9 @@ function NodeInfoView({ nodeData, branch, substrateSMILES }) {
   useEffect(() => {
     if (!nodeData || !branch) return
     setExplanation({ text: '', loading: true, error: null })
-    fetchNodeExplanation(nodeData, branch, substrateSMILES)
-      .then(r => setExplanation({ text: r.explanation, loading: false, error: null }))
-      .catch(e => setExplanation({ text: '', loading: false, error: e.message }))
+    streamNodeExplanation(nodeData, branch, substrateSMILES, delta =>
+      setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
+    ).catch(e => setExplanation({ text: '', loading: false, error: e.message }))
   }, [nodeData?.smiles, nodeData?.nodeType, branch?.id, substrateSMILES])
 
   if (!nodeData) return null
@@ -132,9 +132,9 @@ function BranchInfoView({ branch, substrateSMILES }) {
   useEffect(() => {
     if (!branch) return
     setExplanation({ text: '', loading: true, error: null })
-    fetchExplanation(branch, substrateSMILES)
-      .then(r => setExplanation({ text: r.explanation, loading: false, error: null }))
-      .catch(e => setExplanation({ text: '', loading: false, error: e.message }))
+    streamExplanation(branch, substrateSMILES, delta =>
+      setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
+    ).catch(e => setExplanation({ text: '', loading: false, error: e.message }))
   }, [branch?.id, substrateSMILES])
 
   if (!branch) {

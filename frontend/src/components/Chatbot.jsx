@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { sendChat } from '../api'
+import { streamChat } from '../api'
 
 function buildContext(branch, substrateSMILES) {
   if (!branch) return null
@@ -30,17 +30,28 @@ export default function Chatbot({ branch, substrateSMILES }) {
     if (!text || loading) return
     setInput('')
 
-    const newMessages = [...messages, { role: 'user', content: text }]
-    setMessages(newMessages)
+    // Add user message then a blank assistant message to stream into
+    const userMessages = [...messages, { role: 'user', content: text }]
+    setMessages([...userMessages, { role: 'assistant', content: '' }])
     setLoading(true)
 
     try {
       const ctx = buildContext(branch, substrateSMILES)
-      // Slice off the static welcome greeting (index 0) before sending to the API
-      const result = await sendChat(newMessages.slice(1), ctx)
-      setMessages(prev => [...prev, { role: 'assistant', content: result.response }])
+      await streamChat(
+        userMessages.slice(1), // strip welcome greeting before sending
+        ctx,
+        delta => setMessages(prev => {
+          const msgs = [...prev]
+          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: msgs[msgs.length - 1].content + delta }
+          return msgs
+        })
+      )
     } catch (e) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${e.message}` }])
+      setMessages(prev => {
+        const msgs = [...prev]
+        msgs[msgs.length - 1] = { role: 'assistant', content: `Error: ${e.message}` }
+        return msgs
+      })
     } finally {
       setLoading(false)
     }
@@ -67,7 +78,7 @@ export default function Chatbot({ branch, substrateSMILES }) {
             {m.content}
           </div>
         ))}
-        {loading && (
+        {loading && messages[messages.length - 1]?.content === '' && (
           <div className="chat-bubble assistant">
             <div className="loading-row" style={{ margin: 0 }}>
               <div className="spinner" /> Thinking…

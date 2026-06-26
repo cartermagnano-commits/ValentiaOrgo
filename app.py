@@ -16,6 +16,7 @@ Or use: start.bat
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
 import tempfile
@@ -29,7 +30,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
@@ -50,6 +51,62 @@ except ImportError:
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
 from reactivity_engine import TemplateEngine
 from reaction_classifier import classify_reaction
+
+# ── LLM config — Ollama is used when no Anthropic key is present ─────────────
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
+
+
+async def _stream_ollama(system: str, messages: list[dict], max_tokens: int):
+    """Async generator: streams SSE delta chunks from Ollama."""
+    import httpx
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "stream": True,
+        "options": {"num_predict": max_tokens},
+    }
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "POST", f"{OLLAMA_BASE_URL}/v1/chat/completions",
+            json=payload, timeout=120.0,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    chunk = line[6:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(chunk)
+                        delta = data["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            yield f"data: {json.dumps({'delta': delta})}\n\n"
+                    except Exception:
+                        pass
+    yield "data: [DONE]\n\n"
+
+
+async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int):
+    """Async generator: streams SSE delta chunks from Anthropic."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    async with client.messages.stream(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=system,
+        messages=messages,
+    ) as stream:
+        async for text in stream.text_stream:
+            yield f"data: {json.dumps({'delta': text})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+def _sse_stream(system: str, messages: list[dict], max_tokens: int):
+    """Return the right streaming generator based on available credentials."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return _stream_anthropic(system, messages, max_tokens)
+    return _stream_ollama(system, messages, max_tokens)
 
 app = FastAPI(title="Orgo AI")
 
@@ -847,21 +904,6 @@ class ExplainRequest(BaseModel):
 
 @app.post("/explain")
 async def explain(req: ExplainRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {
-            "explanation": (
-                "⚠️ No API key configured — AI explanations are unavailable.\n\n"
-                "To enable them: create a .env file in the project root and add:\n"
-                "  ANTHROPIC_API_KEY=sk-ant-...\n\n"
-                "Get a key at https://console.anthropic.com (paid API). "
-                "The rest of the app (graph, structure recognition) works without a key."
-            )
-        }
-
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key)
-
     system_prompt = (
         "You are an organic chemistry teaching assistant for Orgo AI. "
         "You will be given exact chemical data computed by a verified deterministic engine. "
@@ -908,18 +950,11 @@ async def explain(req: ExplainRequest):
             "if relevant. Keep it accessible to an undergraduate student."
         )
 
-    def _call_claude():
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=800,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        return resp.content[0].text
-
-    loop = asyncio.get_event_loop()
-    text = await loop.run_in_executor(None, _call_claude)
-    return {"explanation": text}
+    return StreamingResponse(
+        _sse_stream(system_prompt, [{"role": "user", "content": user_prompt}], 350),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 class ChatMessage(BaseModel):
@@ -934,19 +969,6 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {
-            "response": (
-                "⚠️ Chatbot unavailable — no API key configured.\n"
-                "Add ANTHROPIC_API_KEY to your .env file to enable it. "
-                "See README for instructions."
-            )
-        }
-
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key)
-
     context_block = ""
     if req.context:
         lines = ["\n--- Currently displayed reaction ---"]
@@ -976,18 +998,11 @@ async def chat(req: ChatRequest):
 
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
 
-    def _call_claude():
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=600,
-            system=system_prompt,
-            messages=messages,
-        )
-        return resp.content[0].text
-
-    loop = asyncio.get_event_loop()
-    text = await loop.run_in_executor(None, _call_claude)
-    return {"response": text}
+    return StreamingResponse(
+        _sse_stream(system_prompt, messages, 250),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Static file serving — mount AFTER all API routes ─────────────────────────

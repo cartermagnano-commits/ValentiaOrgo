@@ -36,9 +36,37 @@ export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth 
   })
 }
 
-export async function fetchExplanation(branch, substrateSMILES) {
+async function streamSSE(path, body, onDelta) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || 'Request failed')
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop()
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const data = line.slice(6).trim()
+      if (data === '[DONE]') return
+      try { const p = JSON.parse(data); if (p.delta) onDelta(p.delta) } catch {}
+    }
+  }
+}
+
+export async function streamExplanation(branch, substrateSMILES, onDelta) {
   const cls = branch.reaction_classification
-  return post('/explain', {
+  return streamSSE('/explain', {
     substrate_smiles: substrateSMILES,
     product_smiles: branch.product_smiles,
     reagent_name: branch.reagent.name,
@@ -46,12 +74,12 @@ export async function fetchExplanation(branch, substrateSMILES) {
     reaction_name: cls?.name ?? 'Unknown',
     execution_history: branch.execution_history,
     environment_used: branch.environment,
-  })
+  }, onDelta)
 }
 
-export async function fetchNodeExplanation(nodeData, branch, substrateSMILES) {
+export async function streamNodeExplanation(nodeData, branch, substrateSMILES, onDelta) {
   const cls = branch.reaction_classification
-  return post('/explain', {
+  return streamSSE('/explain', {
     substrate_smiles: substrateSMILES,
     product_smiles: branch.product_smiles,
     reagent_name: branch.reagent.name,
@@ -62,9 +90,9 @@ export async function fetchNodeExplanation(nodeData, branch, substrateSMILES) {
     node_smiles: nodeData.smiles,
     node_role: nodeData.nodeType,
     node_step_text: nodeData.stepText ?? '',
-  })
+  }, onDelta)
 }
 
-export async function sendChat(messages, context) {
-  return post('/chat', { messages, context })
+export async function streamChat(messages, context, onDelta) {
+  return streamSSE('/chat', { messages, context }, onDelta)
 }
