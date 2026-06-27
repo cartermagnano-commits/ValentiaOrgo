@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    logger.addHandler(logging.StreamHandler())
+    logger.propagate = False
 
 import cv2
 import numpy as np
@@ -53,8 +57,99 @@ from reactivity_engine import TemplateEngine
 from reaction_classifier import classify_reaction
 
 # ── LLM config — Ollama is used when no Anthropic key is present ─────────────
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_BASE_URL    = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
+
+
+def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
+    """
+    Send an image + prompt to the Ollama vision model and return the first valid
+    canonical SMILES found in the response. Returns None on any failure.
+    Runs synchronously — always call from a thread pool, never the event loop.
+    """
+    import re
+    import httpx
+    from rdkit import Chem
+
+    b64 = base64.b64encode(img_bytes).decode()
+    logger.info("Ollama call → model=%s url=%s", OLLAMA_VISION_MODEL, OLLAMA_BASE_URL)
+    try:
+        resp = httpx.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={
+                "model": OLLAMA_VISION_MODEL,
+                "messages": [{"role": "user", "content": prompt, "images": [b64]}],
+                "stream": False,
+            },
+            timeout=90.0,
+        )
+        resp.raise_for_status()
+        text = resp.json()["message"]["content"].strip()
+        logger.info("Ollama raw response: %r", text[:300])
+    except Exception as exc:
+        logger.warning("Ollama vision error (%s): %s", type(exc).__name__, exc)
+        return None
+
+    mol = Chem.MolFromSmiles(text)
+    if mol:
+        result = Chem.MolToSmiles(mol)
+        logger.info("Ollama → valid SMILES (full response): %r", result)
+        return result
+
+    for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
+        mol = Chem.MolFromSmiles(candidate)
+        if mol:
+            result = Chem.MolToSmiles(mol)
+            logger.info("Ollama → valid SMILES (extracted token): %r", result)
+            return result
+
+    logger.warning("Ollama: no valid SMILES found in response: %r", text[:200])
+    return None
+
+
+def _ollama_vision_smiles(img_bytes: bytes) -> str | None:
+    """
+    Extract all molecule SMILES from an image, ignoring reaction notation.
+    Used by the /analyze pipeline as a DECIMER fallback.
+    """
+    return _ollama_call(
+        img_bytes,
+        "You are an expert chemist. The image shows chemical structures, possibly alongside "
+        "reaction notation.\n\n"
+        "Extract SMILES for every actual chemical molecule present. Ignore:\n"
+        "  - Reaction arrows (→, ->, ⟶, curved electron-flow arrows)\n"
+        "  - Question marks (?) indicating unknown products\n"
+        "  - Plus signs (+) as separators — use a period (.) instead\n"
+        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures\n\n"
+        "Output ONLY the SMILES string. Separate multiple molecules with '.'. "
+        "No explanation, no prose, no markdown.",
+    )
+
+
+def _ollama_reaction_smiles(img_bytes: bytes) -> str | None:
+    """
+    Extract only the INPUT molecules (starting materials + reagents) from a reaction image.
+    Understands that arrows show reaction direction and question marks indicate the unknown
+    product — neither should appear in the returned SMILES.
+    Used by the /react-from-image pipeline.
+    """
+    return _ollama_call(
+        img_bytes,
+        "You are an expert organic chemist reading a reaction problem image.\n\n"
+        "The image shows a chemical reaction: starting material(s) on the LEFT of a reaction "
+        "arrow, possibly reagents written above or below the arrow, and a product or question "
+        "mark (?) on the RIGHT.\n\n"
+        "Output ONLY the SMILES of the INPUT molecules — starting materials and reagents that "
+        "go INTO the reaction. Do NOT output the product or question mark.\n\n"
+        "Ignore completely:\n"
+        "  - Reaction arrows (→, ->, ⟶) and curved electron-flow arrows\n"
+        "  - Question marks (?) — these are the unknown product, not an input\n"
+        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures\n"
+        "  - Plus signs (+) as separators — use a period (.) instead\n\n"
+        "Output ONLY a SMILES string — no prose, no labels, no markdown. "
+        "Separate multiple input molecules with a period (.).",
+    )
 
 
 async def _stream_ollama(system: str, messages: list[dict], max_tokens: int):
@@ -121,7 +216,7 @@ app.add_middleware(
 _decimer_fn = None
 _executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER + chemistry engine (not thread-safe)
 _svg_pool  = ThreadPoolExecutor(max_workers=4)   # RDKit SVG rendering (thread-safe, fast)
-MAX_DIM = 1800
+MAX_DIM = 1024
 
 # Load templates once at startup — avoids re-parsing JSON per request
 _engine = TemplateEngine()
@@ -246,6 +341,31 @@ def _load_decimer():
     return _decimer_fn
 
 
+# Warm DECIMER at startup so the first user request doesn't pay the cold-start penalty
+_load_decimer()
+
+
+def _check_ollama() -> None:
+    """Log Ollama reachability and confirm the vision model is available."""
+    try:
+        import httpx
+        r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
+        models = [m["name"] for m in r.json().get("models", [])]
+        logger.info("Ollama reachable at %s — models: %s", OLLAMA_BASE_URL, models)
+        base = OLLAMA_VISION_MODEL.split(":")[0]
+        if not any(m.startswith(base) for m in models):
+            logger.warning(
+                "Vision model %r not found in Ollama (available: %s). "
+                "Ollama image fallback will fail until the model is pulled.",
+                OLLAMA_VISION_MODEL, models,
+            )
+    except Exception as exc:
+        logger.warning("Ollama unreachable at %s (%s: %s). Image fallback disabled.",
+                       OLLAMA_BASE_URL, type(exc).__name__, exc)
+
+_check_ollama()
+
+
 def _is_valid_smiles(smiles: str) -> bool:
     if not smiles:
         return False
@@ -349,6 +469,14 @@ def _process(raw_bytes: bytes) -> dict:
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+    if not valid:
+        _, buf = cv2.imencode(".png", current)
+        fallback = _ollama_vision_smiles(buf.tobytes())
+        if fallback:
+            smiles = fallback
+            valid = True
+            error = None
 
     return {"smiles": smiles, "valid": valid, "error": error, "stages": stages}
 
@@ -1109,12 +1237,21 @@ def _react_from_image(raw_bytes: bytes) -> dict:
             tmp_path = tmp.name
         cv2.imwrite(tmp_path, current)
         recognized_smiles = _load_decimer()(tmp_path)
+        logger.info("DECIMER output: %r", recognized_smiles)
     except Exception as exc:
         return {"error": f"Structure recognition failed: {exc}", "products": []}
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
+    # Encode the preprocessed image once; reused by all Ollama fallback calls below
+    _, _ibuf = cv2.imencode(".png", current)
+    _img_bytes = _ibuf.tobytes()
+
+    if not recognized_smiles:
+        logger.info("DECIMER returned nothing — calling Ollama reaction parse")
+        recognized_smiles = _ollama_reaction_smiles(_img_bytes)
+        logger.info("Ollama (empty DECIMER fallback) returned: %r", recognized_smiles)
     if not recognized_smiles:
         return {"error": "No structure recognized in the image.", "products": []}
 
@@ -1125,6 +1262,13 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         alt = recognized_smiles.replace("+", ".")
         raw_mol = Chem.MolFromSmiles(alt)
         if raw_mol is None:
+            logger.info("DECIMER SMILES invalid — calling Ollama reaction parse")
+            fallback = _ollama_reaction_smiles(_img_bytes)
+            logger.info("Ollama (invalid SMILES fallback) returned: %r", fallback)
+            if fallback:
+                recognized_smiles = fallback
+                raw_mol = Chem.MolFromSmiles(recognized_smiles)
+        if raw_mol is None:
             return {
                 "recognized_smiles": recognized_smiles,
                 "error": "Recognized SMILES is invalid; try a clearer image.",
@@ -1132,6 +1276,28 @@ def _react_from_image(raw_bytes: bytes) -> dict:
             }
 
     frags = Chem.GetMolFrags(raw_mol, asMols=True)
+
+    # Detect suspicious DECIMER output: non-organic elements (e.g. [U] = uranium, a
+    # common DECIMER artefact when it misreads image noise) or excessive fragment count.
+    _NON_ORGANIC = {"U", "Tc", "Re", "Os", "Ir", "Rh", "Ru", "Pd", "Pt", "Au", "Hg"}
+    _atom_syms = {a.GetSymbol() for a in raw_mol.GetAtoms()}
+    _bad_atoms = _atom_syms & _NON_ORGANIC
+    if len(frags) > 5 or _bad_atoms:
+        logger.info(
+            "Suspicious DECIMER output (%d frags, non-organic atoms=%s, smiles=%r) — calling Ollama",
+            len(frags), _bad_atoms or "none", recognized_smiles,
+        )
+        fix = _ollama_reaction_smiles(_img_bytes)
+        logger.info("Ollama (suspicious DECIMER) returned: %r", fix)
+        if fix:
+            fix_mol = Chem.MolFromSmiles(fix)
+            if fix_mol is not None:
+                fix_frags = Chem.GetMolFrags(fix_mol, asMols=True)
+                if len(fix_frags) >= 2:
+                    recognized_smiles = fix
+                    raw_mol = fix_mol
+                    frags = fix_frags
+
     # Sort by heavy-atom count descending so the substrate (largest) comes first
     frags_sorted = sorted(frags, key=lambda m: m.GetNumHeavyAtoms(), reverse=True)
     components = [Chem.MolToSmiles(f) for f in frags_sorted]
@@ -1151,7 +1317,36 @@ def _react_from_image(raw_bytes: bytes) -> dict:
 
     # 4. Infer conditions and run engine
     conditions = TemplateEngine._infer_conditions(reagent_smiles)
-    branches   = _engine.run_for_reagent(substrate_smiles, reagent_smiles, conditions)
+    logger.info(
+        "Template engine: substrate=%r  reagent=%r  conditions=%s",
+        substrate_smiles, reagent_smiles, conditions,
+    )
+    branches = _engine.run_for_reagent(substrate_smiles, reagent_smiles, conditions)
+    logger.info("Template engine returned %d branch(es)", len(branches))
+
+    # 5. Last-resort: if engine matched nothing, ask Ollama for a cleaner re-read and retry
+    if not branches:
+        logger.info("No templates matched — calling Ollama for last-resort re-identification")
+        retry_smiles = _ollama_reaction_smiles(_img_bytes)
+        logger.info("Ollama (no-match retry) returned: %r", retry_smiles)
+        if retry_smiles and retry_smiles != recognized_smiles:
+            retry_mol = Chem.MolFromSmiles(retry_smiles)
+            if retry_mol is not None:
+                retry_frags = Chem.GetMolFrags(retry_mol, asMols=True)
+                retry_sorted = sorted(retry_frags, key=lambda m: m.GetNumHeavyAtoms(), reverse=True)
+                retry_components = [Chem.MolToSmiles(f) for f in retry_sorted]
+                if len(retry_components) >= 2:
+                    recognized_smiles = retry_smiles
+                    components        = retry_components
+                    substrate_smiles  = retry_components[0]
+                    reagent_smiles    = ".".join(retry_components[1:])
+                    conditions        = TemplateEngine._infer_conditions(reagent_smiles)
+                    logger.info(
+                        "Retrying engine with Ollama SMILES: substrate=%r  reagent=%r  conditions=%s",
+                        substrate_smiles, reagent_smiles, conditions,
+                    )
+                    branches = _engine.run_for_reagent(substrate_smiles, reagent_smiles, conditions)
+                    logger.info("Retry engine returned %d branch(es)", len(branches))
 
     products = [
         {
