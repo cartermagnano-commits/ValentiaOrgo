@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Inputs/outputs (large binary files — add specific test images manually if needed)
+input/
+output/
+output_temp/
+results/
+
+# DECIMER model cache (downloaded at runtime, ~570 MB)
+.data/
+
+# Secrets
+.env
+.env.*
+frontend/.env.local
+frontend/.env*.local
+
+# Frontend build output and deps
+frontend/node_modules/
+frontend/.next/
+static/
+
+# Local tool installs
+.local-node/
+
+# Runtime logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

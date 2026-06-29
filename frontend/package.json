@@ -1,0 +1,26 @@
+{
+  "name": "orgo-ai-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
+    "@xyflow/react": "^12.0.0",
+    "lucide-react": "^1.21.0",
+    "next": "^16.2.9",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "@types/react": "^19.2.17",
+    "@vitejs/plugin-react": "^4.2.0",
+    "typescript": "^6.0.3",
+    "vite": "^5.2.0"
+  }
+}

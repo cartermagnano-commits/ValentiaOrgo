@@ -1,0 +1,370 @@
+{
+  "version": "1.0",
+  "note": "All reaction chemistry lives here. Edit this file to add/remove/fix reactions. No reaction-specific code in the engine.",
+  "templates": [
+    {
+      "id": "kinetic_enolate",
+      "name": "Kinetic enolate formation",
+      "smarts": "[CX3:1](=[OX1:2])[CX4:3]>>[CX3:1]([OX2-:2])=[CX3:3]",
+      "conditions": ["kinetic_base"],
+      "provenance": "Ported from original MolecularReactivityEngine.execute_first_principles_step pathway A. Chemistry: Fleming, I. 'Molecular Orbitals and Organic Chemical Reactions' (2010). Strong hindered bases (LDA, t-BuOK) deprotonate the alpha-carbon to give the enolate; branching over all alpha positions shows both kinetic and thermodynamic isomers.",
+      "enabled": true
+    },
+    {
+      "id": "e2_elim_hbr",
+      "name": "E2 beta-elimination (HBr)",
+      "smarts": "[CX4:1][CX4:2][Br:3]>>[CX3:1]=[CX3:2].[Br-:3]",
+      "conditions": ["kinetic_base", "strong_base"],
+      "provenance": "Hartenfeller M. et al. 'A Collection of Robust Organic Synthesis Reactions for In Silico Molecule Design' J. Chem. Inf. Model. 2011, 51, 3093-3098. Anti-periplanar E2 elimination: strong base abstracts beta-H while bromide departs.",
+      "enabled": true
+    },
+    {
+      "id": "e2_elim_hcl",
+      "name": "E2 beta-elimination (HCl)",
+      "smarts": "[CX4:1][CX4:2][Cl:3]>>[CX3:1]=[CX3:2].[Cl-:3]",
+      "conditions": ["kinetic_base", "strong_base"],
+      "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. Anti-periplanar E2 elimination with chloride leaving group.",
+      "enabled": true
+    },
+    {
+      "id": "e2_elim_hi",
+      "name": "E2 beta-elimination (HI)",
+      "smarts": "[CX4:1][CX4:2][I:3]>>[CX3:1]=[CX3:2].[I-:3]",
+      "conditions": ["kinetic_base", "strong_base"],
+      "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. E2 elimination with iodide leaving group; highly favored due to weak C-I bond.",
+      "enabled": true
+    },
+    {
+      "id": "sn2_br_oh",
+      "name": "SN2: alkyl bromide + hydroxide",
+      "smarts": "[CX4:1][Br:2].[OH-]>>[CX4:1][OH].[Br-:2]",
+      "conditions": ["hydroxide"],
+      "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. Classic SN2 nucleophilic substitution: hydroxide displaces bromide at sp3 carbon with inversion of configuration. Nucleophile left unmapped in product to avoid charge inheritance issues.",
+      "enabled": true
+    },
+    {
+      "id": "sn2_cl_oh",
+      "name": "SN2: alkyl chloride + hydroxide",
+      "smarts": "[CX4:1][Cl:2].[OH-]>>[CX4:1][OH].[Cl-:2]",
+      "conditions": ["hydroxide"],
+      "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. SN2 with hydroxide on chloride substrate.",
+      "enabled": true
+    },
+    {
+      "id": "sn2_br_water",
+      "name": "Hydrolysis: alkyl bromide + water",
+      "smarts": "[CX4:1][Br:2].[OH2]>>[CX4:1][OH].[Br-:2]",
+      "conditions": ["protic"],
+      "provenance": "Adapted from Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. Net product of SN1/SN2 hydrolysis. Proton transfer from oxonium intermediate is implicit; net product is the alcohol.",
+      "enabled": true
+    },
+    {
+      "id": "sn2_cl_water",
+      "name": "Hydrolysis: alkyl chloride + water",
+      "smarts": "[CX4:1][Cl:2].[OH2]>>[CX4:1][OH].[Cl-:2]",
+      "conditions": ["protic"],
+      "provenance": "Adapted from Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. Net product of SN1/SN2 hydrolysis with chloride leaving group.",
+      "enabled": true
+    },
+    {
+      "id": "finkelstein_br_i",
+      "name": "Finkelstein reaction (Br -> I)",
+      "smarts": "[CX4:1][Br:2].[I-]>>[CX4:1][I].[Br-:2]",
+      "conditions": ["halide_nucleophile"],
+      "provenance": "Finkelstein, H. Ber. Dtsch. Chem. Ges. 1910, 43, 1528. Halide metathesis driven by NaI precipitation. SMARTS adapted from Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098.",
+      "enabled": true
+    },
+    {
+      "id": "finkelstein_cl_i",
+      "name": "Finkelstein reaction (Cl -> I)",
+      "smarts": "[CX4:1][Cl:2].[I-]>>[CX4:1][I].[Cl-:2]",
+      "conditions": ["halide_nucleophile"],
+      "provenance": "Finkelstein, H. Ber. Dtsch. Chem. Ges. 1910, 43, 1528. Halide exchange from chloride. SMARTS from Hartenfeller M. et al. 2011.",
+      "enabled": true
+    },
+    {
+      "id": "williamson_br",
+      "name": "Williamson ether synthesis (bromide + alkoxide)",
+      "smarts": "[CX4:1][Br:2].[CX4:3][O-]>>[CX4:1]O[CX4:3].[Br-:2]",
+      "conditions": ["alkoxide"],
+      "provenance": "Williamson, A.W. J. Chem. Soc. 1852, 4, 229. SN2 of alkoxide on alkyl bromide to form ether. O left unmapped in product to avoid charge inheritance; electrophilic C (:1) and alkoxide C (:3) are both mapped.",
+      "enabled": true
+    },
+    {
+      "id": "williamson_cl",
+      "name": "Williamson ether synthesis (chloride + alkoxide)",
+      "smarts": "[CX4:1][Cl:2].[CX4:3][O-]>>[CX4:1]O[CX4:3].[Cl-:2]",
+      "conditions": ["alkoxide"],
+      "provenance": "Williamson, A.W. J. Chem. Soc. 1852, 4, 229. SN2 of alkoxide on alkyl chloride. SMARTS adapted from Hartenfeller M. et al. 2011.",
+      "enabled": true
+    },
+    {
+      "id": "enolate_protonation",
+      "name": "Enolate protonation (protic workup)",
+      "smarts": "[CX3:1]([OX1-:2])=[CX3:3]>>[CX3:1](=O)[CX4:3]",
+      "conditions": ["protic"],
+      "provenance": "Standard enolate quench with protic solvent. Chemistry: March, J. 'Advanced Organic Chemistry' 5th ed. 1-reactant template (protic condition gates when it fires on enolate intermediates); :2 unmapped in product to add fresh neutral carbonyl O.",
+      "enabled": true
+    },
+    {
+      "id": "halide_exchange_br_cl",
+      "name": "Halide exchange (Br -> Cl)",
+      "smarts": "[CX4:1][Br:2].[Cl-]>>[CX4:1][Cl].[Br-:2]",
+      "conditions": ["halide_nucleophile"],
+      "provenance": "Adapted from Finkelstein-type halide metathesis. Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. Thermodynamically less favorable than Br->I (Keq < 1 in most solvents) but possible under forcing conditions with NaCl.",
+      "enabled": true
+    },
+    {
+      "id": "sn2_br_nh3",
+      "name": "N-alkylation: alkyl bromide + ammonia",
+      "smarts": "[CX4:1][Br:2].[NH3]>>[CX4:1][NH3+].[Br-:2]",
+      "conditions": ["amine_nucleophile"],
+      "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. N-alkylation producing ammonium salt; proton transfer gives amine.",
+      "enabled": true
+    },
+    {
+      "id": "sn2_cl_nh3",
+      "name": "N-alkylation: alkyl chloride + ammonia",
+      "smarts": "[CX4:1][Cl:2].[NH3]>>[CX4:1][NH3+].[Cl-:2]",
+      "conditions": ["amine_nucleophile"],
+      "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. N-alkylation of an alkyl chloride with ammonia.",
+      "enabled": true
+    },
+    {
+      "id": "carbonyl_hydration",
+      "name": "Carbonyl gem-diol formation (hydration)",
+      "smarts": "[CX3:1]=[OX1:2].[OH2:3]>>[CX4:1]([OH:2])([OH:3])",
+      "conditions": ["protic"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Reversible nucleophilic addition of water to carbonyl to give gem-diol. Equilibrium strongly disfavored for ketones (Keq << 1) but thermodynamically accessible for aldehydes.",
+      "enabled": true
+    },
+    {
+      "id": "alpha_alkylation_br",
+      "name": "α-Alkylation: enolate + alkyl bromide",
+      "smarts": "[CX3:1]([O-:2])=[CX3:3].[CX4:4][Br:5]>>[CX3:1](=O)[CX4:3][CX4:4].[Br-:5]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. SN2 C-alkylation: enolate anion (produced by kinetic_enolate template) acts as carbon nucleophile attacking an alkyl bromide from the molecule pool. Produces alpha-alkylated carbonyl compound with C-C bond formation. Both reactants come from the synthesis pool, not the reagent list — this is a convergent coupling step.",
+      "enabled": true
+    },
+    {
+      "id": "alpha_alkylation_cl",
+      "name": "α-Alkylation: enolate + alkyl chloride",
+      "smarts": "[CX3:1]([O-:2])=[CX3:3].[CX4:4][Cl:5]>>[CX3:1](=O)[CX4:3][CX4:4].[Cl-:5]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Same as alpha_alkylation_br but on alkyl chloride electrophile. Less reactive than bromide but still viable under forcing conditions with a stabilized enolate nucleophile.",
+      "enabled": true
+    },
+    {
+      "id": "acetylide_deprotonation",
+      "name": "Terminal alkyne deprotonation (acetylide formation)",
+      "smarts": "[CX2H:1]#[CX2:2]>>[CX1-:1]#[CX2:2]",
+      "conditions": ["kinetic_base"],
+      "coupling": false,
+      "provenance": "Clayden, J. 'Organic Chemistry' 2nd ed. Strong bases (LDA, t-BuOK, NaNH2) deprotonate terminal alkynes (pKa ~25) to give acetylide anions, which are strong carbon nucleophiles for SN2 on primary alkyl halides.",
+      "enabled": true
+    },
+    {
+      "id": "acetylide_alkylation_br",
+      "name": "Acetylide SN2: acetylide + primary alkyl bromide",
+      "smarts": "[CX1-:1]#[CX2:2].[CX4;H2,H3:3][Br:4]>>[CX4:3][C+0:1]#[CX2:2].[Br-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Clayden, J. 'Organic Chemistry' 2nd ed. Acetylide anion (from acetylide_deprotonation) performs SN2 on a primary or methyl alkyl bromide ([CX4;H2,H3]) to form an internal alkyne with C-C bond formation. Secondary/tertiary halides are excluded ([H0,H1]) because SN2 is not viable there.",
+      "enabled": true
+    },
+    {
+      "id": "acetylide_alkylation_cl",
+      "name": "Acetylide SN2: acetylide + primary alkyl chloride",
+      "smarts": "[CX1-:1]#[CX2:2].[CX4;H2,H3:3][Cl:4]>>[CX4:3][C+0:1]#[CX2:2].[Cl-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Clayden, J. 'Organic Chemistry' 2nd ed. Same as acetylide_alkylation_br but on primary alkyl chloride. Less reactive than bromide but viable with the highly nucleophilic acetylide. Primary/methyl restriction enforced.",
+      "enabled": true
+    },
+    {
+      "id": "alcohol_deprotonation",
+      "name": "Alcohol deprotonation (alkoxide formation)",
+      "smarts": "[CX4:1][OH:2]>>[CX4:1][O-:2]",
+      "conditions": ["strong_base"],
+      "coupling": false,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Strong bases (NaH, NaOEt, t-BuOK) deprotonate alcohols (pKa ~16-18) to give alkoxide anions. Prerequisite for Williamson ether synthesis when the alkoxide comes from within the synthesis pool rather than from the reagent list.",
+      "enabled": true
+    },
+    {
+      "id": "williamson_coupling_br",
+      "name": "Williamson ether (pool-pool): alkoxide + primary alkyl bromide",
+      "smarts": "[CX4:1][O-].[CX4;H2,H3:3][Br:4]>>[CX4:1]O[CX4:3].[Br-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Williamson, A.W. J. Chem. Soc. 1852, 4, 229. Pool-pool variant: alkoxide generated from alcohol_deprotonation attacks a primary/methyl alkyl bromide from the synthesis pool. O- (unmapped in reactant) is consumed; a fresh neutral ether O is created in the product, avoiding charge inheritance. Primary halide restriction prevents E2 competition.",
+      "enabled": true
+    },
+    {
+      "id": "williamson_coupling_cl",
+      "name": "Williamson ether (pool-pool): alkoxide + primary alkyl chloride",
+      "smarts": "[CX4:1][O-].[CX4;H2,H3:3][Cl:4]>>[CX4:1]O[CX4:3].[Cl-:4]",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Williamson, A.W. J. Chem. Soc. 1852, 4, 229. Same as williamson_coupling_br but on primary alkyl chloride. Less reactive than bromide but viable with alkoxide nucleophile.",
+      "enabled": true
+    },
+    {
+      "id": "grignard_aldehyde",
+      "name": "Grignard addition: RMgX + aldehyde → secondary alcohol",
+      "smarts": "[CX4:1][Mg][X].[CX3H:2]=[OX1:3]>>[CX4:2]([OH:3])([CX4:1])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Grignard, V. C. R. Acad. Sci. 1900, 130, 1322. The Grignard carbanion (C:1, from RMgX provided as starting material) performs 1,2-addition to an aldehyde carbonyl. Mg and X are unmapped and deleted in the product (simulates aqueous workup). Net: C=O → C-OH with new C-C bond; secondary alcohol. [CX3H:2] restricts to aldehydes (1 H on carbonyl C); [OX1:3] ensures the carbonyl O.",
+      "enabled": true
+    },
+    {
+      "id": "grignard_ketone",
+      "name": "Grignard addition: RMgX + ketone → tertiary alcohol",
+      "smarts": "[CX4:1][Mg][X].[C:5][CX3H0:2](=[OX1:3])[C:6]>>[C:5][CX4:2]([OH:3])([C:6])([CX4:1])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Grignard, V. C. R. Acad. Sci. 1900, 130, 1322. Same mechanism as grignard_aldehyde but on a disubstituted ketone. [CX3H0:2] requires 0 H on carbonyl C (distinguishes ketone from aldehyde). ([C])[C] flanking constraint ensures both substituents are carbons, excluding esters (one O neighbor) and amides (N neighbor). Product is a tertiary alcohol.",
+      "enabled": true
+    },
+    {
+      "id": "grignard_formaldehyde",
+      "name": "Grignard addition: RMgX + formaldehyde → primary alcohol",
+      "smarts": "[CX4:1][Mg][X].[CX3H2:2]=[OX1:3]>>[CX4:2]([OH:3])([CX4:1])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "Grignard, V. C. R. Acad. Sci. 1900, 130, 1322. Grignard addition to formaldehyde (the only carbonyl with 2 H's on C, [CX3H2:2]) gives a primary alcohol after workup. Product has one more carbon than the Grignard R group: RMgX + HCHO → RCH2OH.",
+      "enabled": true
+    },
+    {
+      "id": "nabh4_aldehyde",
+      "name": "NaBH4 reduction: aldehyde → primary alcohol",
+      "smarts": "[CX3H1:1](=[OX1:2]).[BH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. NaBH4 delivers hydride to the carbonyl carbon of an aldehyde; aqueous workup gives the primary alcohol. Net: RCHO → RCH2OH.",
+      "enabled": true
+    },
+    {
+      "id": "nabh4_ketone",
+      "name": "NaBH4 reduction: ketone → secondary alcohol",
+      "smarts": "[CX3H0:1](=[OX1:2]).[BH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. NaBH4 reduces a ketone to a secondary alcohol via 1,2-hydride delivery. Net: RCOR' → RCHOHR'.",
+      "enabled": true
+    },
+    {
+      "id": "lialh4_aldehyde",
+      "name": "LiAlH4 reduction: aldehyde → primary alcohol",
+      "smarts": "[CX3H1:1](=[OX1:2]).[AlH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 is a more powerful reducing agent than NaBH4; reduces aldehydes to primary alcohols.",
+      "enabled": true
+    },
+    {
+      "id": "lialh4_ketone",
+      "name": "LiAlH4 reduction: ketone → secondary alcohol",
+      "smarts": "[CX3H0:1](=[OX1:2]).[AlH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 reduces ketones to secondary alcohols.",
+      "enabled": true
+    },
+    {
+      "id": "lialh4_carboxylic_acid",
+      "name": "LiAlH4 reduction: carboxylic acid → primary alcohol",
+      "smarts": "[CX3H0:1](=[OX1:2])[OX2H:3].[AlH4-]>>[CX4:1]([OH:2])",
+      "conditions": ["hydride"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 (but not NaBH4) reduces carboxylic acids to primary alcohols. Net: RCOOH → RCH2OH.",
+      "enabled": true
+    },
+    {
+      "id": "hbr_markovnikov_terminal",
+      "name": "HBr addition: terminal alkene → secondary bromide (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H1:2].[Br:3]>>[CX4:1][CX4:2][Br:3]",
+      "conditions": ["hbr"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic HBr addition to CH2=CHR. Markovnikov: proton to terminal CH2 (→ CH3), Br to internal C (→ secondary bromide).",
+      "enabled": true
+    },
+    {
+      "id": "hbr_markovnikov_disubstituted",
+      "name": "HBr addition: trisubstituted alkene → tertiary bromide (Markovnikov)",
+      "smarts": "[CX3H1:1]=[CX3H0:2].[Br:3]>>[CX4:1][CX4:2][Br:3]",
+      "conditions": ["hbr"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HBr addition to CHR=CR'R''. Markovnikov: Br goes to more substituted C (→ tertiary bromide).",
+      "enabled": true
+    },
+    {
+      "id": "hcl_markovnikov_terminal",
+      "name": "HCl addition: terminal alkene → secondary chloride (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H1:2].[Cl:3]>>[CX4:1][CX4:2][Cl:3]",
+      "conditions": ["hcl"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic HCl addition to CH2=CHR with Markovnikov regiochemistry.",
+      "enabled": true
+    },
+    {
+      "id": "hcl_markovnikov_disubstituted",
+      "name": "HCl addition: trisubstituted alkene → tertiary chloride (Markovnikov)",
+      "smarts": "[CX3H1:1]=[CX3H0:2].[Cl:3]>>[CX4:1][CX4:2][Cl:3]",
+      "conditions": ["hcl"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HCl Markovnikov addition to trisubstituted alkene.",
+      "enabled": true
+    },
+    {
+      "id": "hi_markovnikov_terminal",
+      "name": "HI addition: terminal alkene → secondary iodide (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H1:2].[I:3]>>[CX4:1][CX4:2][I:3]",
+      "conditions": ["hi"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HI is the most reactive HX for electrophilic addition; Markovnikov regiochemistry.",
+      "enabled": true
+    },
+    {
+      "id": "br2_addition_alkene",
+      "name": "Br2 addition: alkene → vicinal dibromide",
+      "smarts": "[CX3:1]=[CX3:2].[Br:3][Br:4]>>[CX4:1]([Br:3])[CX4:2][Br:4]",
+      "conditions": ["halogenation"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic Br2 addition via bromonium ion; anti addition (stereo not tracked). Net: C=C → C(Br)-C(Br) vicinal dibromide.",
+      "enabled": true
+    },
+    {
+      "id": "cl2_addition_alkene",
+      "name": "Cl2 addition: alkene → vicinal dichloride",
+      "smarts": "[CX3:1]=[CX3:2].[Cl:3][Cl:4]>>[CX4:1]([Cl:3])[CX4:2][Cl:4]",
+      "conditions": ["halogenation"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Electrophilic Cl2 addition to alkene. Net: C=C → C(Cl)-C(Cl) vicinal dichloride.",
+      "enabled": true
+    },
+    {
+      "id": "carboxylate_deprotonation",
+      "name": "Carboxylic acid deprotonation → carboxylate",
+      "smarts": "[CX3:1](=[OX1:2])[OH:3]>>[CX3:1](=[OX1:2])[O-:3]",
+      "conditions": ["strong_base", "hydroxide"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Carboxylic acids (pKa ~5) are deprotonated by strong bases or hydroxide to give the resonance-stabilized carboxylate anion.",
+      "enabled": true
+    },
+    {
+      "id": "alcohol_dehydration",
+      "name": "Acid-catalyzed dehydration: secondary/tertiary alcohol → alkene",
+      "smarts": "[CX4:1]([OH:3])[CX4:2]>>[CX3:1]=[CX3:2].[OH2:3]",
+      "conditions": ["acid"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. E1 dehydration of a secondary or tertiary alcohol under acid catalysis (H2SO4, H3PO4) via carbocation intermediate. Net: -CHOH-CH- → -C=C- + H2O.",
+      "enabled": true
+    },
+    {
+      "id": "aldol_condensation",
+      "name": "Aldol addition: enolate + aldehyde → beta-hydroxy carbonyl",
+      "smarts": "[CX3:1]([O-:2])=[CX3:3].[CX3H1:4]=[OX1:5]>>[CX3:1](=[OX1:2])[CX4:3][CX4H1:4]([OH:5])",
+      "conditions": [],
+      "coupling": true,
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. C-C bond-forming aldol reaction: enolate (from kinetic_enolate) attacks the carbonyl of an aldehyde. Net: C=C-O- + RCHO → C(=O)-CH-CH(OH)R (beta-hydroxy carbonyl).",
+      "enabled": true
+    },
+    {
+      "id": "ester_saponification",
+      "name": "Ester saponification: ester + hydroxide → carboxylate + alcohol",
+      "smarts": "[CX4:1][OX2:2][CX3:3](=[OX1:4]).[OH-]>>[CX4:1][OH].[CX3:3](=[OX1:4])[O-]",
+      "conditions": ["hydroxide"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Base-promoted ester hydrolysis (saponification): hydroxide attacks carbonyl C, alkoxide leaves, gives carboxylate + alcohol.",
+      "enabled": true
+    }
+  ]
+}

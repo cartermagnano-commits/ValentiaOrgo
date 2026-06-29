@@ -1,0 +1,1370 @@
+"""
+app.py — Orgo AI FastAPI backend.
+
+Endpoints:
+  POST /analyze         image → SMILES + stage images (base64)
+  POST /predict         substrate + reagent → product
+  GET  /structure       SMILES → SVG (for UI rendering)
+  POST /pathways        substrate → branching graph over REAGENT_LIST
+  POST /explain         engine output + reaction name → LLM prose explanation
+  POST /chat            conversational chemistry assistant (grounded in engine data)
+
+Start:  uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+Or use: start.bat
+"""
+
+import asyncio
+import base64
+import io
+import json
+import logging
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+import cv2
+import numpy as np
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
+from pydantic import BaseModel
+
+# Load .env file if present (never hard-code the key)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
+
+from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
+from reactivity_engine import TemplateEngine
+from reaction_classifier import classify_reaction
+
+# ── LLM config — Ollama is used when no Anthropic key is present ─────────────
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
+
+
+async def _stream_ollama(system: str, messages: list[dict], max_tokens: int):
+    """Async generator: streams SSE delta chunks from Ollama."""
+    import httpx
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "stream": True,
+        "options": {"num_predict": max_tokens},
+    }
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "POST", f"{OLLAMA_BASE_URL}/v1/chat/completions",
+            json=payload, timeout=120.0,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    chunk = line[6:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(chunk)
+                        delta = data["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            yield f"data: {json.dumps({'delta': delta})}\n\n"
+                    except Exception:
+                        pass
+    yield "data: [DONE]\n\n"
+
+
+async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int):
+    """Async generator: streams SSE delta chunks from Anthropic."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    async with client.messages.stream(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=system,
+        messages=messages,
+    ) as stream:
+        async for text in stream.text_stream:
+            yield f"data: {json.dumps({'delta': text})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+def _sse_stream(system: str, messages: list[dict], max_tokens: int):
+    """Return the right streaming generator based on available credentials."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return _stream_anthropic(system, messages, max_tokens)
+    return _stream_ollama(system, messages, max_tokens)
+
+app = FastAPI(title="Orgo AI")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:8000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_decimer_fn = None
+_executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER + chemistry engine (not thread-safe)
+_svg_pool  = ThreadPoolExecutor(max_workers=4)   # RDKit SVG rendering (thread-safe, fast)
+MAX_DIM = 1800
+
+# Load templates once at startup — avoids re-parsing JSON per request
+_engine = TemplateEngine()
+
+# ── Reagent list — edit here to add/remove reagents for /pathways fan-out ─────
+# "conditions" tags are matched against each template's "conditions" field in
+# reaction_templates.json. A template fires only when its conditions intersect
+# with the reagent's conditions. This list is the single place to add reagents.
+REAGENT_LIST = [
+    {
+        "name": "LDA",
+        "smiles": "CC(C)[N-]C(C)C.[Li+]",
+        "description": "Lithium diisopropylamide — strong, hindered kinetic base",
+        "conditions": ["kinetic_base", "strong_base"],
+    },
+    {
+        "name": "t-BuOK",
+        "smiles": "[O-]C(C)(C)C.[K+]",
+        "description": "Potassium tert-butoxide — strong, hindered base / alkoxide",
+        "conditions": ["kinetic_base", "strong_base", "alkoxide"],
+    },
+    {
+        "name": "NaOEt",
+        "smiles": "CC[O-].[Na+]",
+        "description": "Sodium ethoxide — strong base / alkoxide nucleophile",
+        "conditions": ["strong_base", "alkoxide"],
+    },
+    {
+        "name": "NaOH",
+        "smiles": "[OH-].[Na+]",
+        "description": "Sodium hydroxide — strong base / hydroxide nucleophile",
+        "conditions": ["strong_base", "hydroxide"],
+    },
+    {
+        "name": "Water",
+        "smiles": "O",
+        "description": "Water — weak nucleophile / protic solvent",
+        "conditions": ["protic"],
+    },
+    {
+        "name": "NaI",
+        "smiles": "[Na+].[I-]",
+        "description": "Sodium iodide — iodide nucleophile (Finkelstein)",
+        "conditions": ["halide_nucleophile"],
+    },
+    {
+        "name": "NaCl",
+        "smiles": "[Na+].[Cl-]",
+        "description": "Sodium chloride — chloride nucleophile",
+        "conditions": ["halide_nucleophile"],
+    },
+    {
+        "name": "NaH",
+        "smiles": "[Na+].[H-]",
+        "description": "Sodium hydride — strong base for alcohol deprotonation (Williamson ether synthesis)",
+        "conditions": ["strong_base"],
+    },
+    {
+        "name": "NaBH4",
+        "smiles": "[BH4-].[Na+]",
+        "description": "Sodium borohydride — mild hydride reducing agent (aldehydes and ketones → alcohols)",
+        "conditions": ["hydride"],
+    },
+    {
+        "name": "LiAlH4",
+        "smiles": "[AlH4-].[Li+]",
+        "description": "Lithium aluminium hydride — strong reducing agent (aldehydes, ketones, esters, carboxylic acids → alcohols)",
+        "conditions": ["hydride"],
+    },
+    {
+        "name": "HBr",
+        "smiles": "Br",
+        "description": "Hydrogen bromide — Markovnikov addition to alkenes; SN2 on alcohols",
+        "conditions": ["hbr"],
+    },
+    {
+        "name": "HCl",
+        "smiles": "Cl",
+        "description": "Hydrogen chloride — Markovnikov addition to alkenes",
+        "conditions": ["hcl"],
+    },
+    {
+        "name": "HI",
+        "smiles": "I",
+        "description": "Hydrogen iodide — Markovnikov addition to alkenes; most reactive HX",
+        "conditions": ["hi"],
+    },
+    {
+        "name": "Br2",
+        "smiles": "BrBr",
+        "description": "Bromine — anti addition to alkenes → vicinal dibromide",
+        "conditions": ["halogenation"],
+    },
+    {
+        "name": "Cl2",
+        "smiles": "ClCl",
+        "description": "Chlorine — anti addition to alkenes → vicinal dichloride",
+        "conditions": ["halogenation"],
+    },
+    {
+        "name": "NH3",
+        "smiles": "N",
+        "description": "Ammonia — nucleophilic N-alkylation with alkyl halides",
+        "conditions": ["amine_nucleophile"],
+    },
+    {
+        "name": "H2SO4",
+        "smiles": "OS(=O)(=O)O",
+        "description": "Sulfuric acid — acid catalyst for alcohol dehydration and alkene hydration",
+        "conditions": ["acid"],
+    },
+]
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _load_decimer():
+    global _decimer_fn
+    if _decimer_fn is None:
+        from DECIMER import predict_SMILES
+        _decimer_fn = predict_SMILES
+    return _decimer_fn
+
+
+def _is_valid_smiles(smiles: str) -> bool:
+    if not smiles:
+        return False
+    try:
+        from rdkit import Chem
+        return Chem.MolFromSmiles(smiles) is not None
+    except Exception:
+        return False
+
+
+def _to_b64(img: np.ndarray) -> str | None:
+    if img is None:
+        return None
+    ok, buf = cv2.imencode(".png", img)
+    return base64.b64encode(buf).decode() if ok else None
+
+
+def _resize(img: np.ndarray) -> np.ndarray:
+    h, w = img.shape[:2]
+    if max(h, w) > MAX_DIM:
+        scale = MAX_DIM / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)),
+                         interpolation=cv2.INTER_AREA)
+    return img
+
+
+def _extract_history_smiles(execution_history: list[str]) -> list[str]:
+    """Pull SMILES strings out of execution_history step lines."""
+    smiles_list = []
+    for entry in execution_history:
+        if "): " in entry:
+            smiles_list.append(entry.split("): ", 1)[1].strip())
+    return smiles_list
+
+
+def _mol_svg(smiles: str, width: int, height: int) -> str:
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    from rdkit.Chem.Draw import rdMolDraw2D
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return ""
+    try:
+        AllChem.Compute2DCoords(mol)
+    except Exception:
+        pass
+    drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
+    opts = drawer.drawOptions()
+    opts.addAtomIndices = False
+    opts.addStereoAnnotation = True
+    opts.padding = 0.15
+    try:
+        opts.useBWAtomPalette()
+    except Exception:
+        pass
+    drawer.DrawMolecule(mol)
+    drawer.FinishDrawing()
+    return drawer.GetDrawingText()
+
+
+# ── Image processing (runs in thread pool) ────────────────────────────────────
+
+def _process(raw_bytes: bytes) -> dict:
+    try:
+        pil = Image.open(io.BytesIO(raw_bytes))
+        try:
+            from PIL import ImageOps
+            pil = ImageOps.exif_transpose(pil)
+        except Exception:
+            pass
+        pil = pil.convert("RGB")
+        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    except Exception as exc:
+        raise ValueError(f"Could not decode image: {exc}") from exc
+
+    img = _resize(img)
+    stages: dict[str, str | None] = {"original": _to_b64(img)}
+    current = img.copy()
+
+    for name, fn in [("perspective", perspective_correct), ("deskew", deskew),
+                     ("denoise", denoise), ("binarize", normalize_binarize)]:
+        try:
+            result = fn(current)
+            if result is not None and isinstance(result, np.ndarray):
+                current = result
+        except Exception:
+            pass
+        stages[name] = _to_b64(current)
+
+    stages["final"] = _to_b64(current)
+
+    smiles: str | None = None
+    valid = False
+    error: str | None = None
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+        cv2.imwrite(tmp_path, current)
+        smiles = _load_decimer()(tmp_path)
+        valid = _is_valid_smiles(smiles)
+    except Exception as exc:
+        error = str(exc)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    return {"smiles": smiles, "valid": valid, "error": error, "stages": stages}
+
+
+def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
+    """
+    Run all eligible templates for one reagent. Returns a list of branch dicts
+    (one per unique product), each RDKit-validated. Returns [] on any failure.
+    """
+    from rdkit import Chem
+
+    conditions = reagent.get("conditions", [])
+
+    try:
+        branches = _engine.run_for_reagent(substrate, reagent["smiles"], conditions)
+    except Exception:
+        logger.exception("Template engine error for reagent %s", reagent["name"])
+        return []
+
+    results = []
+    environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
+
+    for b in branches:
+        product_smiles = b["final_product"]
+        prod_mol = Chem.MolFromSmiles(product_smiles)
+        if prod_mol is None:
+            continue
+
+        # Build the step list the frontend expects
+        steps = b["steps"]
+
+        # Template name is authoritative — the classifier is only used for confidence scoring
+        classification = {
+            "name": b["reaction_name"],
+            "confidence": "template",
+        }
+
+        results.append({
+            "reagent": {k: v for k, v in reagent.items() if k != "conditions"},
+            "environment": environment,
+            "steps_taken": b["steps_taken"],
+            "execution_history": b["execution_history"],
+            "product_smiles": product_smiles,
+            "steps": steps,
+            "reaction_classification": classification,
+            "template_id": b["template_id"],
+            "reaction_name": b["reaction_name"],
+            "matches_target": False,  # filled in after
+        })
+
+    return results
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.post("/analyze")
+async def analyze(file: UploadFile = File(...)):
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file")
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(_executor, _process, contents)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Processing failed: {exc}") from exc
+    return result
+
+
+class PredictRequest(BaseModel):
+    substrate_smiles: str
+    reagent_smiles: str
+
+
+@app.post("/predict")
+async def predict(req: PredictRequest):
+    from rdkit import Chem
+    sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
+    if sub_mol is None:
+        raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
+    rea_mol = Chem.MolFromSmiles(req.reagent_smiles.strip())
+    if rea_mol is None:
+        raise HTTPException(status_code=422, detail="Invalid reagent SMILES")
+
+    substrate = Chem.MolToSmiles(sub_mol)
+    reagent_canon = Chem.MolToSmiles(rea_mol)
+
+    # Derive conditions by matching the reagent against REAGENT_LIST; unknown reagents get []
+    conditions: list[str] = []
+    for r in REAGENT_LIST:
+        r_mol = Chem.MolFromSmiles(r["smiles"])
+        if r_mol and Chem.MolToSmiles(r_mol) == reagent_canon:
+            conditions = r.get("conditions", [])
+            break
+
+    def _predict():
+        return _engine.run_for_reagent(substrate, reagent_canon, conditions)
+
+    loop = asyncio.get_event_loop()
+    branches = await loop.run_in_executor(_executor, _predict)
+
+    if not branches:
+        raise HTTPException(
+            status_code=422,
+            detail="No templates matched this substrate/reagent combination."
+        )
+
+    b = branches[0]
+    product_mol = Chem.MolFromSmiles(b["final_product"])
+    if product_mol is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Engine produced an invalid product — blocked by RDKit validation"
+        )
+
+    environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
+    return {
+        "product_smiles": b["final_product"],
+        "environment_used": environment,
+        "steps_taken": b["steps_taken"],
+        "execution_history": b["execution_history"],
+        "rdkit_validated": True,
+        "template_id": b["template_id"],
+        "reaction_name": b["reaction_name"],
+    }
+
+
+@app.get("/structure")
+async def structure(
+    smiles: str = Query(...),
+    width: int = Query(200, ge=40, le=800),
+    height: int = Query(150, ge=40, le=600),
+):
+    """Return an SVG rendering of a SMILES structure for display in the UI."""
+    svg = await asyncio.get_event_loop().run_in_executor(
+        _svg_pool, _mol_svg, smiles, width, height
+    )
+    if not svg:
+        raise HTTPException(status_code=422, detail="Invalid SMILES")
+    return Response(content=svg, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=3600"})
+
+
+MAX_SEARCH_DEPTH = 10   # hard cap enforced server-side
+MAX_POOL_SIZE    = 600  # unique molecules in pool before aborting convergent search
+FANOUT_BRANCH_LIMIT = 5
+FANOUT_DISPLAY_DEPTH = 6
+
+
+class PathwaysRequest(BaseModel):
+    # Accept either a single substrate (legacy) or a list of starting materials.
+    # If start_smiles is provided it takes priority; substrate_smiles kept for
+    # backward compatibility with the old frontend.
+    start_smiles: list[str] = []
+    substrate_smiles: str = ""
+    target_smiles: Optional[str] = None
+    desired_depth: int = 5   # user's requested depth; server always searches to MAX_SEARCH_DEPTH
+
+
+# ── MoleculeInfo tracks every molecule in the synthesis pool ──────────────────
+
+class _MolInfo:
+    """Provenance record for one molecule in the BFS pool."""
+    __slots__ = ("smiles", "depth", "prov_type", "parent_a", "parent_b",
+                 "reaction_name", "template_id", "reagent_name", "reagent_smiles",
+                 "environment", "source_index", "step_text")
+
+    def __init__(
+        self, smiles, depth, prov_type,
+        parent_a=None, parent_b=None,
+        reaction_name=None, template_id=None,
+        reagent_name=None, reagent_smiles=None,
+        environment=None, source_index=None,
+        step_text=None,
+    ):
+        self.smiles        = smiles
+        self.depth         = depth
+        self.prov_type     = prov_type   # "start" | "reagent" | "coupling"
+        self.parent_a      = parent_a    # canonical SMILES of first parent
+        self.parent_b      = parent_b    # canonical SMILES of second parent (coupling only)
+        self.reaction_name = reaction_name
+        self.template_id   = template_id
+        self.reagent_name  = reagent_name
+        self.reagent_smiles = reagent_smiles
+        self.environment   = environment
+        self.source_index  = source_index   # only for "start" nodes
+        self.step_text     = step_text
+
+
+def _trace_dag(pool: dict, target_smiles: str) -> tuple[list[dict], list[dict]]:
+    """
+    Trace backwards from target through provenance to collect the minimal DAG.
+    Returns (dag_nodes, dag_edges) in React Flow-friendly format.
+    """
+    # BFS backwards
+    visited = set()
+    queue = [target_smiles]
+    node_order = []
+
+    while queue:
+        smi = queue.pop(0)
+        if smi in visited:
+            continue
+        visited.add(smi)
+        node_order.append(smi)
+        info = pool.get(smi)
+        if info is None:
+            continue
+        if info.parent_a and info.parent_a not in visited:
+            queue.append(info.parent_a)
+        if info.parent_b and info.parent_b not in visited:
+            queue.append(info.parent_b)
+
+    # Assign stable node IDs
+    node_ids = {smi: f"n{i}" for i, smi in enumerate(node_order)}
+
+    dag_nodes = []
+    dag_edges = []
+    edge_idx  = 0
+
+    for smi in node_order:
+        info = pool[smi]
+        nid  = node_ids[smi]
+        is_target = (smi == target_smiles)
+
+        if info.prov_type == "start":
+            label = f"Starting Material {info.source_index + 1}" if info.source_index else "Starting Material"
+            node_type = "start"
+        elif is_target:
+            label = "Target"
+            node_type = "product"
+        else:
+            label = info.reaction_name or "Intermediate"
+            node_type = "intermediate"
+
+        dag_nodes.append({
+            "id": nid,
+            "smiles": smi,
+            "type": node_type,
+            "label": label,
+            "is_coupling": info.prov_type == "coupling",
+            "step_text": info.step_text or "",
+            "reaction_name": info.reaction_name,
+            "reagent_name": info.reagent_name,
+            "reagent_smiles": info.reagent_smiles,
+            "environment": info.environment,
+            "source_index": info.source_index,
+        })
+
+        if info.parent_a:
+            dag_edges.append({
+                "id": f"e{edge_idx}",
+                "source": node_ids[info.parent_a],
+                "target": nid,
+                "reaction_name": info.reaction_name or "",
+                "reagent_name": info.reagent_name or "",
+                "is_coupling": info.prov_type == "coupling",
+            })
+            edge_idx += 1
+
+        if info.parent_b:
+            dag_edges.append({
+                "id": f"e{edge_idx}",
+                "source": node_ids[info.parent_b],
+                "target": nid,
+                "reaction_name": info.reaction_name or "",
+                "reagent_name": info.reagent_name or "",
+                "is_coupling": info.prov_type == "coupling",
+            })
+            edge_idx += 1
+
+    return dag_nodes, dag_edges
+
+
+def _heavy_atom_count(smiles: str) -> int:
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(smiles)
+    return mol.GetNumHeavyAtoms() if mol is not None else 0
+
+
+def _branch_rank(branch: dict) -> tuple:
+    """Rank exploratory branches for display: useful depth, distinct chemistry, molecule size."""
+    charged_steps = sum(1 for s in branch.get("steps", []) if s.get("type") == "intermediate")
+    return (
+        branch.get("steps_taken", 0),
+        charged_steps,
+        _heavy_atom_count(branch.get("product_smiles", "")),
+        branch.get("reagent", {}).get("name", ""),
+        branch.get("reaction_name", ""),
+    )
+
+
+def _extend_branch_for_display(branch: dict, max_depth: int = FANOUT_DISPLAY_DEPTH) -> dict:
+    """
+    Extend one exploratory branch into a deeper, readable pathway for the UI.
+
+    Each added transformation still comes from the deterministic template engine. This helper
+    only chooses a bounded, representative next product so no-target mode shows fewer options
+    with more future molecules instead of a wide first-step fanout.
+    """
+    if not branch.get("steps"):
+        return branch
+
+    extended = {
+        **branch,
+        "steps": [dict(step) for step in branch["steps"]],
+        "execution_history": list(branch.get("execution_history", [])),
+    }
+    seen = {step["smiles"] for step in extended["steps"] if step.get("smiles")}
+    current = extended["steps"][-1]["smiles"]
+    reaction_names = [branch.get("reaction_name") or branch.get("reaction_classification", {}).get("name", "")]
+
+    while len(extended["steps"]) - 1 < max_depth:
+        candidates: list[dict] = []
+        for reagent in REAGENT_LIST:
+            for candidate in _run_all_pathways_for_reagent(current, reagent):
+                final_product = candidate.get("product_smiles")
+                if not final_product or final_product in seen:
+                    continue
+                candidates.append(candidate)
+
+        if not candidates:
+            break
+
+        candidates.sort(key=_branch_rank, reverse=True)
+        next_branch = candidates[0]
+        reaction_names.append(next_branch.get("reaction_name", ""))
+        appended = False
+
+        for step in next_branch.get("steps", [])[1:]:
+            if len(extended["steps"]) - 1 >= max_depth:
+                break
+            if step.get("smiles") in seen:
+                continue
+
+            global_index = len(extended["steps"])
+            step_copy = dict(step)
+            step_copy["step_index"] = global_index
+            step_copy["reagent_name"] = next_branch.get("reagent", {}).get("name")
+            step_copy["reagent_smiles"] = next_branch.get("reagent", {}).get("smiles")
+            step_copy["environment"] = next_branch.get("environment")
+            step_copy["step_text"] = (
+                f"Step {global_index} ({step_copy.get('reaction_name') or next_branch.get('reaction_name')} "
+                f"via {step_copy.get('reagent_name')}): {step_copy.get('smiles')}"
+            )
+            extended["steps"].append(step_copy)
+            extended["execution_history"].append(step_copy["step_text"])
+            seen.add(step_copy["smiles"])
+            current = step_copy["smiles"]
+            appended = True
+
+        if not appended:
+            break
+
+        extended["product_smiles"] = current
+
+    extended["steps_taken"] = len(extended["steps"]) - 1
+    extended["reaction_pathway_label"] = " -> ".join(n for n in reaction_names if n)
+    return extended
+
+
+def _bfs_convergent(
+    start_smiles_list: list[str],
+    target_canon: str,
+    desired_depth: int,
+) -> dict:
+    """
+    Convergent BFS from one or more starting materials toward target_canon.
+
+    Supports:
+    - Unimolecular reagent-based templates (run_for_reagent)
+    - Bimolecular coupling templates (run_coupling) between any two pool molecules
+
+    Always searches to MAX_SEARCH_DEPTH regardless of desired_depth; routes are
+    partitioned into within/beyond desired_depth so the caller can report correctly.
+
+    Returns:
+      routes          — list of route dicts (dag_nodes, dag_edges, depth, …)
+      nodes_explored  — int
+      terminated_early — bool (pool ceiling hit)
+      result_status   — "found" | "found_beyond_depth" | "not_found" | "ceiling_hit"
+    """
+    from collections import deque
+    from rdkit import Chem
+
+    # Pool: canonical SMILES → _MolInfo
+    pool: dict[str, _MolInfo] = {}
+    for i, smi in enumerate(start_smiles_list):
+        pool[smi] = _MolInfo(
+            smiles=smi, depth=0, prov_type="start", source_index=i,
+            step_text="Starting material",
+        )
+
+    # BFS queue: (smiles, depth)
+    queue: deque = deque((smi, 0) for smi in start_smiles_list)
+
+    found_routes: list[dict] = []
+    terminated_early = False
+
+    while queue and not terminated_early:
+        current_smiles, depth = queue.popleft()
+
+        if depth >= MAX_SEARCH_DEPTH:
+            continue
+
+        current_mol = Chem.MolFromSmiles(current_smiles)
+        if current_mol is None:
+            continue
+
+        # ── 1. Unimolecular / reagent-based templates ─────────────────────────
+        for reagent in REAGENT_LIST:
+            if terminated_early:
+                break
+            conditions  = reagent.get("conditions", [])
+            environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
+
+            try:
+                branches = _engine.run_for_reagent(current_smiles, reagent["smiles"], conditions)
+            except Exception:
+                logger.exception("BFS: engine error for reagent %s on %s", reagent["name"], current_smiles)
+                continue
+
+            for branch in branches:
+                product = branch["final_product"]
+                new_depth = depth + branch["steps_taken"]
+
+                step_text = (
+                    branch["execution_history"][-1]
+                    if branch["execution_history"]
+                    else f"Reagent {reagent['name']} applied"
+                )
+
+                if product == target_canon:
+                    # Build and record this route
+                    if product not in pool:
+                        pool[product] = _MolInfo(
+                            smiles=product, depth=new_depth, prov_type="reagent",
+                            parent_a=current_smiles,
+                            reaction_name=branch["reaction_name"],
+                            template_id=branch["template_id"],
+                            reagent_name=reagent["name"],
+                            reagent_smiles=reagent["smiles"],
+                            environment=environment,
+                            step_text=step_text,
+                        )
+                    dag_nodes, dag_edges = _trace_dag(pool, target_canon)
+                    found_routes.append({
+                        "depth": new_depth,
+                        "dag_nodes": dag_nodes,
+                        "dag_edges": dag_edges,
+                    })
+                    continue
+
+                if product not in pool:
+                    pool[product] = _MolInfo(
+                        smiles=product, depth=new_depth, prov_type="reagent",
+                        parent_a=current_smiles,
+                        reaction_name=branch["reaction_name"],
+                        template_id=branch["template_id"],
+                        reagent_name=reagent["name"],
+                        reagent_smiles=reagent["smiles"],
+                        environment=environment,
+                        step_text=step_text,
+                    )
+                    if len(pool) >= MAX_POOL_SIZE:
+                        terminated_early = True
+                        break
+                    queue.append((product, new_depth))
+
+        # ── 2. Coupling templates (both reactants from pool) ──────────────────
+        if not terminated_early and _engine.coupling_templates:
+            pool_snapshot = list(pool.keys())  # snapshot to avoid mutation during iteration
+            for other_smiles in pool_snapshot:
+                if other_smiles == current_smiles:
+                    continue
+                try:
+                    coupling_results = _engine.run_coupling(current_smiles, other_smiles)
+                except Exception:
+                    logger.exception("BFS: coupling error %s + %s", current_smiles, other_smiles)
+                    continue
+
+                other_depth = pool[other_smiles].depth
+                new_depth = max(depth, other_depth) + 1
+
+                for cr in coupling_results:
+                    product = cr["product_smiles"]
+
+                    if product == target_canon:
+                        if product not in pool:
+                            pool[product] = _MolInfo(
+                                smiles=product, depth=new_depth, prov_type="coupling",
+                                parent_a=current_smiles, parent_b=other_smiles,
+                                reaction_name=cr["reaction_name"],
+                                template_id=cr["template_id"],
+                                step_text=f"Coupling: {cr['reaction_name']}",
+                            )
+                        dag_nodes, dag_edges = _trace_dag(pool, target_canon)
+                        found_routes.append({
+                            "depth": new_depth,
+                            "dag_nodes": dag_nodes,
+                            "dag_edges": dag_edges,
+                        })
+                        continue
+
+                    if product not in pool:
+                        pool[product] = _MolInfo(
+                            smiles=product, depth=new_depth, prov_type="coupling",
+                            parent_a=current_smiles, parent_b=other_smiles,
+                            reaction_name=cr["reaction_name"],
+                            template_id=cr["template_id"],
+                            step_text=f"Coupling: {cr['reaction_name']}",
+                        )
+                        if len(pool) >= MAX_POOL_SIZE:
+                            terminated_early = True
+                            break
+                        queue.append((product, new_depth))
+
+    # ── Classify result ───────────────────────────────────────────────────────
+    if found_routes:
+        # Sort by depth ascending (shortest first)
+        found_routes.sort(key=lambda r: r["depth"])
+        # De-duplicate routes by DAG node set
+        seen_dag: set[frozenset] = set()
+        unique_routes = []
+        for r in found_routes:
+            key = frozenset(n["smiles"] for n in r["dag_nodes"])
+            if key not in seen_dag:
+                seen_dag.add(key)
+                unique_routes.append(r)
+        found_routes = unique_routes
+
+        within = [r for r in found_routes if r["depth"] <= desired_depth]
+        beyond = [r for r in found_routes if r["depth"] >  desired_depth]
+
+        if within:
+            result_status = "found"
+            best_routes = within
+        else:
+            result_status = "found_beyond_depth"
+            best_routes = [beyond[0]]   # shortest route beyond desired depth
+    else:
+        best_routes = []
+        result_status = "ceiling_hit" if terminated_early else "not_found"
+
+    # Annotate routes with is_shortest flag
+    for i, r in enumerate(best_routes):
+        r["is_shortest"] = (i == 0)
+        r["exceeds_desired_depth"] = r["depth"] > desired_depth
+
+    return {
+        "routes": best_routes,
+        "nodes_explored": len(pool),
+        "terminated_early": terminated_early,
+        "result_status": result_status,
+        "shortest_route_depth": best_routes[0]["depth"] if best_routes else None,
+    }
+
+
+@app.post("/pathways")
+async def pathways(req: PathwaysRequest):
+    from rdkit import Chem
+
+    # ── Resolve starting materials (support legacy single-substrate field) ─────
+    raw_starts = req.start_smiles if req.start_smiles else (
+        [req.substrate_smiles] if req.substrate_smiles.strip() else []
+    )
+    if not raw_starts:
+        raise HTTPException(status_code=422, detail="At least one starting material is required")
+
+    canon_starts: list[str] = []
+    for smi in raw_starts:
+        mol = Chem.MolFromSmiles(smi.strip())
+        if mol is None:
+            raise HTTPException(status_code=422, detail=f"Invalid starting material SMILES: {smi!r}")
+        canon_starts.append(Chem.MolToSmiles(mol))
+
+    # Remove duplicates, preserve order
+    seen_starts: set[str] = set()
+    unique_starts: list[str] = []
+    for s in canon_starts:
+        if s not in seen_starts:
+            seen_starts.add(s)
+            unique_starts.append(s)
+    canon_starts = unique_starts
+
+    # Server-side clamp on desired_depth
+    desired_depth = max(1, min(MAX_SEARCH_DEPTH, req.desired_depth))
+
+    # Canonicalize optional target
+    target_canon: str | None = None
+    if req.target_smiles and req.target_smiles.strip():
+        t_mol = Chem.MolFromSmiles(req.target_smiles.strip())
+        if t_mol:
+            target_canon = Chem.MolToSmiles(t_mol)
+
+    loop = asyncio.get_event_loop()
+
+    # ── Target given: convergent BFS ──────────────────────────────────────────
+    if target_canon:
+        search_result = await loop.run_in_executor(
+            _executor, _bfs_convergent, canon_starts, target_canon, desired_depth
+        )
+
+        status = search_result["result_status"]
+        routes = search_result["routes"]
+
+        # Build the human-readable no-match message
+        if status in ("not_found", "ceiling_hit"):
+            if status == "ceiling_hit":
+                no_match_message = (
+                    f"The search space exceeded {MAX_POOL_SIZE} unique molecules before completing. "
+                    f"No route to the target was found within those bounds. "
+                    "Try reducing the number of starting materials or lowering the depth."
+                )
+            else:
+                no_match_message = (
+                    f"Searched all reaction pathways up to {MAX_SEARCH_DEPTH} steps "
+                    f"({search_result['nodes_explored']} unique molecules explored); "
+                    "no combination of the available templates converts the starting material(s) into the target. "
+                    "The required reaction may not be in the current template library, "
+                    "or the transformation may not be achievable under the available conditions."
+                )
+        elif status == "found_beyond_depth":
+            d = search_result["shortest_route_depth"]
+            no_match_message = (
+                f"No route within your requested depth of {desired_depth}. "
+                f"Shortest route found needs {d} step{'s' if d != 1 else ''} (shown below)."
+            )
+        else:
+            no_match_message = None
+
+        # Tag routes with id for frontend selection
+        for i, route in enumerate(routes):
+            route["id"] = f"route_{i}"
+            route["matches_target"] = True
+
+        return {
+            "start_smiles": canon_starts,
+            "target_smiles": target_canon,
+            "search_mode": "target_search",
+            "result_status": status,
+            "desired_depth": desired_depth,
+            "shortest_route_depth": search_result["shortest_route_depth"],
+            "search_info": {
+                "nodes_explored": search_result["nodes_explored"],
+                "terminated_early": search_result["terminated_early"],
+                "max_depth_searched": MAX_SEARCH_DEPTH,
+            },
+            "no_match_message": no_match_message,
+            "routes": routes,
+            "branches": [],   # empty in target-search mode
+        }
+
+    # ── No target: fan-out from ALL starting materials ────────────────────────
+    branches: list[dict] = []
+    branch_idx = 0
+    for substrate in canon_starts:
+        for reagent in REAGENT_LIST:
+            reagent_branches = await loop.run_in_executor(
+                _executor, _run_all_pathways_for_reagent, substrate, reagent
+            )
+            for branch in reagent_branches:
+                branch["id"] = f"branch_{branch_idx}_{branch['template_id']}"
+                branch["start_smiles_used"] = substrate
+                branch_idx += 1
+                branches.append(branch)
+
+    # Focus exploratory mode on a smaller set of richer pathways, then extend
+    # each selected pathway so the graph shows future molecules instead of a
+    # wide, shallow reagent fanout.
+    branches.sort(key=_branch_rank, reverse=True)
+    unique_branches: list[dict] = []
+    seen_branch_keys: set[tuple[str, str, str]] = set()
+    for branch in branches:
+        key = (
+            branch.get("start_smiles_used", ""),
+            branch.get("product_smiles", ""),
+            branch.get("reaction_name", ""),
+        )
+        if key in seen_branch_keys:
+            continue
+        seen_branch_keys.add(key)
+        unique_branches.append(branch)
+        if len(unique_branches) >= FANOUT_BRANCH_LIMIT:
+            break
+
+    branches = []
+    for i, branch in enumerate(unique_branches):
+        extended = _extend_branch_for_display(branch, FANOUT_DISPLAY_DEPTH)
+        extended["id"] = f"branch_{i}_{extended['template_id']}"
+        branches.append(extended)
+
+    return {
+        "start_smiles": canon_starts,
+        "target_smiles": None,
+        "search_mode": "fanout",
+        "result_status": None,
+        "desired_depth": desired_depth,
+        "shortest_route_depth": None,
+        "search_info": None,
+        "display_limit": FANOUT_BRANCH_LIMIT,
+        "display_depth": FANOUT_DISPLAY_DEPTH,
+        "no_match_message": None,
+        "routes": [],
+        "branches": branches,
+    }
+
+
+class ExplainRequest(BaseModel):
+    substrate_smiles: str
+    product_smiles: str
+    reagent_name: str
+    reagent_smiles: str
+    reaction_name: str
+    execution_history: list[str]
+    environment_used: str
+    # Optional per-node fields — when provided, explanation is scoped to a single step
+    node_smiles: Optional[str] = None
+    node_role: Optional[str] = None       # 'start' | 'intermediate' | 'product'
+    node_step_text: Optional[str] = None  # raw execution_history entry for this step
+
+
+@app.post("/explain")
+async def explain(req: ExplainRequest):
+    system_prompt = (
+        "You are an organic chemistry teaching assistant for Orgo AI. "
+        "You will be given exact chemical data computed by a verified deterministic engine. "
+        "Your sole job is to explain this data clearly to a student.\n\n"
+        "HARD RULES:\n"
+        "- The provided SMILES, reaction name, execution history, and environment are ground truth. "
+        "Never contradict or independently re-derive them.\n"
+        "- Explain ONLY what the engine computed. Do not invent steps not in the history.\n"
+        "- If a student asks you to go beyond the provided data, say so explicitly.\n"
+        "- Flag uncertainty rather than fabricating mechanism details."
+    )
+
+    history_text = "\n".join(req.execution_history) if req.execution_history else "No history available"
+
+    if req.node_smiles and req.node_role and req.node_role != "start":
+        # Per-node explanation scoped to one step
+        user_prompt = (
+            f"Explain what is happening at this specific step in the reaction pathway:\n\n"
+            f"**Step role:** {req.node_role}\n"
+            f"**This step's molecular state (SMILES):** {req.node_smiles}\n"
+            f"**Engine description of this step:** {req.node_step_text or 'N/A'}\n\n"
+            f"**Full reaction context:**\n"
+            f"  Starting material: {req.substrate_smiles}\n"
+            f"  Reagent: {req.reagent_name} ({req.reagent_smiles})\n"
+            f"  Reaction type (engine-classified): {req.reaction_name}\n"
+            f"  Control environment: {req.environment_used}\n"
+            f"  Final product: {req.product_smiles}\n\n"
+            f"**Complete engine execution history:**\n{history_text}\n\n"
+            "Explain: what chemical transformation reached this state, what bonds formed or broke, "
+            "and why this intermediate/product is expected given the reagent. "
+            "Be concise and accessible to an undergraduate student."
+        )
+    else:
+        user_prompt = (
+            f"Please explain this reaction pathway to a student:\n\n"
+            f"**Starting material:** {req.substrate_smiles}\n"
+            f"**Reagent:** {req.reagent_name} ({req.reagent_smiles})\n"
+            f"**Reaction type (engine-classified):** {req.reaction_name}\n"
+            f"**Control environment:** {req.environment_used}\n\n"
+            f"**Engine execution history:**\n{history_text}\n\n"
+            f"**Final product:** {req.product_smiles}\n\n"
+            "Explain: (1) what happened chemically, (2) why this mechanism applies given the reagent, "
+            "(3) which bonds formed and broke, and (4) the significance of kinetic vs thermodynamic control "
+            "if relevant. Keep it accessible to an undergraduate student."
+        )
+
+    return StreamingResponse(
+        _sse_stream(system_prompt, [{"role": "user", "content": user_prompt}], 350),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    context: Optional[dict] = None
+
+
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    context_block = ""
+    if req.context:
+        lines = ["\n--- Currently displayed reaction ---"]
+        if req.context.get("substrate_smiles"):
+            lines.append(f"Starting material: {req.context['substrate_smiles']}")
+        if req.context.get("reagent_name"):
+            lines.append(f"Reagent: {req.context['reagent_name']} ({req.context.get('reagent_smiles','')})")
+        if req.context.get("reaction_name"):
+            lines.append(f"Reaction: {req.context['reaction_name']}")
+        if req.context.get("product_smiles"):
+            lines.append(f"Product: {req.context['product_smiles']}")
+        if req.context.get("execution_history"):
+            lines.append("History: " + " | ".join(req.context["execution_history"]))
+        context_block = "\n".join(lines)
+
+    system_prompt = (
+        "You are an organic chemistry tutor for Orgo AI. "
+        "Help students understand organic chemistry concepts and reactions.\n\n"
+        f"{context_block}\n\n"
+        "RULES:\n"
+        "- When a reaction is shown above, ground every answer in that engine-computed data. "
+        "Do NOT override or re-derive the engine's product, mechanism, or reaction type.\n"
+        "- Distinguish clearly between 'the engine computed X' and 'in general chemistry, Y is also possible'.\n"
+        "- For questions outside the displayed reaction, draw on chemistry knowledge but flag uncertainty.\n"
+        "- Keep responses concise and student-friendly."
+    )
+
+    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+
+    return StreamingResponse(
+        _sse_stream(system_prompt, messages, 250),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── /react-from-image ─────────────────────────────────────────────────────────
+
+def _react_from_image(raw_bytes: bytes) -> dict:
+    """
+    Full pipeline: raw image bytes → preprocessing → DECIMER → split
+    into substrate + reagent → template engine → product SMILES.
+
+    Returns a dict with keys:
+        recognized_smiles   — raw DECIMER output
+        components          — list of canonical component SMILES strings
+        substrate_smiles    — first component (canonical)
+        reagent_smiles      — remaining components joined with '.'
+        products            — list of {smiles, reaction_name, template_id,
+                               steps_taken, execution_history}
+        error               — str | None
+    """
+    from rdkit import Chem
+
+    # 1. Preprocess image
+    try:
+        pil = Image.open(io.BytesIO(raw_bytes))
+        try:
+            from PIL import ImageOps
+            pil = ImageOps.exif_transpose(pil)
+        except Exception:
+            pass
+        pil = pil.convert("RGB")
+        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    except Exception as exc:
+        return {"error": f"Could not decode image: {exc}", "products": []}
+
+    img = _resize(img)
+    current = img.copy()
+    for _, fn in [("perspective", perspective_correct), ("deskew", deskew),
+                  ("denoise", denoise), ("binarize", normalize_binarize)]:
+        try:
+            result = fn(current)
+            if result is not None and isinstance(result, np.ndarray):
+                current = result
+        except Exception:
+            pass
+
+    # 2. OSR via DECIMER
+    recognized_smiles: str | None = None
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+        cv2.imwrite(tmp_path, current)
+        recognized_smiles = _load_decimer()(tmp_path)
+    except Exception as exc:
+        return {"error": f"Structure recognition failed: {exc}", "products": []}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if not recognized_smiles:
+        return {"error": "No structure recognized in the image.", "products": []}
+
+    # 3. Parse all components — split on '.' but re-validate each fragment
+    raw_mol = Chem.MolFromSmiles(recognized_smiles)
+    if raw_mol is None:
+        # Try replacing '+' notation (some DECIMER outputs use '+' for fragment sep)
+        alt = recognized_smiles.replace("+", ".")
+        raw_mol = Chem.MolFromSmiles(alt)
+        if raw_mol is None:
+            return {
+                "recognized_smiles": recognized_smiles,
+                "error": "Recognized SMILES is invalid; try a clearer image.",
+                "products": [],
+            }
+
+    frags = Chem.GetMolFrags(raw_mol, asMols=True)
+    # Sort by heavy-atom count descending so the substrate (largest) comes first
+    frags_sorted = sorted(frags, key=lambda m: m.GetNumHeavyAtoms(), reverse=True)
+    components = [Chem.MolToSmiles(f) for f in frags_sorted]
+
+    if len(components) < 2:
+        return {
+            "recognized_smiles": recognized_smiles,
+            "components": components,
+            "substrate_smiles": components[0] if components else "",
+            "reagent_smiles": "",
+            "error": "Only one molecule was recognized. Upload an image containing both substrate and reagent.",
+            "products": [],
+        }
+
+    substrate_smiles = components[0]
+    reagent_smiles   = ".".join(components[1:])
+
+    # 4. Infer conditions and run engine
+    conditions = TemplateEngine._infer_conditions(reagent_smiles)
+    branches   = _engine.run_for_reagent(substrate_smiles, reagent_smiles, conditions)
+
+    products = [
+        {
+            "smiles":            b["final_product"],
+            "reaction_name":     b["reaction_name"],
+            "template_id":       b["template_id"],
+            "steps_taken":       b["steps_taken"],
+            "execution_history": b["execution_history"],
+        }
+        for b in branches
+    ]
+
+    return {
+        "recognized_smiles": recognized_smiles,
+        "components":        components,
+        "substrate_smiles":  substrate_smiles,
+        "reagent_smiles":    reagent_smiles,
+        "products":          products,
+        "error":             None if products else "No matching reaction templates for this substrate/reagent pair.",
+    }
+
+
+class ReactRequest(BaseModel):
+    substrate_smiles: str
+    reagent_smiles: str
+
+
+@app.post("/react")
+async def react(req: ReactRequest):
+    """Return all predicted products for a given substrate + reagent SMILES pair."""
+    from rdkit import Chem
+
+    sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
+    if sub_mol is None:
+        raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
+    rea_mol = Chem.MolFromSmiles(req.reagent_smiles.strip())
+    if rea_mol is None:
+        raise HTTPException(status_code=422, detail="Invalid reagent SMILES")
+
+    substrate = Chem.MolToSmiles(sub_mol)
+    reagent   = Chem.MolToSmiles(rea_mol)
+
+    conditions = TemplateEngine._infer_conditions(reagent)
+    # Also check REAGENT_LIST for explicit condition tags
+    for r in REAGENT_LIST:
+        r_mol = Chem.MolFromSmiles(r["smiles"])
+        if r_mol and Chem.MolToSmiles(r_mol) == reagent:
+            conditions = r.get("conditions", conditions)
+            break
+
+    def _run():
+        return _engine.run_for_reagent(substrate, reagent, conditions)
+
+    loop = asyncio.get_event_loop()
+    branches = await loop.run_in_executor(_executor, _run)
+
+    environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
+
+    products = [
+        {
+            "smiles":            b["final_product"],
+            "reaction_name":     b["reaction_name"],
+            "template_id":       b["template_id"],
+            "steps_taken":       b["steps_taken"],
+            "execution_history": b["execution_history"],
+        }
+        for b in branches
+    ]
+
+    return {
+        "substrate_smiles": substrate,
+        "reagent_smiles":   reagent,
+        "environment":      environment,
+        "products":         products,
+    }
+
+
+@app.post("/react-from-image")
+async def react_from_image(file: UploadFile = File(...)):
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file")
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(_executor, _react_from_image, contents)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}") from exc
+    return result
+
+
+# ── Static file serving — mount AFTER all API routes ─────────────────────────
+# Vite build outputs to static/. html=True serves index.html for any unmatched
+# path, enabling client-side routing.
+_static = Path(__file__).parent / "static"
+_static.mkdir(exist_ok=True)
+app.mount("/", StaticFiles(directory=str(_static), html=True), name="spa")
