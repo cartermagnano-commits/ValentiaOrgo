@@ -17,6 +17,7 @@ results/
 # Secrets
 .env
 .env.*
+!frontend/.env.placeholder
 frontend/.env.local
 frontend/.env*.local
 
