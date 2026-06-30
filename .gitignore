@@ -24,6 +24,7 @@ frontend/.env*.local
 # Frontend build output and deps
 frontend/node_modules/
 frontend/.next/
+*.tsbuildinfo
 static/
 
 # Local tool installs

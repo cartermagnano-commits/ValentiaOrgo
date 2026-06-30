@@ -756,6 +756,262 @@ header .subtitle {
   color: var(--warning);
 }
 
+/* -- MolDrawer ---------------------------------------------------- */
+
+.mol-drawer-trigger {
+  flex-shrink: 0;
+}
+
+.mol-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(24, 32, 42, 0.34);
+  backdrop-filter: blur(8px);
+}
+
+.mol-drawer-modal {
+  width: min(1120px, 100%);
+  max-height: min(860px, calc(100vh - 44px));
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-md);
+}
+
+.mol-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(251, 250, 247, 0.94);
+}
+
+.mol-drawer-header h3 {
+  margin: 2px 0 0;
+  font-size: 18px;
+  color: var(--text);
+}
+
+.mol-drawer-body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+
+.mol-drawer-tools {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  overflow-y: auto;
+  background: #faf8f3;
+  border-right: 1px solid var(--border);
+}
+
+.mol-tool-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mol-tool-group > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mol-tool-row,
+.mol-template-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.mol-tool,
+.mol-atom-button,
+.mol-template-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  color: var(--text);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.mol-tool {
+  padding: 6px 9px;
+}
+
+.mol-tool.compact {
+  width: 42px;
+  padding: 6px 0;
+  font-family: 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
+  font-weight: 700;
+}
+
+.mol-tool.active,
+.mol-atom-button.active {
+  color: #153f53;
+  background: #e4f1f5;
+  border-color: #bdd8df;
+}
+
+.mol-tool.danger {
+  color: var(--danger);
+}
+
+.mol-atom-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+}
+
+.mol-atom-button {
+  height: 36px;
+  padding: 0;
+  font-family: 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
+  font-weight: 800;
+}
+
+.mol-template-button {
+  flex: 1 1 92px;
+  padding: 7px 9px;
+}
+
+.mol-drawer-stage {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(320px, 1fr) auto;
+  gap: 14px;
+  padding: 16px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.mol-canvas-shell {
+  min-height: 320px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.mol-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.mol-bond-hit {
+  stroke: transparent;
+  stroke-width: 26;
+  cursor: pointer;
+}
+
+.mol-bond-line {
+  stroke: #18202a;
+  stroke-width: 4.5;
+  stroke-linecap: round;
+}
+
+.mol-atom {
+  cursor: grab;
+}
+
+.mol-atom circle {
+  fill: #ffffff;
+  stroke: #9fb5bb;
+  stroke-width: 2;
+}
+
+.mol-atom text {
+  fill: var(--text);
+  font-family: 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 17px;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.mol-atom.selected circle {
+  fill: #eef7f8;
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.mol-canvas-empty {
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.mol-canvas-empty svg,
+.mol-canvas-empty text {
+  color: var(--muted);
+  fill: var(--muted);
+}
+
+.mol-drawer-output {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 240px auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.mol-output-main,
+.mol-output-preview {
+  min-height: 122px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.mol-output-main code {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-all;
+}
+
+.mol-output-preview {
+  align-items: center;
+}
+
+.mol-output-preview > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* ── Buttons ──────────────────────────────────────────────────── */
 
 button {
@@ -2175,6 +2431,51 @@ header h1 {
   text-transform: uppercase;
 }
 
+.molecule-interest-panel {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) 220px auto;
+  gap: 12px;
+  align-items: stretch;
+  padding: 14px 16px;
+  background: #fbfaf7;
+  border-bottom: 1px solid var(--border);
+}
+
+.molecule-interest-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.molecule-interest-preview {
+  min-height: 86px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.molecule-interest-panel .mol-drawer-trigger {
+  align-self: center;
+  min-height: 40px;
+}
+
+.structured-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.structured-field-header .mol-drawer-trigger {
+  min-height: 28px;
+}
+
 .ai-response-box {
   min-height: 82px;
   display: flex;
@@ -2212,6 +2513,29 @@ header h1 {
 }
 
 @media (max-width: 980px) {
+  .mol-drawer-body,
+  .mol-drawer-output,
+  .molecule-interest-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .mol-drawer-tools {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mol-drawer-modal {
+    max-height: calc(100vh - 28px);
+  }
+
+  .mol-drawer-backdrop {
+    padding: 14px;
+  }
+
+  .mol-drawer-stage {
+    grid-template-rows: auto auto;
+  }
+
   .saved-context-panel {
     grid-template-columns: 1fr;
   }

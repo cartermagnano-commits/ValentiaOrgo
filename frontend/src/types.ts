@@ -14,7 +14,11 @@ export type MechanismStep = {
   electronPushingNotes?: string
 }
 
-export type SynthesisContent = {
+export type MoleculeContext = {
+  moleculeOfInterest?: string
+}
+
+export type SynthesisContent = MoleculeContext & {
   targetMolecule?: string
   startingMaterials: string[]
   constraints?: string
@@ -22,7 +26,7 @@ export type SynthesisContent = {
   aiResponse?: string
 }
 
-export type DirectReactionContent = {
+export type DirectReactionContent = MoleculeContext & {
   reactants: string[]
   reagents?: string
   solventConditions?: string
@@ -31,7 +35,7 @@ export type DirectReactionContent = {
   aiResponse?: string
 }
 
-export type PredictReactionContent = {
+export type PredictReactionContent = MoleculeContext & {
   reactants: string[]
   reagents?: string
   conditions?: string
@@ -41,7 +45,7 @@ export type PredictReactionContent = {
   aiResponse?: string
 }
 
-export type MechanismContent = {
+export type MechanismContent = MoleculeContext & {
   reactionInput?: string
   mechanismSteps: MechanismStep[]
   electronPushingNotes?: string
@@ -49,7 +53,7 @@ export type MechanismContent = {
   aiResponse?: string
 }
 
-export type RetrosynthesisContent = {
+export type RetrosynthesisContent = MoleculeContext & {
   targetMolecule?: string
   disconnections: string[]
   proposedPrecursors: string[]
@@ -57,7 +61,7 @@ export type RetrosynthesisContent = {
   aiResponse?: string
 }
 
-export type MoleculeNoteContent = {
+export type MoleculeNoteContent = MoleculeContext & {
   moleculeName?: string
   smiles?: string
   functionalGroups: string[]
@@ -65,7 +69,7 @@ export type MoleculeNoteContent = {
   savedObservations: string[]
 }
 
-export type ChatContent = {
+export type ChatContent = MoleculeContext & {
   notes?: string
   messages: Array<{
     id: string

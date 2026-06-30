@@ -2,24 +2,24 @@ import type { ChemistryFileContent, ChemistryFileType } from '../src/types'
 
 export function makeInitialContent(type: ChemistryFileType): ChemistryFileContent {
   if (type === 'synthesis') {
-    return { targetMolecule: '', startingMaterials: [''], constraints: '', notes: '', aiResponse: '' }
+    return { moleculeOfInterest: '', targetMolecule: '', startingMaterials: [''], constraints: '', notes: '', aiResponse: '' }
   }
   if (type === 'direct_reaction') {
-    return { reactants: [''], reagents: '', solventConditions: '', predictedProducts: [], notes: '', aiResponse: '' }
+    return { moleculeOfInterest: '', reactants: [''], reagents: '', solventConditions: '', predictedProducts: [], notes: '', aiResponse: '' }
   }
   if (type === 'predict_reaction') {
-    return { reactants: [''], reagents: '', conditions: '', predictedMajorProduct: '', sideProducts: [], notes: '', aiResponse: '' }
+    return { moleculeOfInterest: '', reactants: [''], reagents: '', conditions: '', predictedMajorProduct: '', sideProducts: [], notes: '', aiResponse: '' }
   }
   if (type === 'mechanism') {
-    return { reactionInput: '', mechanismSteps: [], electronPushingNotes: '', notes: '', aiResponse: '' }
+    return { moleculeOfInterest: '', reactionInput: '', mechanismSteps: [], electronPushingNotes: '', notes: '', aiResponse: '' }
   }
   if (type === 'retrosynthesis') {
-    return { targetMolecule: '', disconnections: [], proposedPrecursors: [], notes: '', aiResponse: '' }
+    return { moleculeOfInterest: '', targetMolecule: '', disconnections: [], proposedPrecursors: [], notes: '', aiResponse: '' }
   }
   if (type === 'molecule_note') {
-    return { moleculeName: '', smiles: '', functionalGroups: [], notes: '', savedObservations: [] }
+    return { moleculeOfInterest: '', moleculeName: '', smiles: '', functionalGroups: [], notes: '', savedObservations: [] }
   }
-  return { notes: '', messages: [] }
+  return { moleculeOfInterest: '', notes: '', messages: [] }
 }
 
 export function withPlaceholderAiResponse(content: ChemistryFileContent): ChemistryFileContent {

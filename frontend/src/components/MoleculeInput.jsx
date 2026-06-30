@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import StructureView from './StructureView'
+import MolDrawer from './MolDrawer'
 import { analyzeImage } from '../api'
 import { Camera, ChevronUp, Pencil, UploadCloud, X } from 'lucide-react'
 
@@ -96,6 +97,13 @@ export default function MoleculeInput({ label, value, onChange }) {
         >
           {showSmiles ? <ChevronUp size={14} /> : <><Pencil size={13} /> SMILES</>}
         </button>
+        <MolDrawer
+          value={value}
+          onChange={smiles => {
+            onChange(smiles)
+            setShowSmiles(true)
+          }}
+        />
         {value && (
           <button className="btn-icon" title="Clear" onClick={() => { onChange(''); setShowSmiles(false) }}>
             <X size={14} />

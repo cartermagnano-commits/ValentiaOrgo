@@ -1,7 +1,11 @@
-'use client'
-
 import ProjectPage from '../../../src/platform/ProjectPage'
 
-export default function ProjectRoute({ params }: { params: { projectId: string } }) {
-  return <ProjectPage projectId={params.projectId} />
+type ProjectRouteProps = {
+  params: Promise<{ projectId: string }>
+}
+
+export default async function ProjectRoute({ params }: ProjectRouteProps) {
+  const { projectId } = await params
+
+  return <ProjectPage projectId={projectId} />
 }

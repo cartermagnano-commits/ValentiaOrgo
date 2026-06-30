@@ -5,6 +5,8 @@ import { Bot, CheckCircle2, Save } from 'lucide-react'
 import PathwayExplorer from '../components/PathwayExplorer'
 import DirectReact from '../components/DirectReact'
 import ReactPredict from '../components/ReactPredict'
+import MolDrawer from '../components/MolDrawer'
+import StructureView from '../components/StructureView'
 import type { ChemistryFile, ChemistryFileContent } from '../types'
 import { makeInitialContent, withPlaceholderAiResponse } from '../../lib/content'
 import { updateChemistryFileContent } from '../../lib/database'
@@ -84,6 +86,12 @@ export default function FileEditor({
       {error && <div className="error-banner editor-banner">{error}</div>}
 
       <div className="file-editor-content">
+        <MoleculeOfInterestPanel
+          content={draft}
+          onChange={setDraft}
+          onSave={saveContent}
+        />
+
         {file.type === 'synthesis' && (
           <>
             <SavedContextPanel
@@ -202,6 +210,54 @@ function RelatedTabs({ currentFile, related }: { currentFile: ChemistryFile; rel
   )
 }
 
+function MoleculeOfInterestPanel({
+  content,
+  onChange,
+  onSave,
+}: {
+  content: ChemistryFileContent
+  onChange: (content: ChemistryFileContent) => void
+  onSave: (content?: ChemistryFileContent) => Promise<void>
+}) {
+  const data = content as Record<string, unknown>
+  const value = String(data.moleculeOfInterest ?? '')
+
+  function updateMolecule(value: string, save = false) {
+    const next = { ...data, moleculeOfInterest: value } as ChemistryFileContent
+    onChange(next)
+    if (save) void onSave(next)
+  }
+
+  return (
+    <div className="molecule-interest-panel">
+      <div className="molecule-interest-copy">
+        <span className="smiles-label">Molecule of interest</span>
+        <textarea
+          className="smiles-input"
+          rows={2}
+          value={value}
+          onChange={event => updateMolecule(event.target.value)}
+          onBlur={() => onSave()}
+          placeholder="Draw or paste the molecule you want this file to center on."
+          spellCheck={false}
+        />
+      </div>
+      <div className="molecule-interest-preview">
+        {value ? (
+          <StructureView smiles={value} width={180} height={100} className="structure-outline" />
+        ) : (
+          <span>No molecule selected</span>
+        )}
+      </div>
+      <MolDrawer
+        value={value}
+        onChange={smiles => updateMolecule(smiles, true)}
+        buttonLabel="Draw Molecule"
+      />
+    </div>
+  )
+}
+
 function SavedContextPanel({
   content,
   onChange,
@@ -298,11 +354,26 @@ function StructuredEditor({
     onChange(next as ChemistryFileContent)
   }
 
+  function applyDrawnMolecule(key: string, smiles: string) {
+    const current = valueFor(key).trim()
+    const shouldAppend = key.endsWith('Text') || key === 'reactionInput'
+    const nextValue = shouldAppend && current ? `${current}\n${smiles}` : smiles
+    updateField(key, nextValue)
+  }
+
   return (
     <div className="generic-editor">
       {fields.map(([key, label, placeholder]) => (
         <label key={key} className={key === 'notes' || key.endsWith('Text') ? 'wide-field' : ''}>
-          <span>{label}</span>
+          <div className="structured-field-header">
+            <span>{label}</span>
+            {isMoleculeField(key) && (
+              <MolDrawer
+                value={valueFor(key)}
+                onChange={smiles => applyDrawnMolecule(key, smiles)}
+              />
+            )}
+          </div>
           <textarea
             rows={key.endsWith('Text') || key === 'notes' ? 5 : 3}
             value={valueFor(key)}
@@ -332,4 +403,14 @@ function StructuredEditor({
 
 function splitLines(value: string) {
   return value.split('\n').map(item => item.trim()).filter(Boolean)
+}
+
+function isMoleculeField(key: string) {
+  return [
+    'reactionInput',
+    'targetMolecule',
+    'smiles',
+    'disconnectionsText',
+    'proposedPrecursorsText',
+  ].includes(key)
 }
