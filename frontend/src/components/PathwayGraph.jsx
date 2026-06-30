@@ -12,6 +12,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import StructureView from './StructureView'
+import { FlaskConical, RotateCcw } from 'lucide-react'
 
 // ── Custom node ───────────────────────────────────────────────────────────────
 
@@ -29,9 +30,9 @@ function MoleculeNode({ data }) {
     <div className={cls}>
       {/* Accept connections from above — start nodes may have multiple source handles */}
       {data.nodeType !== 'start' && (
-        <Handle type="target" position={Position.Top} style={{ background: '#374151' }} />
-      )}
-      <StructureView smiles={data.smiles} width={132} height={96} />
+      <Handle type="target" position={Position.Top} className="mol-handle" />
+    )}
+      <StructureView smiles={data.smiles} width={168} height={118} className="structure-outline" />
       <div className="mol-node-label">
         {data.label}
         {data.isCoupling && (
@@ -39,7 +40,7 @@ function MoleculeNode({ data }) {
         )}
       </div>
       {data.nodeType !== 'product' && (
-        <Handle type="source" position={Position.Bottom} style={{ background: '#374151' }} />
+        <Handle type="source" position={Position.Bottom} className="mol-handle" />
       )}
     </div>
   )
@@ -49,26 +50,27 @@ const NODE_TYPES = { molecule: MoleculeNode }
 
 // ── Fanout layout (existing, unchanged) ───────────────────────────────────────
 
-function buildFanoutGraph(data, selectedBranchId, selectedNodeId) {
+function buildFanoutGraph(data, selectedBranchIds, selectedBranchId, selectedNodeId) {
   if (!data?.branches?.length) return { nodes: [], edges: [] }
 
   const nodes = []
   const edges = []
-  const BRANCH_W = 190
-  const STEP_H   = 185
-  const n         = data.branches.length
-  const totalW    = (n - 1) * BRANCH_W
+  const BRANCH_W = 270
+  const STEP_H = 225
+  const visibleBranches = selectedBranchIds?.length
+    ? data.branches.filter(branch => selectedBranchIds.includes(branch.id))
+    : data.branches
+  const n = visibleBranches.length
+  const totalW = Math.max(0, (n - 1) * BRANCH_W)
 
-  // Determine whether to render a single shared start node or per-substrate starts
-  const uniqueStarts = [...new Set(data.branches.map(b => b.start_smiles_used ?? data.start_smiles?.[0] ?? ''))]
+  const uniqueStarts = [...new Set(visibleBranches.map(b => b.start_smiles_used ?? data.start_smiles?.[0] ?? ''))]
   const multiStart = uniqueStarts.length > 1
 
   if (!multiStart) {
-    const startX = totalW / 2
     nodes.push({
       id: 'start',
       type: 'molecule',
-      position: { x: startX - 70, y: 0 },
+      position: { x: -88, y: 0 },
       data: {
         smiles: data.start_smiles?.[0] ?? '',
         label: 'Starting Material',
@@ -78,11 +80,11 @@ function buildFanoutGraph(data, selectedBranchId, selectedNodeId) {
     })
   } else {
     uniqueStarts.forEach((smi, si) => {
-      const x = si * BRANCH_W * Math.ceil(n / uniqueStarts.length) - 70
+      const x = (si - (uniqueStarts.length - 1) / 2) * BRANCH_W
       nodes.push({
         id: `start_${si}`,
         type: 'molecule',
-        position: { x, y: 0 },
+        position: { x: x - 88, y: 0 },
         data: {
           smiles: smi,
           label: `Starting Material ${si + 1}`,
@@ -93,21 +95,22 @@ function buildFanoutGraph(data, selectedBranchId, selectedNodeId) {
     })
   }
 
-  data.branches.forEach((branch, bi) => {
-    const bx   = bi * BRANCH_W - 70
-    const isSel = branch.id === selectedBranchId
+  visibleBranches.forEach((branch, bi) => {
+    const isSelected = selectedBranchIds?.includes(branch.id)
+    const isActive = branch.id === selectedBranchId
 
     const startUsed = branch.start_smiles_used ?? data.start_smiles?.[0] ?? ''
     const startNodeId = multiStart
       ? `start_${uniqueStarts.indexOf(startUsed)}`
       : 'start'
+    const bx = (bi * BRANCH_W) - (totalW / 2) - 88
 
     let prevId = startNodeId
 
     branch.steps.slice(1).forEach((step, si) => {
       const nodeId = `${branch.id}_s${si + 1}`
       const label  = step.type === 'product'
-        ? (branch.matches_target ? '✓ Target Match' : 'Product')
+        ? (branch.matches_target ? 'Target Match' : 'Product')
         : step.label
 
       const stepReagentName = step.reagent_name ?? (si === 0 ? branch.reagent?.name : null)
@@ -123,7 +126,7 @@ function buildFanoutGraph(data, selectedBranchId, selectedNodeId) {
           stepIndex: step.step_index,
           stepText: step.step_text,
           matchesTarget: step.type === 'product' && branch.matches_target,
-          branchSelected: isSel,
+          branchSelected: isSelected || isActive,
           nodeSelected: selectedNodeId === nodeId,
           branchId: branch.id,
           reagentName: stepReagentName,
@@ -139,13 +142,14 @@ function buildFanoutGraph(data, selectedBranchId, selectedNodeId) {
         source: prevId,
         target: nodeId,
         label: stepReagentName ?? '',
-        labelStyle: { fill: '#8b949e', fontSize: 10, fontWeight: 600 },
-        labelBgStyle: { fill: '#0d1117', fillOpacity: 0.85 },
+        labelStyle: { fill: '#111827', fontSize: 11, fontWeight: 700 },
+        labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
+        labelBgPadding: [6, 4],
         style: {
-          stroke: isSel ? '#58a6ff' : branch.matches_target ? '#3fb950' : '#374151',
-          strokeWidth: isSel ? 2 : 1.5,
+          stroke: isSelected || isActive ? '#1d4ed8' : branch.matches_target ? '#15803d' : '#6b7280',
+          strokeWidth: isSelected || isActive ? 2.4 : 1.7,
         },
-        animated: isSel,
+        animated: isSelected || isActive,
       })
 
       prevId = nodeId
@@ -192,9 +196,9 @@ function buildDAGGraph(route, selectedNodeId) {
     }
   }
 
-  const STEP_H   = 185
-  const COL_W    = 190
-  const NODE_W   = 140
+  const STEP_H   = 230
+  const COL_W    = 250
+  const NODE_W   = 190
 
   // Group nodes by layer
   const layers = {}
@@ -260,10 +264,11 @@ function buildDAGGraph(route, selectedNodeId) {
     source: e.source,
     target: e.target,
     label: e.reagent_name || e.reaction_name || '',
-    labelStyle: { fill: '#8b949e', fontSize: 10, fontWeight: 600 },
-    labelBgStyle: { fill: '#0d1117', fillOpacity: 0.85 },
+    labelStyle: { fill: '#111827', fontSize: 11, fontWeight: 700 },
+    labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
+    labelBgPadding: [6, 4],
     style: {
-      stroke: e.is_coupling ? '#bc8cff' : '#3fb950',
+      stroke: e.is_coupling ? '#b45309' : '#15803d',
       strokeWidth: 2,
     },
     animated: true,
@@ -278,6 +283,7 @@ export default function PathwayGraph({
   data,
   selectedRouteId,
   selectedBranchId,
+  selectedBranchIds = [],
   selectedNodeId,
   onSelectRoute,
   onSelectBranch,
@@ -297,13 +303,13 @@ export default function PathwayGraph({
       const route = data.routes?.find(r => r.id === selectedRouteId) ?? data.routes?.[0]
       graph = route ? buildDAGGraph(route, selectedNodeId) : { nodes: [], edges: [] }
     } else {
-      graph = buildFanoutGraph(data, selectedBranchId, selectedNodeId)
+      graph = buildFanoutGraph(data, selectedBranchIds, selectedBranchId, selectedNodeId)
     }
 
     baseLayoutRef.current = graph
     setNodes(graph.nodes)
     setEdges(graph.edges)
-  }, [data, selectedRouteId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, selectedRouteId, selectedBranchIds]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Patch selection state without full rebuild (fanout mode)
   useEffect(() => {
@@ -312,24 +318,24 @@ export default function PathwayGraph({
       ...n,
       data: {
         ...n.data,
-        branchSelected: n.data.branchId === selectedBranchId,
+        branchSelected: selectedBranchIds.includes(n.data.branchId) || n.data.branchId === selectedBranchId,
         nodeSelected: n.id === selectedNodeId,
       },
     })))
     setEdges(prev => prev.map(e => {
       const branchId = e.id.replace(/^e_/, '').replace(/_\d+$/, '')
-      const isSel = branchId === selectedBranchId
+      const isSel = selectedBranchIds.includes(branchId) || branchId === selectedBranchId
       const matchesTgt = data?.branches?.find(b => b.id === branchId)?.matches_target
       return {
         ...e,
         style: {
-          stroke: isSel ? '#58a6ff' : matchesTgt ? '#3fb950' : '#374151',
-          strokeWidth: isSel ? 2 : 1.5,
+          stroke: isSel ? '#1d4ed8' : matchesTgt ? '#15803d' : '#6b7280',
+          strokeWidth: isSel ? 2.4 : 1.7,
         },
         animated: isSel,
       }
     }))
-  }, [selectedBranchId, selectedNodeId, data?.search_mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedBranchId, selectedBranchIds, selectedNodeId, data?.search_mode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Patch node-selected in DAG mode
   useEffect(() => {
@@ -364,8 +370,8 @@ export default function PathwayGraph({
   if (!data || isEmpty) {
     return (
       <div className="empty-graph">
-        <div className="big-icon">⚗</div>
-        <div style={{ fontSize: 14, color: 'var(--text)' }}>Pathway graph will appear here</div>
+        <div className="big-icon"><FlaskConical size={42} strokeWidth={1.3} /></div>
+        <div style={{ fontSize: 14, color: '#111827', fontWeight: 600 }}>Pathway graph will appear here</div>
         <div style={{ fontSize: 12 }}>Enter a starting material and click Analyze Pathways</div>
       </div>
     )
@@ -381,40 +387,41 @@ export default function PathwayGraph({
       onPaneClick={handlePaneClick}
       nodesDraggable
       nodesConnectable={false}
-      fitView
-      fitViewOptions={{ padding: 0.2 }}
-      minZoom={0.15}
+      defaultViewport={{ x: 420, y: 54, zoom: 0.86 }}
+      minZoom={0.08}
       maxZoom={2.5}
-      colorMode="dark"
-      style={{ background: 'var(--bg)' }}
+      colorMode="light"
+      style={{ background: '#ffffff' }}
       proOptions={{ hideAttribution: true }}
     >
-      <Background color="#30363d" gap={24} size={1} />
+      <Background color="#e5e7eb" gap={28} size={1} />
       <Controls
         showInteractive={false}
-        style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+        style={{ background: '#ffffff', border: '1px solid #d1d5db', color: '#111827' }}
       />
       <MiniMap
         nodeColor={n =>
-          n.data?.nodeSelected    ? '#f0a500' :
-          n.data?.matchesTarget   ? '#3fb950' :
-          n.data?.isCoupling      ? '#bc8cff' :
-          n.data?.nodeType === 'start' ? '#bc8cff' :
-          n.data?.branchSelected  ? '#58a6ff' : '#374151'
+          n.data?.nodeSelected    ? '#d97706' :
+          n.data?.matchesTarget   ? '#15803d' :
+          n.data?.isCoupling      ? '#b45309' :
+          n.data?.nodeType === 'start' ? '#334155' :
+          n.data?.branchSelected  ? '#1d4ed8' : '#9ca3af'
         }
-        style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+        style={{ background: '#ffffff', border: '1px solid #d1d5db' }}
       />
       <Panel position="top-right">
         <button
           onClick={resetLayout}
           title="Reset node positions"
           style={{
-            background: 'var(--card)', border: '1px solid var(--border)',
-            color: 'var(--muted)', borderRadius: 5,
+            background: '#ffffff', border: '1px solid #d1d5db',
+            color: '#374151', borderRadius: 5,
             padding: '4px 10px', fontSize: 11, cursor: 'pointer',
+            display: 'inline-flex', alignItems: 'center', gap: 6,
           }}
         >
-          ↺ Reset layout
+          <RotateCcw size={13} />
+          Reset layout
         </button>
       </Panel>
     </ReactFlow>

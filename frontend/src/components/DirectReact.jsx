@@ -2,6 +2,7 @@ import { useState } from 'react'
 import MoleculeInput from './MoleculeInput'
 import StructureView from './StructureView'
 import { reactDirect } from '../api'
+import { ArrowDown, Check, ChevronRight, Copy, FlaskConical, Plus } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -19,9 +20,10 @@ function CopyButton({ text }) {
         background: 'none', border: '1px solid var(--border)', borderRadius: 4,
         color: copied ? 'var(--success)' : 'var(--muted)', fontSize: 10,
         padding: '2px 7px', cursor: 'pointer', flexShrink: 0,
+        display: 'inline-flex', alignItems: 'center', gap: 4,
       }}
     >
-      {copied ? '✓ Copied' : 'Copy'}
+      {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
     </button>
   )
 }
@@ -61,7 +63,7 @@ function ProductCard({ product, index }) {
 
       {/* Structure */}
       <div style={{
-        background: 'var(--surface)', borderRadius: 8, padding: 8,
+        background: '#fff', border: '1px solid #d1d5db', borderRadius: 8, padding: 8,
         display: 'flex', justifyContent: 'center',
       }}>
         <StructureView smiles={product.smiles} width={280} height={160} />
@@ -75,7 +77,7 @@ function ProductCard({ product, index }) {
             userSelect: 'none', listStyle: 'none', display: 'flex',
             alignItems: 'center', gap: 4,
           }}>
-            <span style={{ fontSize: 9 }}>▶</span>
+            <ChevronRight size={12} />
             Mechanism ({product.execution_history.length} step{product.execution_history.length !== 1 ? 's' : ''})
           </summary>
           <ol style={{ paddingLeft: 18, marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -152,7 +154,7 @@ export default function DirectReact() {
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           paddingTop: 60, color: 'var(--muted)', fontSize: 22, userSelect: 'none',
         }}>
-          +
+          <Plus size={20} strokeWidth={1.8} />
         </div>
 
         <MoleculeInput
@@ -177,10 +179,11 @@ export default function DirectReact() {
             display: 'flex', alignItems: 'center', gap: 8,
           }}
         >
-          {loading
-            ? <><span className="spinner" style={{ borderTopColor: '#fff' }} /> Running…</>
-            : '⚗ Run Reaction'
-          }
+          {loading ? (
+            <><span className="spinner" style={{ borderTopColor: '#fff' }} /> Running…</>
+          ) : (
+            <><FlaskConical size={16} /> Run Reaction</>
+          )}
         </button>
 
         {(substrate || reagent || result) && (
@@ -215,7 +218,7 @@ export default function DirectReact() {
             marginBottom: 16, color: 'var(--muted)',
           }}>
             <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-            <span style={{ fontSize: 20 }}>↓</span>
+            <ArrowDown size={18} />
             <span style={{
               fontSize: 11, fontWeight: 600, color: 'var(--success)',
               textTransform: 'uppercase', letterSpacing: '0.08em',

@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import StructureView from './StructureView'
 import { reactFromImage } from '../api'
+import { ArrowLeft, Camera, Check, Copy, X } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -18,9 +19,10 @@ function CopyButton({ text }) {
         background: 'none', border: '1px solid var(--border)', borderRadius: 4,
         color: copied ? 'var(--success)' : 'var(--muted)', fontSize: 10,
         padding: '2px 7px', cursor: 'pointer', flexShrink: 0,
+        display: 'inline-flex', alignItems: 'center', gap: 4,
       }}
     >
-      {copied ? '✓ Copied' : 'Copy'}
+      {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
     </button>
   )
 }
@@ -82,7 +84,7 @@ function ProductCard({ product, index }) {
 
       {/* Structure */}
       <div style={{
-        background: 'var(--surface)', borderRadius: 6, padding: 6,
+        background: '#fff', border: '1px solid #d1d5db', borderRadius: 6, padding: 6,
         display: 'flex', justifyContent: 'center',
       }}>
         <StructureView smiles={product.smiles} width={260} height={150} />
@@ -218,7 +220,7 @@ export default function ReactPredict() {
           </div>
         ) : (
           <>
-            <div style={{ fontSize: 36, opacity: 0.4 }}>📷</div>
+            <Camera size={38} strokeWidth={1.45} style={{ opacity: 0.55 }} />
             <div style={{ fontSize: 13, color: 'var(--text)', fontWeight: 500 }}>
               Drop an image here or click to upload
             </div>
@@ -239,8 +241,10 @@ export default function ReactPredict() {
           <span>{error}</span>
           <button onClick={reset} style={{
             background: 'none', border: 'none', color: 'var(--muted)',
-            cursor: 'pointer', fontSize: 16, lineHeight: 1,
-          }}>×</button>
+            cursor: 'pointer', lineHeight: 1, display: 'inline-flex', padding: 3,
+          }}>
+            <X size={16} />
+          </button>
         </div>
       )}
 
@@ -321,9 +325,11 @@ export default function ReactPredict() {
               background: 'none', border: '1px solid var(--border)',
               borderRadius: 6, color: 'var(--muted)', fontSize: 12,
               padding: '6px 14px', cursor: 'pointer',
+              display: 'inline-flex', alignItems: 'center', gap: 6,
             }}
           >
-            ← New prediction
+            <ArrowLeft size={14} />
+            New prediction
           </button>
         </div>
       )}

@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import StructureView from './StructureView'
 import { analyzeImage } from '../api'
+import { Camera, ChevronUp, Pencil, UploadCloud, X } from 'lucide-react'
 
 function isSmallHydrocarbon(smiles) {
   if (!smiles) return false
@@ -63,7 +64,7 @@ export default function MoleculeInput({ label, value, onChange }) {
           <StructureView smiles={value} width={200} height={136} />
         ) : (
           <>
-            <span className="upload-icon">⬆</span>
+            <UploadCloud className="upload-icon" size={30} strokeWidth={1.6} />
             <span>Upload or capture image</span>
           </>
         )}
@@ -82,9 +83,10 @@ export default function MoleculeInput({ label, value, onChange }) {
           />
           <span
             className="btn-secondary"
-            style={{ display: 'block', textAlign: 'center', cursor: 'pointer', padding: '6px 0' }}
+            style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '6px 0' }}
           >
-            📷 Camera / File
+            <Camera size={14} />
+            Camera / File
           </span>
         </label>
         <button
@@ -92,11 +94,11 @@ export default function MoleculeInput({ label, value, onChange }) {
           title={showSmiles ? 'Hide SMILES' : 'Edit SMILES'}
           onClick={() => setShowSmiles(s => !s)}
         >
-          {showSmiles ? '▲' : 'SMILES'}
+          {showSmiles ? <ChevronUp size={14} /> : <><Pencil size={13} /> SMILES</>}
         </button>
         {value && (
           <button className="btn-icon" title="Clear" onClick={() => { onChange(''); setShowSmiles(false) }}>
-            ✕
+            <X size={14} />
           </button>
         )}
       </div>

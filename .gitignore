@@ -8,6 +8,7 @@ venv/
 # Inputs/outputs (large binary files — add specific test images manually if needed)
 input/
 output/
+output_temp/
 results/
 
 # DECIMER model cache (downloaded at runtime, ~570 MB)
@@ -15,10 +16,21 @@ results/
 
 # Secrets
 .env
+.env.*
+!frontend/.env.placeholder
+frontend/.env.local
+frontend/.env*.local
 
 # Frontend build output and deps
 frontend/node_modules/
-static/assets/
+frontend/.next/
+static/
+
+# Local tool installs
+.local-node/
+
+# Runtime logs
+*.log
 
 # OS
 .DS_Store

@@ -1,499 +1,577 @@
-import { useState, useEffect } from 'react'
-import MoleculeInput from './components/MoleculeInput'
-import PathwayGraph from './components/PathwayGraph'
-import InfoPanel from './components/InfoPanel'
-import Chatbot from './components/Chatbot'
-import ReactPredict from './components/ReactPredict'
+import { useMemo, useState } from 'react'
+import {
+  ArrowLeft,
+  Beaker,
+  Bot,
+  CalendarDays,
+  Clock3,
+  FileText,
+  FlaskConical,
+  FolderKanban,
+  GitBranch,
+  MessageSquare,
+  Microscope,
+  Network,
+  NotebookText,
+  Plus,
+  Search,
+  Sparkles,
+  X,
+} from 'lucide-react'
+import PathwayExplorer from './components/PathwayExplorer'
 import DirectReact from './components/DirectReact'
-import { fetchPathways } from './api'
+import ReactPredict from './components/ReactPredict'
 
-// ── Loading overlay ───────────────────────────────────────────────────────────
+/** @typedef {import('./types').Project} Project */
+/** @typedef {import('./types').ChemistryFile} ChemistryFile */
+/** @typedef {import('./types').ChemistryFileType} ChemistryFileType */
 
-const PATHWAY_MESSAGES = [
-  'Inferring reaction conditions…',
-  'Exploring reagent pathways…',
-  'Validating products…',
-  'Building pathway graph…',
+const FILE_TYPES = [
+  { type: 'synthesis', code: 'SYN', label: 'Synthesis', icon: Network, description: 'Pathway exploration and saved synthesis routes' },
+  { type: 'direct-reaction', code: 'RXN', label: 'Direct reaction', icon: FlaskConical, description: 'Reactants, reagents, conditions, predicted products' },
+  { type: 'predict-reaction', code: 'PRED', label: 'Predict reaction', icon: Sparkles, description: 'Photo or structured reaction prediction' },
+  { type: 'mechanism', code: 'MECH', label: 'Mechanism', icon: GitBranch, description: 'Mechanism steps and electron-pushing notes' },
+  { type: 'retrosynthesis', code: 'RETRO', label: 'Retrosynthesis', icon: Search, description: 'Target disconnections and precursor planning' },
+  { type: 'molecule-note', code: 'MOL', label: 'Molecule note', icon: Microscope, description: 'SMILES, functional groups, observations' },
+  { type: 'chat', code: 'NOTE', label: 'General chat', icon: MessageSquare, description: 'Project-scoped chemistry notes and assistant chat' },
 ]
 
-function LoadingOverlay({ stage }) {
-  const messages = stage === 'analyze'
-    ? ['Recognizing structure…']
-    : PATHWAY_MESSAGES
-  const [msgIdx, setMsgIdx] = useState(0)
+const nowIso = () => new Date().toISOString()
+const newId = prefix => `${prefix}_${Math.random().toString(36).slice(2, 10)}`
 
-  useEffect(() => {
-    setMsgIdx(0)
-    if (messages.length <= 1) return
-    const id = setInterval(() => setMsgIdx(i => (i + 1) % messages.length), 2200)
-    return () => clearInterval(id)
-  }, [stage, messages.length])
+function formatDate(value) {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value))
+}
+
+function statusText(value) {
+  const diffMs = Date.now() - new Date(value).getTime()
+  const days = Math.max(0, Math.floor(diffMs / 86400000))
+  if (days === 0) return 'Edited recently'
+  if (days === 1) return 'Edited yesterday'
+  return `Edited ${days} days ago`
+}
+
+function fileTypeMeta(type) {
+  return FILE_TYPES.find(item => item.type === type) ?? FILE_TYPES[0]
+}
+
+function makeFile(projectId, type, title) {
+  const createdAt = nowIso()
+  return {
+    id: newId('file'),
+    projectId,
+    title,
+    type,
+    createdAt,
+    updatedAt: createdAt,
+    content: makeInitialContent(type),
+  }
+}
+
+function makeInitialContent(type) {
+  if (type === 'synthesis') {
+    return { targetMolecule: '', startingMaterials: [''], constraints: '', notes: '', aiResponse: '' }
+  }
+  if (type === 'direct-reaction') {
+    return { reactants: [''], reagents: '', solventConditions: '', predictedProducts: [], notes: '', aiResponse: '' }
+  }
+  if (type === 'predict-reaction') {
+    return { reactants: [''], reagents: '', conditions: '', predictedMajorProduct: '', sideProducts: [], notes: '', aiResponse: '' }
+  }
+  if (type === 'mechanism') {
+    return { reactionInput: '', mechanismSteps: [], electronPushingNotes: '', notes: '', aiResponse: '' }
+  }
+  if (type === 'retrosynthesis') {
+    return { targetMolecule: '', disconnections: [], proposedPrecursors: [], notes: '', aiResponse: '' }
+  }
+  if (type === 'molecule-note') {
+    return { moleculeName: '', smiles: '', functionalGroups: [], notes: '', savedObservations: [] }
+  }
+  return { notes: '', messages: [] }
+}
+
+function seedData() {
+  const createdAt = '2026-06-20T14:12:00.000Z'
+  const updatedAt = '2026-06-28T14:40:00.000Z'
+  const p1 = {
+    id: 'project_homework',
+    name: 'Carbonyl Chemistry Homework',
+    description: 'Saved reaction explorations for enolates, substitutions, and mechanism review.',
+    fileIds: ['file_pathways', 'file_direct', 'file_mech'],
+    createdAt,
+    updatedAt,
+  }
+  const p2 = {
+    id: 'project_synthesis',
+    name: 'Research Compound Route',
+    description: 'Early route sketches and retrosynthetic ideas for a substituted ketone target.',
+    fileIds: ['file_retro', 'file_photo'],
+    createdAt: '2026-06-24T10:30:00.000Z',
+    updatedAt: '2026-06-27T19:05:00.000Z',
+  }
+  return {
+    projects: [p1, p2],
+    files: [
+      { id: 'file_pathways', projectId: p1.id, title: 'Enolate pathway scan', type: 'synthesis', content: makeInitialContent('synthesis'), createdAt, updatedAt },
+      { id: 'file_direct', projectId: p1.id, title: 'Alkyl bromide + base', type: 'direct-reaction', content: makeInitialContent('direct-reaction'), createdAt, updatedAt },
+      { id: 'file_mech', projectId: p1.id, title: 'E2 mechanism notes', type: 'mechanism', content: makeInitialContent('mechanism'), createdAt, updatedAt },
+      { id: 'file_retro', projectId: p2.id, title: 'Ketone target retrosynthesis', type: 'retrosynthesis', content: makeInitialContent('retrosynthesis'), createdAt: p2.createdAt, updatedAt: p2.updatedAt },
+      { id: 'file_photo', projectId: p2.id, title: 'Whiteboard reaction prediction', type: 'predict-reaction', content: makeInitialContent('predict-reaction'), createdAt: p2.createdAt, updatedAt: p2.updatedAt },
+    ],
+  }
+}
+
+export default function App() {
+  const seed = useMemo(seedData, [])
+  const [projects, setProjects] = useState(seed.projects)
+  const [files, setFiles] = useState(seed.files)
+  const [activeProjectId, setActiveProjectId] = useState(null)
+  const [activeFileId, setActiveFileId] = useState(null)
+  const [projectModalOpen, setProjectModalOpen] = useState(false)
+  const [fileModalOpen, setFileModalOpen] = useState(false)
+
+  const activeProject = projects.find(project => project.id === activeProjectId) ?? null
+  const projectFiles = activeProject ? files.filter(file => file.projectId === activeProject.id) : []
+  const activeFile = projectFiles.find(file => file.id === activeFileId) ?? null
+
+  function createProject({ name, description }) {
+    const timestamp = nowIso()
+    const project = {
+      id: newId('project'),
+      name,
+      description,
+      fileIds: [],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }
+    setProjects(prev => [project, ...prev])
+    setActiveProjectId(project.id)
+    setActiveFileId(null)
+  }
+
+  function createFile({ title, type }) {
+    if (!activeProject) return
+    const file = makeFile(activeProject.id, type, title)
+    setFiles(prev => [file, ...prev])
+    setProjects(prev => prev.map(project =>
+      project.id === activeProject.id
+        ? { ...project, fileIds: [file.id, ...project.fileIds], updatedAt: file.updatedAt }
+        : project
+    ))
+    setActiveFileId(file.id)
+  }
+
+  if (!activeProject) {
+    return (
+      <div className="platform-app">
+        <AppTopbar />
+        <Dashboard
+          projects={projects}
+          files={files}
+          onOpenProject={projectId => {
+            setActiveProjectId(projectId)
+            const firstFile = files.find(file => file.projectId === projectId)
+            setActiveFileId(firstFile?.id ?? null)
+          }}
+          onNewProject={() => setProjectModalOpen(true)}
+        />
+        {projectModalOpen && (
+          <NewProjectModal
+            onClose={() => setProjectModalOpen(false)}
+            onCreate={payload => {
+              createProject(payload)
+              setProjectModalOpen(false)
+            }}
+          />
+        )}
+      </div>
+    )
+  }
 
   return (
-    <div className="loading-overlay">
-      <div className="loading-content">
-        {/* Atom animation */}
-        <div className="atom-wrap">
-          <svg viewBox="0 0 120 120" width="110" height="110" aria-hidden="true">
-            {/* Nucleus */}
-            <circle cx="60" cy="60" r="9" fill="var(--accent2)" opacity="0.9" />
-            <circle cx="60" cy="60" r="5" fill="#e6edf3" opacity="0.7" />
+    <div className="platform-app">
+      <ProjectWorkspace
+        project={activeProject}
+        files={projectFiles}
+        activeFile={activeFile}
+        onBack={() => {
+          setActiveProjectId(null)
+          setActiveFileId(null)
+        }}
+        onSelectFile={setActiveFileId}
+        onNewFile={() => setFileModalOpen(true)}
+      />
+      {fileModalOpen && (
+        <NewFileModal
+          onClose={() => setFileModalOpen(false)}
+          onCreate={payload => {
+            createFile(payload)
+            setFileModalOpen(false)
+          }}
+        />
+      )}
+    </div>
+  )
+}
 
-            {/* Orbital ring 1 — tilted 0° (flat horizontal ellipse) */}
-            <g className="orbit-a">
-              <ellipse cx="60" cy="60" rx="48" ry="14"
-                fill="none" stroke="var(--accent)" strokeWidth="1.2" strokeOpacity="0.5" />
-              <circle cx="108" cy="60" r="5.5" fill="var(--accent)" />
-            </g>
+function AppTopbar() {
+  return (
+    <header className="platform-topbar">
+      <div className="brand-mark">
+        <Beaker size={18} />
+      </div>
+      <div>
+        <h1>Orgo AI</h1>
+        <div className="subtitle">Project-based organic chemistry workspace</div>
+      </div>
+    </header>
+  )
+}
 
-            {/* Orbital ring 2 — tilted 60° */}
-            <g className="orbit-b">
-              <ellipse cx="60" cy="60" rx="48" ry="14"
-                fill="none" stroke="var(--accent2)" strokeWidth="1.2" strokeOpacity="0.5" />
-              <circle cx="108" cy="60" r="5.5" fill="var(--accent2)" />
-            </g>
-
-            {/* Orbital ring 3 — tilted −60° */}
-            <g className="orbit-c">
-              <ellipse cx="60" cy="60" rx="48" ry="14"
-                fill="none" stroke="var(--success)" strokeWidth="1.2" strokeOpacity="0.5" />
-              <circle cx="108" cy="60" r="5.5" fill="var(--success)" />
-            </g>
-          </svg>
+function Dashboard({ projects, files, onOpenProject, onNewProject }) {
+  return (
+    <main className="dashboard-page">
+      <div className="dashboard-header">
+        <div>
+          <div className="eyebrow">Projects</div>
+          <h2>Chemistry workspaces</h2>
+          <p>Organize synthesis plans, homework sets, reaction predictions, and research notes by project.</p>
         </div>
+        <button className="btn-primary action-button" onClick={onNewProject}>
+          <Plus size={16} />
+          New Project
+        </button>
+      </div>
 
-        {/* Status message */}
-        <div className="loading-message" key={msgIdx}>
-          {messages[msgIdx]}
-        </div>
+      <div className="project-grid">
+        {!projects.length && (
+          <div className="dashboard-empty-state">
+            <FolderKanban size={34} />
+            <h3>No projects yet</h3>
+            <p>Create a workspace for a homework set, synthesis plan, or research compound.</p>
+            <button className="btn-primary action-button" onClick={onNewProject}>
+              <Plus size={16} />
+              New Project
+            </button>
+          </div>
+        )}
+        {projects.map(project => {
+          const count = files.filter(file => file.projectId === project.id).length
+          return (
+            <button key={project.id} className="project-card" onClick={() => onOpenProject(project.id)}>
+              <div className="project-card-icon">
+                <FolderKanban size={20} />
+              </div>
+              <div className="project-card-main">
+                <div className="project-status-row">
+                  <span className="status-pill saved">Saved</span>
+                  <span className="status-pill muted">{statusText(project.updatedAt)}</span>
+                </div>
+                <h3>{project.name}</h3>
+                <p>{project.description || 'No description yet.'}</p>
+              </div>
+              <div className="project-card-meta">
+                <span><FileText size={13} /> {count} file{count === 1 ? '' : 's'}</span>
+                <span><CalendarDays size={13} /> Created {formatDate(project.createdAt)}</span>
+                <span><Clock3 size={13} /> Updated {formatDate(project.updatedAt)}</span>
+              </div>
+            </button>
+          )
+        })}
+      </div>
+    </main>
+  )
+}
 
-        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: -4 }}>
-          This may take 10–20 seconds
+function ProjectWorkspace({ project, files, activeFile, onBack, onSelectFile, onNewFile }) {
+  return (
+    <div className="project-workspace">
+      <header className="project-header">
+        <button className="icon-text-button" onClick={onBack}>
+          <ArrowLeft size={15} />
+          Projects
+        </button>
+        <div>
+          <h2>{project.name}</h2>
+          <p>{project.description || 'No project description.'}</p>
         </div>
+      </header>
+
+      <div className="workspace-body">
+        <aside className="file-sidebar">
+          <div className="file-sidebar-header">
+            <div>
+              <div className="eyebrow">Files</div>
+              <strong>{files.length} saved</strong>
+            </div>
+            <button className="micro-button" onClick={onNewFile}>
+              <Plus size={13} />
+              New File
+            </button>
+          </div>
+
+          <div className="file-list">
+            {!files.length && (
+              <div className="sidebar-empty-state">
+                <NotebookText size={28} />
+                <strong>No chemistry files</strong>
+                <span>Create the first saved operation for this project.</span>
+              </div>
+            )}
+            {files.map(file => {
+              const meta = fileTypeMeta(file.type)
+              const Icon = meta.icon
+              return (
+                <button
+                  key={file.id}
+                  className={`file-list-item${activeFile?.id === file.id ? ' active' : ''}`}
+                  onClick={() => onSelectFile(file.id)}
+                >
+                  <Icon size={15} />
+                  <span>
+                    <strong>
+                      {file.title}
+                      <span className="file-type-badge">{meta.code}</span>
+                    </strong>
+                    <small>{statusText(file.updatedAt)} · AI not run yet</small>
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        </aside>
+
+        <main className="file-workspace">
+          {activeFile ? (
+            <FileWorkspace file={activeFile} files={files} />
+          ) : (
+            <EmptyFileState onNewFile={onNewFile} />
+          )}
+        </main>
       </div>
     </div>
   )
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
+function EmptyFileState({ onNewFile }) {
+  return (
+    <div className="workspace-empty-state">
+      <NotebookText size={38} />
+      <h3>Select or create a file</h3>
+      <p>Create a saved chemistry operation inside this project, or choose an existing file from the sidebar.</p>
+      <button className="btn-primary action-button" onClick={onNewFile}>
+        <Plus size={16} />
+        New File
+      </button>
+    </div>
+  )
+}
 
-const MAX_STARTS = 4
-
-export default function App() {
-  const [appMode, setAppMode] = useState('explorer')  // 'explorer' | 'predict'
-  const [startSmilesList,  setStartSmilesList]  = useState([''])
-  const [targetSmiles,     setTargetSmiles]     = useState('')
-  const [desiredDepth,     setDesiredDepth]     = useState(5)
-  const [pathwaysData,     setPathwaysData]     = useState(null)
-  const [selectedRouteId,  setSelectedRouteId]  = useState(null)
-  const [selectedBranchId, setSelectedBranchId] = useState(null)
-  const [selectedNodeId,   setSelectedNodeId]   = useState(null)
-  const [selectedNodeData, setSelectedNodeData] = useState(null)
-  const [loading,   setLoading]   = useState(false)
-  const [loadStage, setLoadStage] = useState('pathways')
-  const [error,     setError]     = useState(null)
-  const [activeTab, setActiveTab] = useState('info')
-
-  // Helpers to find selected items
-  const selectedRoute  = pathwaysData?.routes?.find(r => r.id === selectedRouteId) ?? null
-  const selectedBranch = pathwaysData?.branches?.find(b => b.id === selectedBranchId) ?? null
-
-  const nodeBranch = selectedNodeData?.branchId
-    ? (pathwaysData?.branches?.find(b => b.id === selectedNodeData.branchId) ?? selectedBranch)
-    : selectedBranch
-
-  // Primary substrate for InfoPanel/chatbot context
-  const primaryStart = startSmilesList.find(s => s.trim()) ?? ''
-
-  // ── Multiple start inputs ──────────────────────────────────────────────────
-  function updateStart(idx, val) {
-    setStartSmilesList(prev => prev.map((s, i) => i === idx ? val : s))
-  }
-  function addStart() {
-    if (startSmilesList.length < MAX_STARTS)
-      setStartSmilesList(prev => [...prev, ''])
-  }
-  function removeStart(idx) {
-    setStartSmilesList(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev)
-  }
-
-  // ── Analyze ───────────────────────────────────────────────────────────────
-  async function handleAnalyze() {
-    const validStarts = startSmilesList.map(s => s.trim()).filter(Boolean)
-    if (!validStarts.length) return
-    setLoading(true)
-    setLoadStage('pathways')
-    setError(null)
-    setPathwaysData(null)
-    setSelectedRouteId(null)
-    setSelectedBranchId(null)
-    setSelectedNodeId(null)
-    setSelectedNodeData(null)
-    try {
-      const data = await fetchPathways(validStarts, targetSmiles.trim(), desiredDepth)
-      setPathwaysData(data)
-      if (data.routes?.length) {
-        setSelectedRouteId(data.routes[0].id)
-      } else if (data.branches?.length) {
-        const match = data.branches.find(b => b.matches_target)
-        setSelectedBranchId((match ?? data.branches[0]).id)
-      }
-    } catch (e) {
-      setError(e.message || 'Failed to compute pathways')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function handleSelectNode(nodeId, nodeData) {
-    setSelectedNodeId(nodeId)
-    setSelectedNodeData(nodeData)
-  }
-
-  const hasValidStart = startSmilesList.some(s => s.trim())
-  const isTargetMode  = pathwaysData?.search_mode === 'target_search'
-  const status        = pathwaysData?.result_status
+function FileWorkspace({ file, files }) {
+  const meta = fileTypeMeta(file.type)
+  const Icon = meta.icon
+  const related = files.filter(other => other.type === file.type && other.id !== file.id)
 
   return (
-    <div className="app">
-      {loading && <LoadingOverlay stage={loadStage} />}
-
-      <header>
-        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-          <circle cx="14" cy="14" r="13" stroke="#58a6ff" strokeWidth="1.5"/>
-          <circle cx="9"  cy="11" r="2.5" fill="#bc8cff"/>
-          <circle cx="19" cy="11" r="2.5" fill="#58a6ff"/>
-          <circle cx="14" cy="20" r="2.5" fill="#3fb950"/>
-          <line x1="9"  y1="11" x2="19" y2="11" stroke="#58a6ff" strokeWidth="1"/>
-          <line x1="9"  y1="11" x2="14" y2="20" stroke="#bc8cff" strokeWidth="1"/>
-          <line x1="19" y1="11" x2="14" y2="20" stroke="#3fb950" strokeWidth="1"/>
-        </svg>
-        <div>
-          <h1>Orgo AI</h1>
-          <div className="subtitle">Reaction pathway explorer</div>
-        </div>
-
-        {/* Mode toggle */}
-        <div style={{
-          marginLeft: 'auto',
-          display: 'flex',
-          background: 'var(--card)',
-          border: '1px solid var(--border)',
-          borderRadius: 8,
-          overflow: 'hidden',
-        }}>
-          {[
-            { key: 'explorer', label: 'Pathway Explorer' },
-            { key: 'react',    label: '⚗ React' },
-            { key: 'predict',  label: '📷 Predict from Photo' },
-          ].map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => setAppMode(key)}
-              style={{
-                background: appMode === key ? 'var(--accent)' : 'none',
-                border: 'none',
-                color: appMode === key ? '#fff' : 'var(--muted)',
-                fontSize: 12,
-                fontWeight: 600,
-                padding: '6px 14px',
-                cursor: 'pointer',
-                transition: 'background 0.15s, color 0.15s',
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      {appMode === 'react' && (
-        <div style={{ overflowY: 'auto', height: 'calc(100vh - 57px)' }}>
-          <DirectReact />
-        </div>
-      )}
-
-      {appMode === 'predict' && (
-        <div style={{ overflowY: 'auto', height: 'calc(100vh - 57px)' }}>
-          <ReactPredict />
-        </div>
-      )}
-
-      <div className="main-content" style={{ display: appMode !== 'explorer' ? 'none' : undefined }}>
-
-        {/* ── Left: inputs ─────────────────────────────────────────── */}
-        <div className="panel">
-          <div className="panel-header">Structures</div>
-          <div className="panel-body">
-
-            {/* Starting materials — one or more */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                  Starting Material{startSmilesList.length > 1 ? 's' : ''}
-                </span>
-                {startSmilesList.length < MAX_STARTS && (
-                  <button
-                    onClick={addStart}
-                    title="Add another starting material"
-                    style={{
-                      background: 'none', border: '1px solid var(--border)', borderRadius: 4,
-                      color: 'var(--accent)', fontSize: 11, padding: '2px 8px', cursor: 'pointer',
-                    }}
-                  >
-                    + Add
-                  </button>
-                )}
-              </div>
-              {startSmilesList.map((smi, idx) => (
-                <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
-                  <div style={{ flex: 1 }}>
-                    <MoleculeInput
-                      label={startSmilesList.length > 1 ? `Material ${idx + 1}` : 'SMILES / image'}
-                      value={smi}
-                      onChange={val => updateStart(idx, val)}
-                    />
-                  </div>
-                  {startSmilesList.length > 1 && (
-                    <button
-                      onClick={() => removeStart(idx)}
-                      title="Remove"
-                      style={{
-                        background: 'none', border: 'none', color: 'var(--muted)',
-                        fontSize: 16, cursor: 'pointer', padding: '4px 2px', lineHeight: 1,
-                        marginTop: 26,
-                      }}
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              ))}
+    <section className="file-editor-shell">
+      <div className="file-editor-header">
+        <div className="file-title-row">
+          <span className="file-type-icon"><Icon size={17} /></span>
+          <div>
+            <div className="file-heading-meta">
+              <span className="file-type-badge strong">{meta.code}</span>
+              <span className="status-pill saved">Saved</span>
+              <span className="status-pill muted">AI not run yet</span>
             </div>
-
-            <MoleculeInput
-              label="Target Product (optional)"
-              value={targetSmiles}
-              onChange={setTargetSmiles}
-            />
-
-            {/* Depth control — only when a target is set */}
-            {targetSmiles.trim() && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    Desired depth
-                  </span>
-                  <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, minWidth: 16, textAlign: 'right' }}>
-                    {desiredDepth}
-                  </span>
-                </div>
-                <input
-                  type="range" min={1} max={10} step={1} value={desiredDepth}
-                  onChange={e => setDesiredDepth(Number(e.target.value))}
-                  style={{ width: '100%', accentColor: 'var(--accent)', cursor: 'pointer' }}
-                />
-                <div style={{ fontSize: 10, color: 'var(--muted)', lineHeight: 1.4 }}>
-                  Preferred route length. Search always continues to depth 10 to find the shortest possible route.
-                </div>
-              </div>
-            )}
-
-            <button
-              className="analyze-btn"
-              onClick={handleAnalyze}
-              disabled={loading || !hasValidStart}
-            >
-              {loading ? (
-                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                  <span className="spinner" style={{ borderTopColor: '#fff' }} />
-                  Computing pathways…
-                </span>
-              ) : 'Analyze Pathways'}
-            </button>
-
-            {error && (
-              <div style={{ background: 'rgba(248,81,73,0.1)', border: '1px solid rgba(248,81,73,0.3)',
-                borderRadius: 6, padding: '8px 12px', fontSize: 12, color: 'var(--danger)' }}>
-                {error}
-              </div>
-            )}
-
-            {/* Result status summary */}
-            {pathwaysData && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>
-                  {isTargetMode ? (
-                    <>
-                      {status === 'found' && (
-                        <span style={{ color: 'var(--success)' }}>
-                          Target reached in {pathwaysData.shortest_route_depth} step{pathwaysData.shortest_route_depth !== 1 ? 's' : ''}
-                        </span>
-                      )}
-                      {status === 'found_beyond_depth' && (
-                        <span style={{ color: '#d2961e' }}>
-                          Shortest route: {pathwaysData.shortest_route_depth} steps (exceeds your depth of {pathwaysData.desired_depth})
-                        </span>
-                      )}
-                      {(status === 'not_found' || status === 'ceiling_hit') && (
-                        <span style={{ color: 'var(--danger)' }}>Target not reachable</span>
-                      )}
-                    </>
-                  ) : (
-                    `${pathwaysData.branches?.length ?? 0} pathway${(pathwaysData.branches?.length ?? 0) !== 1 ? 's' : ''} found`
-                  )}
-                  {pathwaysData.search_info && (
-                    <span style={{ color: 'var(--muted)', marginLeft: 8 }}>
-                      · {pathwaysData.search_info.nodes_explored} molecules explored
-                    </span>
-                  )}
-                </div>
-
-                {pathwaysData.no_match_message && (
-                  <div style={{
-                    background: status === 'found_beyond_depth' ? 'rgba(210,153,34,0.08)' : 'rgba(248,81,73,0.08)',
-                    border: `1px solid ${status === 'found_beyond_depth' ? 'rgba(210,153,34,0.3)' : 'rgba(248,81,73,0.25)'}`,
-                    borderRadius: 6, padding: '8px 10px', fontSize: 11,
-                    color: status === 'found_beyond_depth' ? '#d2961e' : 'var(--danger)',
-                    lineHeight: 1.5,
-                  }}>
-                    {pathwaysData.no_match_message}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Route list (target-search mode) */}
-            {isTargetMode && pathwaysData.routes?.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div className="panel-header" style={{ padding: '4px 0 4px', border: 'none' }}>Routes</div>
-                {pathwaysData.routes.map(r => (
-                  <button
-                    key={r.id}
-                    onClick={() => { setSelectedRouteId(r.id); setSelectedNodeId(null); setSelectedNodeData(null) }}
-                    style={{
-                      background: r.id === selectedRouteId ? 'rgba(63,185,80,0.10)' : 'var(--card)',
-                      border: `1px solid ${r.id === selectedRouteId ? 'var(--success)' : 'var(--border)'}`,
-                      borderRadius: 6, padding: '8px 10px', textAlign: 'left',
-                      cursor: 'pointer', color: 'var(--text)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--success)' }}>
-                        {r.is_shortest ? 'Shortest route' : `Route (${r.depth} steps)`}
-                      </span>
-                      {r.exceeds_desired_depth && (
-                        <span style={{ fontSize: 10, color: '#d2961e', background: 'rgba(210,153,34,0.12)',
-                          border: '1px solid rgba(210,153,34,0.3)', borderRadius: 20, padding: '1px 7px' }}>
-                          exceeds depth
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                      {r.depth} step{r.depth !== 1 ? 's' : ''} ·{' '}
-                      {r.dag_nodes?.filter(n => n.is_coupling).length > 0
-                        ? `${r.dag_nodes.filter(n => n.is_coupling).length} coupling step(s)`
-                        : 'linear route'}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* Branch list (fanout mode) */}
-            {!isTargetMode && pathwaysData?.branches?.length > 0 && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div className="panel-header" style={{ padding: '4px 0 4px', border: 'none' }}>Pathways</div>
-                {pathwaysData.branches.map(b => (
-                  <button
-                    key={b.id}
-                    onClick={() => { setSelectedBranchId(b.id); setSelectedNodeId(null); setSelectedNodeData(null) }}
-                    style={{
-                      background: b.id === selectedBranchId ? 'rgba(88,166,255,0.12)' : 'var(--card)',
-                      border: `1px solid ${b.id === selectedBranchId ? 'var(--accent)' : 'var(--border)'}`,
-                      borderRadius: 6, padding: '8px 10px', textAlign: 'left',
-                      cursor: 'pointer', color: 'var(--text)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontWeight: 600, fontSize: 13 }}>{b.reagent?.name ?? '—'}</span>
-                      <span className={`env-badge ${b.environment === 'Kinetic' ? 'env-kinetic' : 'env-thermodynamic'}`}>
-                        {b.environment}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                      {b.reaction_classification?.name ?? 'Unknown reaction'}
-                    </div>
-                    <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
-                      {(b.steps?.length ?? 1) - 1} step{((b.steps?.length ?? 1) - 1) !== 1 ? 's' : ''} ·{' '}
-                      {b.steps?.filter(s => s.type === 'intermediate').length > 0
-                        ? `${b.steps.filter(s => s.type === 'intermediate').length} intermediate(s)`
-                        : 'direct'}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
+            <h3>{file.title}</h3>
           </div>
         </div>
-
-        {/* ── Center: pathway graph ─────────────────────────────────── */}
-        <div className="panel graph-panel" style={{ border: 'none' }}>
-          <div className="panel-header">
-            Pathway Graph
-            {selectedNodeData && (
-              <span style={{ color: 'var(--accent)', marginLeft: 8, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
-                · {selectedNodeData.label} selected
-              </span>
-            )}
-          </div>
-          <div className="graph-container">
-            <PathwayGraph
-              data={pathwaysData}
-              selectedRouteId={selectedRouteId}
-              selectedBranchId={selectedBranchId}
-              selectedNodeId={selectedNodeId}
-              onSelectRoute={setSelectedRouteId}
-              onSelectBranch={setSelectedBranchId}
-              onSelectNode={handleSelectNode}
-            />
-          </div>
+        <div className="file-dates">
+          {statusText(file.updatedAt)} · Created {formatDate(file.createdAt)}
         </div>
+      </div>
 
-        {/* ── Right: info + chatbot ─────────────────────────────────── */}
-        <div className="panel">
-          <div className="panel-header" style={{ display: 'flex', gap: 0, padding: 0 }}>
-            {['info', 'chat'].map(tab => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                style={{
-                  flex: 1, background: 'none', border: 'none',
-                  borderBottom: `2px solid ${activeTab === tab ? 'var(--accent)' : 'transparent'}`,
-                  borderRadius: 0,
-                  color: activeTab === tab ? 'var(--accent)' : 'var(--muted)',
-                  padding: '12px 0', fontSize: 11, fontWeight: 600,
-                  letterSpacing: '0.08em', textTransform: 'uppercase', cursor: 'pointer',
-                }}
-              >
-                {tab === 'info' ? 'Reaction Info' : 'Chatbot'}
-              </button>
+      {(file.type === 'synthesis' || file.type === 'direct-reaction' || file.type === 'predict-reaction') && (
+        <RelatedTabs currentFile={file} related={related} />
+      )}
+
+      <div className="file-editor-content">
+        {file.type === 'synthesis' && <PathwayExplorer />}
+        {file.type === 'direct-reaction' && <DirectReact />}
+        {file.type === 'predict-reaction' && <ReactPredict />}
+        {file.type === 'mechanism' && <MechanismEditor />}
+        {file.type === 'retrosynthesis' && <RetrosynthesisEditor />}
+        {file.type === 'molecule-note' && <MoleculeNoteEditor />}
+        {file.type === 'chat' && <ChatFileEditor />}
+      </div>
+    </section>
+  )
+}
+
+function RelatedTabs({ currentFile, related }) {
+  return (
+    <div className="related-file-tabs">
+      <span className="related-tab active">{currentFile.title}</span>
+      {related.map(file => (
+        <span key={file.id} className="related-tab">{file.title}</span>
+      ))}
+      {!related.length && <span className="related-empty">No previous saved files of this type in this project.</span>}
+    </div>
+  )
+}
+
+function MechanismEditor() {
+  return (
+    <GenericEditor
+      sections={[
+        ['Reaction input', 'Paste reaction SMILES, reagent context, or a plain-language reaction description.'],
+        ['Mechanism steps', 'Step 1: describe bond formation/breaking. Add more steps as this file evolves.'],
+        ['Electron-pushing notes', 'Capture curved-arrow logic, nucleophile/electrophile assignments, and charges.'],
+        ['Notes', 'General study notes and assumptions.'],
+        ['AI response placeholder', 'AI-generated mechanism explanation will appear here.'],
+      ]}
+    />
+  )
+}
+
+function RetrosynthesisEditor() {
+  return (
+    <GenericEditor
+      sections={[
+        ['Target molecule', 'Target SMILES or molecule name.'],
+        ['Disconnections', 'Key bonds to disconnect and rationale.'],
+        ['Proposed precursors', 'Candidate starting materials and synthetic equivalents.'],
+        ['Notes', 'Constraints, protecting-group concerns, and route assumptions.'],
+        ['AI response placeholder', 'AI-generated retrosynthetic plan will appear here.'],
+      ]}
+    />
+  )
+}
+
+function MoleculeNoteEditor() {
+  return (
+    <GenericEditor
+      sections={[
+        ['Molecule name', 'Common name, project code, or IUPAC shorthand.'],
+        ['SMILES string', 'Canonical or working SMILES.'],
+        ['Functional groups', 'Alcohol, ketone, alkyl halide, alkene, etc.'],
+        ['Notes', 'Reactivity, hazards, synthesis context, or observations.'],
+        ['Saved observations', 'Experimental or study observations attached to this molecule.'],
+      ]}
+    />
+  )
+}
+
+function ChatFileEditor() {
+  return (
+    <div className="generic-editor">
+      <label>
+        <span>Chat notes</span>
+        <textarea rows={12} placeholder="Use this file as a project-scoped chat scratchpad for now." />
+      </label>
+      <div className="ai-placeholder">
+        <Bot size={16} />
+        Chat responses will appear here when project-file persistence is connected.
+      </div>
+    </div>
+  )
+}
+
+function GenericEditor({ sections }) {
+  return (
+    <div className="generic-editor">
+      {sections.map(([label, placeholder]) => (
+        <label key={label}>
+          <span>{label}</span>
+          <textarea rows={label.includes('placeholder') ? 5 : 3} placeholder={placeholder} />
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function NewProjectModal({ onClose, onCreate }) {
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+
+  function submit(event) {
+    event.preventDefault()
+    if (!name.trim()) return
+    onCreate({ name: name.trim(), description: description.trim() })
+  }
+
+  return (
+    <Modal title="New Project" onClose={onClose}>
+      <form className="modal-form" onSubmit={submit}>
+        <label>
+          <span>Project name</span>
+          <input value={name} onChange={event => setName(event.target.value)} autoFocus />
+        </label>
+        <label>
+          <span>Description</span>
+          <textarea rows={3} value={description} onChange={event => setDescription(event.target.value)} />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={!name.trim()}>Create project</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function NewFileModal({ onClose, onCreate }) {
+  const [title, setTitle] = useState('')
+  const [type, setType] = useState('synthesis')
+  const selectedMeta = fileTypeMeta(type)
+  const SelectedIcon = selectedMeta.icon
+
+  function submit(event) {
+    event.preventDefault()
+    if (!title.trim()) return
+    onCreate({ title: title.trim(), type })
+  }
+
+  return (
+    <Modal title="New File" onClose={onClose}>
+      <form className="modal-form" onSubmit={submit}>
+        <label>
+          <span>File title</span>
+          <input value={title} onChange={event => setTitle(event.target.value)} autoFocus />
+        </label>
+        <label>
+          <span>File type</span>
+          <select value={type} onChange={event => setType(event.target.value)}>
+            {FILE_TYPES.map(item => (
+              <option key={item.type} value={item.type}>{item.label}</option>
             ))}
-          </div>
-
-          {activeTab === 'info' ? (
-            <InfoPanel
-              branch={nodeBranch}
-              route={selectedRoute}
-              substrateSMILES={primaryStart}
-              selectedNode={selectedNodeId}
-              selectedNodeData={selectedNodeData}
-            />
-          ) : (
-            <Chatbot branch={selectedBranch} substrateSMILES={primaryStart} />
-          )}
+          </select>
+        </label>
+        <div className="file-type-help">
+          <SelectedIcon size={15} />
+          <span className="file-type-badge">{selectedMeta.code}</span>
+          {selectedMeta.description}
         </div>
+        <div className="modal-actions">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={!title.trim()}>Create file</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
 
+function Modal({ title, children, onClose }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <div className="modal-card" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="modal-header">
+          <h3>{title}</h3>
+          <button className="icon-button" onClick={onClose} aria-label="Close modal">
+            <X size={15} />
+          </button>
+        </div>
+        {children}
       </div>
     </div>
   )

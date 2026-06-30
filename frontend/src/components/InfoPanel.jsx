@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import StructureView from './StructureView'
 import { streamNodeExplanation, streamExplanation } from '../api'
+import { CheckCircle2, Microscope } from 'lucide-react'
 
 const CONF_CLASS = { high: 'conf-high', medium: 'conf-medium', low: 'conf-low', unknown: 'conf-unknown' }
 
@@ -140,7 +141,7 @@ function BranchInfoView({ branch, substrateSMILES }) {
   if (!branch) {
     return (
       <div className="panel-body" style={{ alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 12, textAlign: 'center' }}>
-        <div style={{ fontSize: 36, opacity: 0.2, marginBottom: 10 }}>🔬</div>
+        <Microscope size={38} strokeWidth={1.4} style={{ opacity: 0.28, marginBottom: 10 }} />
         Click a node in the graph or a pathway in the sidebar
       </div>
     )
@@ -177,7 +178,10 @@ function BranchInfoView({ branch, substrateSMILES }) {
           {branch.matches_target && (
             <div className="branch-summary-row">
               <span className="branch-summary-label">Target</span>
-              <span style={{ color: 'var(--success)', fontWeight: 600, fontSize: 12 }}>✓ Matches your target</span>
+              <span style={{ color: 'var(--success)', fontWeight: 600, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <CheckCircle2 size={13} />
+                Matches your target
+              </span>
             </div>
           )}
         </div>

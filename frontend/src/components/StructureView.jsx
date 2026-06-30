@@ -65,7 +65,7 @@ export default function StructureView({ smiles, width = 200, height = 150, class
 
   return (
     <div
-      className={className}
+      className={`structure-view structure-outline ${className}`.trim()}
       style={{ width, height, overflow: 'hidden', background: '#fff', borderRadius: 4 }}
       dangerouslySetInnerHTML={{ __html: svg }}
     />

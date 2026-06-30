@@ -155,17 +155,27 @@ def deskew(img: np.ndarray) -> np.ndarray:
 
 def denoise(img: np.ndarray) -> np.ndarray:
     """
-    Reduce photographic noise using bilateral filtering.
+    Reduce photographic noise using Non-Local Means (NLM) denoising.
 
-    Bilateral filtering preserves sharp edges (bonds, atom labels) while
-    smoothing out noise — same perceptual goal as NLM but ~20x faster because
-    it only considers spatial neighbours rather than searching the whole image.
+    NLM averages patches that look similar across the whole image, so it
+    preserves sharp edges (bonds, labels) much better than a simple blur.
 
-    d=9 is the pixel neighbourhood diameter; sigmaColor/sigmaSpace=75 gives
-    moderate smoothing without blurring fine line structure.
+    h=10 is the filter strength:
+      - raise to 15-20 for very grainy phone shots
+      - lower to 5-7 if fine structure is being lost
+
+    Note: fastNlMeansDenoisingColored is slow on large images (several seconds
+    for a 12MP photo). Resize to ~1500px wide first if speed is a concern.
     """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    denoised = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+    if len(img.shape) == 3 and img.shape[2] == 3:
+        return cv2.fastNlMeansDenoisingColored(
+            img, None, h=10, hColor=10, templateWindowSize=7, searchWindowSize=21
+        )
+    # Grayscale path
+    gray = img if len(img.shape) == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    denoised = cv2.fastNlMeansDenoising(
+        gray, None, h=10, templateWindowSize=7, searchWindowSize=21
+    )
     return cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
 
 
