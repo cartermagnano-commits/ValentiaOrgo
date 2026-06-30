@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowLeft, LogOut, NotebookText, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, FlaskConical, GitBranch, LogOut, MessageSquare, Microscope, Network, NotebookText, Plus, Search, Sparkles, Trash2 } from 'lucide-react'
 import type { User } from '@supabase/supabase-js'
 import { supabase } from '../../lib/supabaseClient'
 import {
@@ -69,12 +69,16 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
 
   const activeFile = files.find(file => file.id === activeFileId) ?? null
 
-  async function handleCreateFile(payload: { title: string; type: ChemistryFileType }) {
+  async function handleCreateFile(payload: { title: string; type: ChemistryFileType }, fromModal = true) {
     if (!user || !project) return
     const file = await createChemistryFile(project.id, user.id, payload.title, payload.type)
     setFiles(prev => [file, ...prev])
     setActiveFileId(file.id)
-    setModalOpen(false)
+    if (fromModal) setModalOpen(false)
+  }
+
+  function startTool(type: ChemistryFileType, defaultTitle: string) {
+    handleCreateFile({ title: defaultTitle, type }, false)
   }
 
   async function handleDeleteFile(file: ChemistryFile) {
@@ -215,7 +219,7 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
                 onSaved={handleSavedFile}
               />
             ) : (
-              <EmptyFileState onNewFile={() => setModalOpen(true)} />
+              <ToolPickerState onStart={startTool} onNewFile={() => setModalOpen(true)} />
             )}
           </main>
         </div>
@@ -231,16 +235,62 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
   )
 }
 
-function EmptyFileState({ onNewFile }: { onNewFile: () => void }) {
+function ToolPickerState({
+  onStart,
+  onNewFile,
+}: {
+  onStart: (type: ChemistryFileType, defaultTitle: string) => void
+  onNewFile: () => void
+}) {
   return (
-    <div className="workspace-empty-state">
-      <NotebookText size={38} />
-      <h3>Select or create a file</h3>
-      <p>Create a saved chemistry operation inside this project, or choose an existing file from the sidebar.</p>
-      <button className="btn-primary action-button" onClick={onNewFile}>
-        <Plus size={16} />
-        New File
-      </button>
+    <div className="tool-picker">
+      <div className="tool-picker-heading">
+        <h3>Choose a chemistry tool</h3>
+        <p>Each tool is saved as a file inside this project so your work is always preserved.</p>
+      </div>
+
+      <div className="tool-picker-primary">
+        <button className="tool-picker-card primary" onClick={() => onStart('synthesis', 'Synthesis Pathway')}>
+          <div className="tool-picker-card-icon"><Network size={26} /></div>
+          <div>
+            <strong>Synthesis Pathways</strong>
+            <span>Enter a starting molecule and explore all reagent routes to products.</span>
+          </div>
+        </button>
+        <button className="tool-picker-card primary" onClick={() => onStart('direct_reaction', 'Direct Reaction')}>
+          <div className="tool-picker-card-icon"><FlaskConical size={26} /></div>
+          <div>
+            <strong>Direct Reaction</strong>
+            <span>Give a substrate and reagent — get predicted products with mechanisms.</span>
+          </div>
+        </button>
+        <button className="tool-picker-card primary" onClick={() => onStart('predict_reaction', 'Reaction Prediction')}>
+          <div className="tool-picker-card-icon"><Sparkles size={26} /></div>
+          <div>
+            <strong>Predict from Image</strong>
+            <span>Upload a whiteboard photo or drawing and predict the reaction products.</span>
+          </div>
+        </button>
+      </div>
+
+      <div className="tool-picker-divider">
+        <span>More tools</span>
+      </div>
+
+      <div className="tool-picker-secondary">
+        <button className="tool-picker-card secondary" onClick={() => onStart('mechanism', 'Mechanism')}>
+          <GitBranch size={16} /> Mechanism
+        </button>
+        <button className="tool-picker-card secondary" onClick={() => onStart('retrosynthesis', 'Retrosynthesis')}>
+          <Search size={16} /> Retrosynthesis
+        </button>
+        <button className="tool-picker-card secondary" onClick={() => onStart('molecule_note', 'Molecule Note')}>
+          <Microscope size={16} /> Molecule Note
+        </button>
+        <button className="tool-picker-card secondary" onClick={() => onStart('chat', 'Project Notes')}>
+          <MessageSquare size={16} /> Notes / Chat
+        </button>
+      </div>
     </div>
   )
 }

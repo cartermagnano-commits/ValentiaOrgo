@@ -85,43 +85,23 @@ export default function FileEditor({
 
       <div className="file-editor-content">
         {file.type === 'synthesis' && (
-          <>
-            <SavedContextPanel
-              content={draft}
-              onChange={setDraft}
-              onSave={saveContent}
-              onPlaceholder={runPlaceholderAi}
-              actionLabel="Generate Synthesis"
-              saving={saving}
-            />
-            <PathwayExplorer />
-          </>
+          <PathwayExplorer
+            initialSubstrate={(draft as any).startingMaterials?.filter(Boolean) ?? []}
+            initialTarget={(draft as any).targetMolecule ?? ''}
+            onSave={(data: any) => saveContent({ ...draft, ...data })}
+          />
         )}
         {file.type === 'direct_reaction' && (
-          <>
-            <SavedContextPanel
-              content={draft}
-              onChange={setDraft}
-              onSave={saveContent}
-              onPlaceholder={runPlaceholderAi}
-              actionLabel="Predict Product"
-              saving={saving}
-            />
-            <DirectReact />
-          </>
+          <DirectReact
+            initialSubstrate={(draft as any).reactants?.[0] ?? ''}
+            initialReagent={(draft as any).reagents ?? ''}
+            onSave={(data: any) => saveContent({ ...draft, ...data })}
+          />
         )}
         {file.type === 'predict_reaction' && (
-          <>
-            <SavedContextPanel
-              content={draft}
-              onChange={setDraft}
-              onSave={saveContent}
-              onPlaceholder={runPlaceholderAi}
-              actionLabel="Predict Product"
-              saving={saving}
-            />
-            <ReactPredict />
-          </>
+          <ReactPredict
+            onSave={(data: any) => saveContent({ ...draft, ...data })}
+          />
         )}
         {file.type === 'mechanism' && (
           <StructuredEditor

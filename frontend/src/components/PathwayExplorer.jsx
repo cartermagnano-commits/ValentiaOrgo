@@ -85,9 +85,9 @@ function LoadingOverlay({ stage }) {
 
 const MAX_STARTS = 4
 
-export default function PathwayExplorer() {
-  const [startSmilesList,  setStartSmilesList]  = useState([''])
-  const [targetSmiles,     setTargetSmiles]     = useState('')
+export default function PathwayExplorer({ initialSubstrate, initialTarget, onSave } = {}) {
+  const [startSmilesList,  setStartSmilesList]  = useState(() => initialSubstrate?.length ? initialSubstrate : [''])
+  const [targetSmiles,     setTargetSmiles]     = useState(initialTarget ?? '')
   const [desiredDepth,     setDesiredDepth]     = useState(5)
   const [pathwaysData,     setPathwaysData]     = useState(null)
   const [selectedRouteId,  setSelectedRouteId]  = useState(null)
@@ -139,6 +139,7 @@ export default function PathwayExplorer() {
     try {
       const data = await fetchPathways(validStarts, targetSmiles.trim(), desiredDepth)
       setPathwaysData(data)
+      onSave?.({ startingMaterials: validStarts, targetMolecule: targetSmiles.trim() })
       if (data.routes?.length) {
         setSelectedRouteId(data.routes[0].id)
       } else if (data.branches?.length) {

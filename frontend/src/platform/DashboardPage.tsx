@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { CalendarDays, Clock3, FileText, FolderKanban, Plus, Trash2 } from 'lucide-react'
+import { CalendarDays, Clock3, FileText, FlaskConical, FolderKanban, Network, Plus, Sparkles, Trash2 } from 'lucide-react'
 import type { User } from '@supabase/supabase-js'
 import { createProject, deleteProject, fetchProjects, getCurrentUser } from '../../lib/database'
 import { isSupabaseConfigured } from '../../lib/supabaseClient'
@@ -18,6 +18,12 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
+  const [modalHint, setModalHint] = useState('')
+
+  function openNewProject(hint = '') {
+    setModalHint(hint)
+    setModalOpen(true)
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -82,7 +88,7 @@ export default function DashboardPage() {
             <h2>Chemistry workspaces</h2>
             <p>Organize synthesis plans, homework sets, reaction predictions, and research notes by project.</p>
           </div>
-          <button className="btn-primary action-button" onClick={() => setModalOpen(true)}>
+          <button className="btn-primary action-button" onClick={() => openNewProject()}>
             <Plus size={16} />
             New Project
           </button>
@@ -95,13 +101,40 @@ export default function DashboardPage() {
         )}
         {error && <div className="error-banner wide">{error}</div>}
 
+        <div className="quick-tools-section">
+          <div className="eyebrow">Start a new project</div>
+          <div className="quick-tools-grid">
+            <button className="quick-tool-card" onClick={() => openNewProject('Synthesis Pathways')}>
+              <Network size={22} />
+              <div>
+                <strong>Synthesis Pathways</strong>
+                <span>Explore reagent routes from a starting molecule</span>
+              </div>
+            </button>
+            <button className="quick-tool-card" onClick={() => openNewProject('Direct Reaction')}>
+              <FlaskConical size={22} />
+              <div>
+                <strong>Direct Reaction</strong>
+                <span>Predict products from substrate + reagent</span>
+              </div>
+            </button>
+            <button className="quick-tool-card" onClick={() => openNewProject('Predict from Image')}>
+              <Sparkles size={22} />
+              <div>
+                <strong>Predict from Image</strong>
+                <span>Upload a whiteboard photo to predict reaction products</span>
+              </div>
+            </button>
+          </div>
+        </div>
+
         <div className="project-grid">
           {!projects.length && !error && (
             <div className="dashboard-empty-state">
               <FolderKanban size={34} />
               <h3>No projects yet</h3>
               <p>Create a workspace for a homework set, synthesis plan, or research compound.</p>
-              <button className="btn-primary action-button" onClick={() => setModalOpen(true)}>
+              <button className="btn-primary action-button" onClick={() => openNewProject()}>
                 <Plus size={16} />
                 New Project
               </button>
@@ -152,7 +185,8 @@ export default function DashboardPage() {
 
       {modalOpen && (
         <NewProjectModal
-          onClose={() => setModalOpen(false)}
+          hint={modalHint}
+          onClose={() => { setModalOpen(false); setModalHint('') }}
           onCreate={handleCreateProject}
         />
       )}
@@ -161,9 +195,11 @@ export default function DashboardPage() {
 }
 
 function NewProjectModal({
+  hint,
   onClose,
   onCreate,
 }: {
+  hint?: string
   onClose: () => void
   onCreate: (payload: { name: string; description: string }) => Promise<void>
 }) {
@@ -187,14 +223,19 @@ function NewProjectModal({
 
   return (
     <Modal title="New Project" onClose={onClose}>
+      {hint && (
+        <p className="modal-hint">
+          You'll find <strong>{hint}</strong> and the other chemistry tools inside your new project.
+        </p>
+      )}
       <form className="modal-form" onSubmit={submit}>
         <label>
           <span>Project name</span>
           <input value={name} onChange={event => setName(event.target.value)} autoFocus />
         </label>
         <label>
-          <span>Description</span>
-          <textarea rows={3} value={description} onChange={event => setDescription(event.target.value)} />
+          <span>Description <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(optional)</span></span>
+          <textarea rows={2} value={description} onChange={event => setDescription(event.target.value)} />
         </label>
         {error && <div className="error-banner">{error}</div>}
         <div className="modal-actions">

@@ -109,7 +109,7 @@ function ProductCard({ product, index }) {
   )
 }
 
-export default function ReactPredict() {
+export default function ReactPredict({ onSave } = {}) {
   const [result, setResult]   = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
@@ -126,6 +126,12 @@ export default function ReactPredict() {
     try {
       const data = await reactFromImage(file)
       setResult(data)
+      if (data.products?.length) {
+        onSave?.({
+          predictedMajorProduct: data.products[0]?.smiles ?? '',
+          sideProducts: data.products.slice(1).map(p => p.smiles),
+        })
+      }
       if (data.error && !data.products?.length) {
         setError(data.error)
       }

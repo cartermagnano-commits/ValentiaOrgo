@@ -93,9 +93,9 @@ function ProductCard({ product, index }) {
   )
 }
 
-export default function DirectReact() {
-  const [substrate, setSubstrate] = useState('')
-  const [reagent,   setReagent]   = useState('')
+export default function DirectReact({ initialSubstrate, initialReagent, onSave } = {}) {
+  const [substrate, setSubstrate] = useState(initialSubstrate ?? '')
+  const [reagent,   setReagent]   = useState(initialReagent ?? '')
   const [result,    setResult]    = useState(null)
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState(null)
@@ -110,6 +110,11 @@ export default function DirectReact() {
     try {
       const data = await reactDirect(substrate.trim(), reagent.trim())
       setResult(data)
+      onSave?.({
+        reactants: [substrate.trim()],
+        reagents: reagent.trim(),
+        predictedProducts: data.products?.map(p => p.smiles) ?? [],
+      })
       if (!data.products?.length) {
         setError('No reaction templates matched this substrate/reagent combination.')
       }
