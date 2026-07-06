@@ -6,8 +6,10 @@ import PathwayExplorer from '../components/PathwayExplorer'
 import DirectReact from '../components/DirectReact'
 import ReactPredict from '../components/ReactPredict'
 import type { ChemistryFile, ChemistryFileContent } from '../types'
-import { makeInitialContent, withPlaceholderAiResponse } from '../../lib/content'
+import { makeInitialContent } from '../../lib/content'
+import { streamAssist } from '../api'
 import { updateChemistryFileContent } from '../../lib/database'
+import { useToast } from './Toast'
 import { fileTypeMeta } from './fileTypes'
 import { formatDate, statusText } from './format'
 
@@ -24,9 +26,11 @@ export default function FileEditor({
 }) {
   const [draft, setDraft] = useState<ChemistryFileContent>(file.content || makeInitialContent(file.type))
   const [saving, setSaving] = useState(false)
+  const [aiRunning, setAiRunning] = useState(false)
   const [error, setError] = useState('')
   const meta = fileTypeMeta(file.type)
   const Icon = meta.icon
+  const { notify } = useToast()
 
   useEffect(() => {
     setDraft(file.content || makeInitialContent(file.type))
@@ -45,17 +49,33 @@ export default function FileEditor({
       const saved = await updateChemistryFileContent(file.id, file.project_id, userId, nextContent)
       setDraft(saved.content || makeInitialContent(saved.type))
       onSaved(saved)
+      notify('Saved', 'success')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save file.')
+      const msg = err instanceof Error ? err.message : 'Could not save file.'
+      setError(msg)
+      notify(msg, 'error')
     } finally {
       setSaving(false)
     }
   }
 
-  async function runPlaceholderAi() {
-    const nextContent = withPlaceholderAiResponse(draft)
-    setDraft(nextContent)
-    await saveContent(nextContent)
+  async function runAssist() {
+    setError('')
+    setAiRunning(true)
+    let acc = ''
+    const fields = { ...(draft as Record<string, unknown>) }
+    setDraft({ ...fields, aiResponse: '' } as ChemistryFileContent)
+    try {
+      await streamAssist(file.type, draft, (delta: string) => {
+        acc += delta
+        setDraft(prev => ({ ...(prev as Record<string, unknown>), aiResponse: acc }) as ChemistryFileContent)
+      })
+      await saveContent({ ...fields, aiResponse: acc } as ChemistryFileContent)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'AI request failed.')
+    } finally {
+      setAiRunning(false)
+    }
   }
 
   return (
@@ -86,20 +106,26 @@ export default function FileEditor({
       <div className="file-editor-content">
         {file.type === 'synthesis' && (
           <PathwayExplorer
+            key={file.id}
             initialSubstrate={(draft as any).startingMaterials?.filter(Boolean) ?? []}
             initialTarget={(draft as any).targetMolecule ?? ''}
+            initialPathways={(draft as any).pathwaysData ?? null}
             onSave={(data: any) => saveContent({ ...draft, ...data })}
           />
         )}
         {file.type === 'direct_reaction' && (
           <DirectReact
+            key={file.id}
             initialSubstrate={(draft as any).reactants?.[0] ?? ''}
             initialReagent={(draft as any).reagents ?? ''}
+            initialResult={(draft as any).result ?? null}
             onSave={(data: any) => saveContent({ ...draft, ...data })}
           />
         )}
         {file.type === 'predict_reaction' && (
           <ReactPredict
+            key={file.id}
+            initialResult={(draft as any).result ?? null}
             onSave={(data: any) => saveContent({ ...draft, ...data })}
           />
         )}
@@ -108,8 +134,8 @@ export default function FileEditor({
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
-            saving={saving}
+            onPlaceholder={runAssist}
+            saving={saving || aiRunning}
             actionLabel="Explain Mechanism"
             fields={[
               ['reactionInput', 'Reaction input', 'Paste reaction SMILES, reagent context, or a plain-language reaction description.'],
@@ -124,8 +150,8 @@ export default function FileEditor({
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
-            saving={saving}
+            onPlaceholder={runAssist}
+            saving={saving || aiRunning}
             actionLabel="Generate Synthesis"
             fields={[
               ['targetMolecule', 'Target molecule', 'Target SMILES or molecule name.'],
@@ -140,8 +166,8 @@ export default function FileEditor({
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
-            saving={saving}
+            onPlaceholder={runAssist}
+            saving={saving || aiRunning}
             actionLabel="Save Observation"
             fields={[
               ['moleculeName', 'Molecule name', 'Common name, project code, or IUPAC shorthand.'],
@@ -157,8 +183,8 @@ export default function FileEditor({
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
-            saving={saving}
+            onPlaceholder={runAssist}
+            saving={saving || aiRunning}
             actionLabel="Generate Reply"
             fields={[
               ['notes', 'Chat notes', 'Use this file as a project-scoped chat scratchpad for now.'],

@@ -1,6 +1,6 @@
 'use client'
 
-import { LogOut } from 'lucide-react'
+import { LogOut, SlidersHorizontal } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '../../lib/supabaseClient'
 import { Beaker } from './fileTypes'
@@ -31,6 +31,10 @@ export default function AppTopbar({
       {email && (
         <div className="topbar-actions">
           <span className="user-email">{email}</span>
+          <button className="btn-secondary action-button" onClick={() => router.push('/settings')}>
+            <SlidersHorizontal size={15} />
+            Engine
+          </button>
           <button className="btn-secondary action-button" onClick={logout}>
             <LogOut size={15} />
             Logout

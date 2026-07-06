@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import StructureView from './StructureView'
-import { streamNodeExplanation, streamExplanation } from '../api'
-import { CheckCircle2, Microscope } from 'lucide-react'
+import { streamNodeExplanation, streamExplanation, streamStereo } from '../api'
+import { CheckCircle2, Microscope, Atom } from 'lucide-react'
 
 const CONF_CLASS = { high: 'conf-high', medium: 'conf-medium', low: 'conf-low', unknown: 'conf-unknown' }
 
@@ -129,14 +129,23 @@ function NodeInfoView({ nodeData, branch, substrateSMILES }) {
 
 function BranchInfoView({ branch, substrateSMILES }) {
   const [explanation, setExplanation] = useState({ text: '', loading: false, error: null })
+  const [stereo, setStereo] = useState({ text: '', loading: false, error: null, requested: false })
 
   useEffect(() => {
     if (!branch) return
     setExplanation({ text: '', loading: true, error: null })
+    setStereo({ text: '', loading: false, error: null, requested: false })
     streamExplanation(branch, substrateSMILES, delta =>
       setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
     ).catch(e => setExplanation({ text: '', loading: false, error: e.message }))
   }, [branch?.id, substrateSMILES])
+
+  function analyzeStereo() {
+    setStereo({ text: '', loading: true, error: null, requested: true })
+    streamStereo(branch, substrateSMILES, delta =>
+      setStereo(prev => ({ ...prev, text: prev.text + delta, loading: false }))
+    ).catch(e => setStereo({ text: '', loading: false, error: e.message, requested: true }))
+  }
 
   if (!branch) {
     return (
@@ -212,6 +221,35 @@ function BranchInfoView({ branch, substrateSMILES }) {
             <span className="explanation-placeholder">Explanation will appear here.</span>
           )}
         </div>
+      </div>
+
+      {/* Stereo/regiochemistry — opt-in (extra AI call), since the SMARTS engine
+          cannot express stereochemistry on its own. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div className="panel-header" style={{ padding: '0 0 6px', border: 'none' }}>
+          Stereochemistry &amp; regiochemistry
+          <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6, fontSize: 10 }}>(AI)</span>
+        </div>
+        {!stereo.requested ? (
+          <button
+            className="btn-secondary"
+            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '7px 0' }}
+            onClick={analyzeStereo}
+          >
+            <Atom size={14} />
+            Analyze stereochemistry
+          </button>
+        ) : (
+          <div className="explanation-box">
+            {stereo.loading ? (
+              <div className="loading-row"><div className="spinner" /> Analyzing stereochemistry…</div>
+            ) : stereo.error ? (
+              <span style={{ color: 'var(--danger)', fontSize: 12 }}>{stereo.error}</span>
+            ) : (
+              stereo.text
+            )}
+          </div>
+        )}
       </div>
 
     </div>

@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import StructureView from './StructureView'
 import { analyzeImage } from '../api'
-import { Camera, ChevronUp, Pencil, UploadCloud, X } from 'lucide-react'
+import { Camera, ChevronUp, Pencil, UploadCloud, X, ShieldCheck, AlertTriangle } from 'lucide-react'
 
 function isSmallHydrocarbon(smiles) {
   if (!smiles) return false
@@ -19,17 +19,21 @@ export default function MoleculeInput({ label, value, onChange }) {
   const [loading, setLoading] = useState(false)
   const [error, setError]   = useState(null)
   const [showSmiles, setShowSmiles] = useState(false)
+  const [confidence, setConfidence] = useState(null)  // 'high' | 'low' | 'unverified' | null
   const fileRef = useRef(null)
 
   async function handleFile(file) {
     if (!file) return
     setLoading(true)
     setError(null)
+    setConfidence(null)
     try {
       const result = await analyzeImage(file)
       if (result.smiles) {
         onChange(result.smiles)
-        setShowSmiles(true)
+        setConfidence(result.confidence ?? null)
+        // Always reveal the editable SMILES when the read isn't confidently verified.
+        setShowSmiles(result.confidence !== 'high')
       } else {
         setError('Could not recognize a structure. Please enter SMILES manually.')
         setShowSmiles(true)
@@ -61,7 +65,24 @@ export default function MoleculeInput({ label, value, onChange }) {
             <span style={{ fontSize: 11, marginTop: 6, color: '#8b949e' }}>Recognizing…</span>
           </>
         ) : value ? (
-          <StructureView smiles={value} width={200} height={136} />
+          <>
+            <StructureView smiles={value} width={200} height={136} />
+            {confidence === 'high' && (
+              <span className="conf-badge ok" title="Verified against your image">
+                <ShieldCheck size={12} /> Verified
+              </span>
+            )}
+            {confidence === 'low' && (
+              <span className="conf-badge warn" title="Recognition may be wrong — please check">
+                <AlertTriangle size={12} /> Check structure
+              </span>
+            )}
+            {confidence === 'unverified' && (
+              <span className="conf-badge muted" title="Could not auto-verify (vision model unavailable)">
+                <AlertTriangle size={12} /> Unverified
+              </span>
+            )}
+          </>
         ) : (
           <>
             <UploadCloud className="upload-icon" size={30} strokeWidth={1.6} />
@@ -97,7 +118,7 @@ export default function MoleculeInput({ label, value, onChange }) {
           {showSmiles ? <ChevronUp size={14} /> : <><Pencil size={13} /> SMILES</>}
         </button>
         {value && (
-          <button className="btn-icon" title="Clear" onClick={() => { onChange(''); setShowSmiles(false) }}>
+          <button className="btn-icon" title="Clear" onClick={() => { onChange(''); setShowSmiles(false); setConfidence(null) }}>
             <X size={14} />
           </button>
         )}
@@ -106,13 +127,19 @@ export default function MoleculeInput({ label, value, onChange }) {
       {/* Editable SMILES — shown when toggled or after recognition */}
       {showSmiles && (
         <div className="mol-smiles-row">
+          {confidence === 'low' && (
+            <div className="hint-banner" style={{ margin: '0 0 6px' }}>
+              The automatic reader wasn’t confident this matches your image. Please verify or
+              correct the SMILES below before continuing.
+            </div>
+          )}
           <span className="smiles-label">SMILES (editable)</span>
           <textarea
             className="smiles-input"
             rows={2}
             value={value}
             placeholder="e.g. CC(=O)CCBr"
-            onChange={e => onChange(e.target.value)}
+            onChange={e => { onChange(e.target.value); setConfidence(null) }}
             spellCheck={false}
           />
           {error && (

@@ -143,6 +143,27 @@ export async function deleteChemistryFile(fileId: string, projectId: string, use
   await touchProject(projectId, userId, now)
 }
 
+// Non-secret engine preferences. Best-effort cross-device sync; localStorage
+// remains the synchronous source of truth for building request payloads.
+export async function loadEngineSettings(userId: string): Promise<Record<string, unknown> | null> {
+  const { data, error } = await supabase
+    .from('user_settings')
+    .select('engine')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data?.engine as Record<string, unknown>) ?? null
+}
+
+export async function saveEngineSettings(userId: string, engine: Record<string, unknown>): Promise<void> {
+  const { error } = await supabase
+    .from('user_settings')
+    .upsert({ user_id: userId, engine, updated_at: new Date().toISOString() })
+
+  if (error) throw error
+}
+
 async function touchProject(projectId: string, userId: string, updatedAt: string): Promise<void> {
   const { error } = await supabase
     .from('projects')

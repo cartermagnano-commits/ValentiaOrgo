@@ -1,4 +1,19 @@
-const BASE = ''  // same-origin; Vite proxy handles /api calls in dev
+import { getEnginePayload } from '../lib/engine'
+import { supabase } from '../lib/supabaseClient'
+
+const BASE = ''  // same-origin; Next.js rewrites (next.config.mjs) proxy to the FastAPI backend
+
+// Attach the Supabase access token so the backend can enforce auth when
+// SUPABASE_JWT_SECRET is configured. Harmless (ignored) when auth is disabled.
+async function authHeaders() {
+  try {
+    const { data } = await supabase.auth.getSession()
+    const token = data?.session?.access_token
+    return token ? { Authorization: `Bearer ${token}` } : {}
+  } catch {
+    return {}
+  }
+}
 
 async function post(path, body) {
   const res = await fetch(BASE + path, {
@@ -54,7 +69,7 @@ export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth 
 async function streamSSE(path, body, onDelta) {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -89,6 +104,7 @@ export async function streamExplanation(branch, substrateSMILES, onDelta) {
     reaction_name: cls?.name ?? 'Unknown',
     execution_history: branch.execution_history,
     environment_used: branch.environment,
+    engine: getEnginePayload(),
   }, onDelta)
 }
 
@@ -105,9 +121,28 @@ export async function streamNodeExplanation(nodeData, branch, substrateSMILES, o
     node_smiles: nodeData.smiles,
     node_role: nodeData.nodeType,
     node_step_text: nodeData.stepText ?? '',
+    engine: getEnginePayload(),
+  }, onDelta)
+}
+
+export async function streamStereo(branch, substrateSMILES, onDelta) {
+  const cls = branch.reaction_classification
+  return streamSSE('/stereo', {
+    substrate_smiles: substrateSMILES,
+    product_smiles: branch.product_smiles,
+    reagent_name: branch.reagent.name,
+    reagent_smiles: branch.reagent.smiles,
+    reaction_name: cls?.name ?? 'Unknown',
+    execution_history: branch.execution_history,
+    environment_used: branch.environment,
+    engine: getEnginePayload(),
   }, onDelta)
 }
 
 export async function streamChat(messages, context, onDelta) {
-  return streamSSE('/chat', { messages, context }, onDelta)
+  return streamSSE('/chat', { messages, context, engine: getEnginePayload() }, onDelta)
+}
+
+export async function streamAssist(fileType, content, onDelta) {
+  return streamSSE('/assist', { file_type: fileType, content, engine: getEnginePayload() }, onDelta)
 }

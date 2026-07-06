@@ -2,13 +2,17 @@
 
 import { FormEvent, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { CalendarDays, Clock3, FileText, FlaskConical, FolderKanban, Network, Plus, Sparkles, Trash2 } from 'lucide-react'
+import { CalendarDays, Clock3, FileText, FlaskConical, FolderKanban, Network, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react'
 import type { User } from '@supabase/supabase-js'
-import { createProject, deleteProject, fetchProjects, getCurrentUser } from '../../lib/database'
+import {
+  createProject, deleteProject, fetchProjects, getCurrentUser,
+  createChemistryFile, updateChemistryFileContent,
+} from '../../lib/database'
 import { isSupabaseConfigured } from '../../lib/supabaseClient'
 import type { Project } from '../types'
 import AppTopbar from './AppTopbar'
 import Modal from './Modal'
+import { useToast } from './Toast'
 import { formatDate, statusText } from './format'
 
 export default function DashboardPage() {
@@ -19,6 +23,8 @@ export default function DashboardPage() {
   const [error, setError] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const [modalHint, setModalHint] = useState('')
+  const [creatingExample, setCreatingExample] = useState(false)
+  const { notify } = useToast()
 
   function openNewProject(hint = '') {
     setModalHint(hint)
@@ -58,6 +64,7 @@ export default function DashboardPage() {
     const project = await createProject(user.id, payload.name, payload.description)
     setProjects(prev => [project, ...prev])
     setModalOpen(false)
+    notify('Project created', 'success')
     router.push(`/projects/${project.id}`)
   }
 
@@ -65,15 +72,56 @@ export default function DashboardPage() {
     if (!user) return
     const ok = window.confirm(`Delete "${project.name}" and all chemistry files inside it?`)
     if (!ok) return
-    await deleteProject(project.id, user.id)
-    setProjects(prev => prev.filter(item => item.id !== project.id))
+    try {
+      await deleteProject(project.id, user.id)
+      setProjects(prev => prev.filter(item => item.id !== project.id))
+      notify('Project deleted', 'success')
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not delete project.', 'error')
+    }
+  }
+
+  async function handleCreateExample() {
+    if (!user || creatingExample) return
+    setCreatingExample(true)
+    try {
+      const project = await createProject(
+        user.id,
+        'Example: Enolate Chemistry',
+        'A sample synthesis project to explore how Orgo AI works.',
+      )
+      const file = await createChemistryFile(project.id, user.id, '2-Pentanone → enolates', 'synthesis')
+      // Pre-fill the substrate so the pathway is one click away.
+      await updateChemistryFileContent(file.id, project.id, user.id, {
+        ...(file.content as Record<string, unknown>),
+        startingMaterials: ['CC(=O)CCC'],
+        targetMolecule: '',
+      } as typeof file.content)
+      notify('Example project created', 'success')
+      router.push(`/projects/${project.id}`)
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not create example.', 'error')
+      setCreatingExample(false)
+    }
   }
 
   if (loading) {
     return (
       <div className="platform-app">
         <AppTopbar compact />
-        <div className="page-loading">Loading projects...</div>
+        <main className="dashboard-page">
+          <div className="dashboard-header">
+            <div>
+              <div className="eyebrow">Projects</div>
+              <h2>Chemistry workspaces</h2>
+            </div>
+          </div>
+          <div className="skeleton-grid" aria-hidden="true">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="skeleton skeleton-card" />
+            ))}
+          </div>
+        </main>
       </div>
     )
   }
@@ -133,11 +181,18 @@ export default function DashboardPage() {
             <div className="dashboard-empty-state">
               <FolderKanban size={34} />
               <h3>No projects yet</h3>
-              <p>Create a workspace for a homework set, synthesis plan, or research compound.</p>
-              <button className="btn-primary action-button" onClick={() => openNewProject()}>
-                <Plus size={16} />
-                New Project
-              </button>
+              <p>New here? Start with a worked example, or create your own workspace for a
+                homework set, synthesis plan, or research compound.</p>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+                <button className="btn-primary action-button" onClick={handleCreateExample} disabled={creatingExample}>
+                  <Wand2 size={16} />
+                  {creatingExample ? 'Creating…' : 'Try an example project'}
+                </button>
+                <button className="btn-secondary action-button" onClick={() => openNewProject()}>
+                  <Plus size={16} />
+                  New Project
+                </button>
+              </div>
             </div>
           )}
 

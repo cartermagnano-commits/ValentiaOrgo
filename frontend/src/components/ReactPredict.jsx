@@ -109,8 +109,9 @@ function ProductCard({ product, index }) {
   )
 }
 
-export default function ReactPredict({ onSave } = {}) {
-  const [result, setResult]   = useState(null)
+/** @param {{ initialResult?: any, onSave?: any }} [props] */
+export default function ReactPredict({ initialResult, onSave } = {}) {
+  const [result, setResult]   = useState(initialResult ?? null)
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
   const [preview, setPreview] = useState(null)
@@ -130,6 +131,7 @@ export default function ReactPredict({ onSave } = {}) {
         onSave?.({
           predictedMajorProduct: data.products[0]?.smiles ?? '',
           sideProducts: data.products.slice(1).map(p => p.smiles),
+          result: data,
         })
       }
       if (data.error && !data.products?.length) {

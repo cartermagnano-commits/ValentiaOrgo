@@ -4,11 +4,17 @@ const apiPaths = [
   'analyze',
   'predict',
   'structure',
+  'molfile',
   'pathways',
   'explain',
+  'stereo',
   'chat',
+  'assist',
   'react',
   'react-from-image',
+  'engine/ollama-status',
+  'engine/usage',
+  'health',
 ]
 
 /** @type {import('next').NextConfig} */

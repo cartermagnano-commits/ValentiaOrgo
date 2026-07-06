@@ -847,6 +847,158 @@ header .subtitle {
 
 .mol-structure-area svg { width: 100%; height: 100%; }
 
+.conf-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 7px;
+  border-radius: 999px;
+  line-height: 1;
+}
+.conf-badge.ok    { background: rgba(23, 92, 82, 0.12);  color: var(--accent2); }
+.conf-badge.warn  { background: rgba(169, 74, 66, 0.14);  color: var(--danger); }
+.conf-badge.muted { background: rgba(120, 120, 120, 0.16); color: #6b7280; }
+
+/* ── Toasts ─────────────────────────────────────────────────────────── */
+.toast-stack {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(380px, calc(100vw - 40px));
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px 11px 14px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--border, #d8dee4);
+  box-shadow: 0 8px 24px rgba(20, 30, 26, 0.16);
+  font-size: 13px;
+  color: var(--text, #1a1a1a);
+  animation: toast-in 0.18s ease;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.toast-msg { flex: 1; line-height: 1.4; }
+.toast-icon { flex: none; }
+.toast-success .toast-icon { color: #1f6f5c; }
+.toast-error   .toast-icon { color: var(--danger, #a94a42); }
+.toast-info    .toast-icon { color: var(--accent, #256f8f); }
+.toast-error   { border-color: rgba(169, 74, 66, 0.4); }
+.toast-close {
+  background: none; border: none; cursor: pointer; color: var(--muted, #6b7280);
+  display: inline-flex; padding: 2px; flex: none; border-radius: 4px;
+}
+.toast-close:hover { color: var(--text, #1a1a1a); }
+
+/* ── API offline banner ─────────────────────────────────────────────── */
+.api-offline-banner {
+  position: sticky;
+  top: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  background: #7a2e28;
+  color: #fff;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.api-offline-banner svg { flex: none; }
+
+/* ── Skeletons ──────────────────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(90deg, rgba(0,0,0,0.06) 25%, rgba(0,0,0,0.11) 37%, rgba(0,0,0,0.06) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+  border-radius: 8px;
+}
+@keyframes skeleton-shimmer {
+  0%   { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+.skeleton-card { height: 132px; }
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+/* ── Export chips ───────────────────────────────────────────────────── */
+.export-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid var(--border, #d8dee4);
+  border-radius: 6px;
+  color: var(--muted, #6b7280);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  flex: none;
+}
+.export-chip:hover { color: var(--text, #1a1a1a); border-color: var(--accent, #256f8f); }
+
+/* ── Auth extras (OAuth, divider, links) ────────────────────────────── */
+.oauth-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border, #d8dee4);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text, #1a1a1a);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.oauth-button:hover { border-color: var(--accent, #256f8f); }
+.oauth-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.auth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--muted, #6b7280);
+  font-size: 12px;
+  margin: 14px 0;
+}
+.auth-divider::before, .auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border, #d8dee4);
+}
+.auth-divider span { padding: 0 12px; }
+.auth-link-button {
+  align-self: flex-end;
+  background: none;
+  border: none;
+  color: var(--accent, #256f8f);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.auth-link-button:hover { text-decoration: underline; }
+
 .structure-view {
   background: #fff;
 }

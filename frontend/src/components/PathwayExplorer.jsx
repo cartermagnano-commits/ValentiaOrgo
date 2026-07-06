@@ -85,11 +85,12 @@ function LoadingOverlay({ stage }) {
 
 const MAX_STARTS = 4
 
-export default function PathwayExplorer({ initialSubstrate, initialTarget, onSave } = {}) {
+/** @param {{ initialSubstrate?: any, initialTarget?: any, initialPathways?: any, onSave?: any }} [props] */
+export default function PathwayExplorer({ initialSubstrate, initialTarget, initialPathways, onSave } = {}) {
   const [startSmilesList,  setStartSmilesList]  = useState(() => initialSubstrate?.length ? initialSubstrate : [''])
   const [targetSmiles,     setTargetSmiles]     = useState(initialTarget ?? '')
   const [desiredDepth,     setDesiredDepth]     = useState(5)
-  const [pathwaysData,     setPathwaysData]     = useState(null)
+  const [pathwaysData,     setPathwaysData]     = useState(initialPathways ?? null)
   const [selectedRouteId,  setSelectedRouteId]  = useState(null)
   const [selectedBranchId, setSelectedBranchId] = useState(null)
   const [selectedBranchIds, setSelectedBranchIds] = useState([])
@@ -110,6 +111,19 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, onSav
 
   // Primary substrate for InfoPanel/chatbot context
   const primaryStart = startSmilesList.find(s => s.trim()) ?? ''
+
+  // Restore a default selection when reopening a saved pathway result.
+  useEffect(() => {
+    if (!pathwaysData) return
+    if (pathwaysData.routes?.length) {
+      setSelectedRouteId(pathwaysData.routes[0].id)
+    } else if (pathwaysData.branches?.length) {
+      const match = pathwaysData.branches.find(b => b.matches_target)
+      setSelectedBranchId((match ?? pathwaysData.branches[0]).id)
+    }
+    // Mount-only: restore selection for the initially loaded result.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── Multiple start inputs ──────────────────────────────────────────────────
   function updateStart(idx, val) {
@@ -139,7 +153,7 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, onSav
     try {
       const data = await fetchPathways(validStarts, targetSmiles.trim(), desiredDepth)
       setPathwaysData(data)
-      onSave?.({ startingMaterials: validStarts, targetMolecule: targetSmiles.trim() })
+      onSave?.({ startingMaterials: validStarts, targetMolecule: targetSmiles.trim(), pathwaysData: data })
       if (data.routes?.length) {
         setSelectedRouteId(data.routes[0].id)
       } else if (data.branches?.length) {

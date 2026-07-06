@@ -20,8 +20,9 @@ import json
 import logging
 import os
 import tempfile
+import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,9 @@ if not logger.handlers:
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image
 from pydantic import BaseModel
 
@@ -152,11 +152,38 @@ def _ollama_reaction_smiles(img_bytes: bytes) -> str | None:
     )
 
 
-async def _stream_ollama(system: str, messages: list[dict], max_tokens: int):
-    """Async generator: streams SSE delta chunks from Ollama."""
+# ── "Choose Your Engine" — generative LLM provider router ────────────────────
+# The engine picker (local / byok / hosted) ONLY powers generative explanations
+# and chat. Structure recognition and the reaction engine always run keyless.
+# A BYOK api_key is request-scoped: never persisted, never logged.
+
+DEFAULT_ANTHROPIC_MODEL = os.environ.get("HOSTED_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+DEFAULT_OPENAI_MODEL    = os.environ.get("HOSTED_OPENAI_MODEL", "gpt-4o-mini")
+
+# Lightweight in-memory usage telemetry (per engine mode/provider). Resets on
+# restart — just enough to see where generative calls are going before real
+# billing/enforcement lands.
+_ENGINE_USAGE: dict[str, int] = {}
+
+
+def _record_usage(mode: str, provider: str | None) -> None:
+    key = f"{mode}:{provider or '-'}"
+    _ENGINE_USAGE[key] = _ENGINE_USAGE.get(key, 0) + 1
+
+
+class EngineConfig(BaseModel):
+    """Per-request generative-AI engine selection. Never persisted server-side."""
+    mode: str = "hosted"            # "local" | "byok" | "hosted"
+    provider: Optional[str] = None  # "anthropic" | "openai"
+    model: Optional[str] = None     # concrete model id
+    api_key: Optional[str] = None   # BYOK only — request-scoped, never stored/logged
+
+
+async def _stream_ollama(system: str, messages: list[dict], max_tokens: int, model: str | None = None):
+    """Async generator: streams SSE delta chunks from a local Ollama model."""
     import httpx
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": model or OLLAMA_MODEL,
         "messages": [{"role": "system", "content": system}] + messages,
         "stream": True,
         "options": {"num_predict": max_tokens},
@@ -182,12 +209,13 @@ async def _stream_ollama(system: str, messages: list[dict], max_tokens: int):
     yield "data: [DONE]\n\n"
 
 
-async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int):
+async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int,
+                            model: str | None = None, api_key: str | None = None):
     """Async generator: streams SSE delta chunks from Anthropic."""
     import anthropic
-    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = anthropic.AsyncAnthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
     async with client.messages.stream(
-        model="claude-sonnet-4-6",
+        model=model or DEFAULT_ANTHROPIC_MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=messages,
@@ -197,21 +225,140 @@ async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int):
     yield "data: [DONE]\n\n"
 
 
-def _sse_stream(system: str, messages: list[dict], max_tokens: int):
-    """Return the right streaming generator based on available credentials."""
+async def _stream_openai(system: str, messages: list[dict], max_tokens: int,
+                         model: str | None = None, api_key: str | None = None):
+    """Async generator: streams SSE delta chunks from OpenAI."""
+    import openai
+    client = openai.AsyncOpenAI(api_key=api_key or os.environ["OPENAI_API_KEY"])
+    stream = await client.chat.completions.create(
+        model=model or DEFAULT_OPENAI_MODEL,
+        max_tokens=max_tokens,
+        messages=[{"role": "system", "content": system}] + messages,
+        stream=True,
+    )
+    async for chunk in stream:
+        delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+        if delta:
+            yield f"data: {json.dumps({'delta': delta})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+def _sse_stream(system: str, messages: list[dict], max_tokens: int,
+                engine: Optional[EngineConfig] = None):
+    """Return the streaming generator for the selected engine.
+
+    Validation (missing keys) happens here, before streaming starts, so errors
+    surface as a normal HTTP response rather than mid-stream. When no engine is
+    supplied, fall back to env-based selection for back-compat.
+    """
+    if engine is None:
+        _record_usage("env", None)
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return _stream_anthropic(system, messages, max_tokens)
+        return _stream_ollama(system, messages, max_tokens)
+
+    mode = (engine.mode or "hosted").lower()
+    _record_usage(mode, engine.provider)
+
+    if mode == "local":
+        return _stream_ollama(system, messages, max_tokens, model=engine.model)
+
+    if mode == "byok":
+        if not engine.api_key:
+            raise HTTPException(400, "BYOK mode requires an API key.")
+        provider = (engine.provider or "anthropic").lower()
+        if provider == "openai":
+            return _stream_openai(system, messages, max_tokens,
+                                  model=engine.model, api_key=engine.api_key)
+        return _stream_anthropic(system, messages, max_tokens,
+                                 model=engine.model, api_key=engine.api_key)
+
+    # hosted — server-side key; billing/enforcement deferred (no users yet)
+    provider = (engine.provider or "anthropic").lower()
+    if provider == "openai" and os.environ.get("OPENAI_API_KEY"):
+        return _stream_openai(system, messages, max_tokens, model=engine.model)
     if os.environ.get("ANTHROPIC_API_KEY"):
-        return _stream_anthropic(system, messages, max_tokens)
-    return _stream_ollama(system, messages, max_tokens)
+        return _stream_anthropic(system, messages, max_tokens, model=engine.model)
+    # No hosted key configured → degrade to local so the app still works.
+    return _stream_ollama(system, messages, max_tokens, model=engine.model)
 
 app = FastAPI(title="Orgo AI")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:8000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Hardening: request caps + per-IP rate limiting ───────────────────────────
+MAX_UPLOAD_BYTES  = 8 * 1024 * 1024   # 8 MB per uploaded image
+MAX_CHAT_MESSAGES = 50
+MAX_CONTENT_CHARS = 24_000            # total chars across chat messages
+MAX_HISTORY_LINES = 500
+
+# Rate-limit only the expensive compute/generative endpoints — not /structure
+# image tiles or /health polls.
+RATE_LIMIT_PATHS = {
+    "/analyze", "/react-from-image", "/react", "/predict", "/pathways",
+    "/explain", "/chat", "/assist", "/stereo",
+}
+RATE_LIMIT_MAX    = 60      # requests per window per IP
+RATE_LIMIT_WINDOW = 60.0    # seconds
+_rate_buckets: dict[str, deque] = {}
+
+
+@app.middleware("http")
+async def _rate_limit(request, call_next):
+    if request.url.path in RATE_LIMIT_PATHS:
+        ip = request.client.host if request.client else "unknown"
+        now = time.monotonic()
+        bucket = _rate_buckets.setdefault(ip, deque())
+        while bucket and now - bucket[0] > RATE_LIMIT_WINDOW:
+            bucket.popleft()
+        if len(bucket) >= RATE_LIMIT_MAX:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded — please slow down and retry shortly."},
+            )
+        bucket.append(now)
+    return await call_next(request)
+
+
+# Optional Supabase JWT auth. Disabled unless SUPABASE_JWT_SECRET is set, so
+# local dev and current (userless) deployments are unaffected. When enabled,
+# protected endpoints require a valid Supabase access token. NOTE: the frontend
+# must then attach `Authorization: Bearer <token>` to these requests.
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
+
+
+async def require_auth(authorization: str = Header(default="")):
+    if not SUPABASE_JWT_SECRET:
+        return None  # auth disabled
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    try:
+        import jwt
+        payload = jwt.decode(
+            authorization[7:], SUPABASE_JWT_SECRET,
+            algorithms=["HS256"], audience="authenticated",
+        )
+        return payload.get("sub")
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+
+
+def _guard_messages(messages) -> None:
+    if len(messages) > MAX_CHAT_MESSAGES:
+        raise HTTPException(status_code=413, detail="Too many messages in one request.")
+    if sum(len(m.content) for m in messages) > MAX_CONTENT_CHARS:
+        raise HTTPException(status_code=413, detail="Message payload too large.")
+
 
 _decimer_fn = None
 _executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER + chemistry engine (not thread-safe)
@@ -345,25 +492,81 @@ def _load_decimer():
 _load_decimer()
 
 
-def _check_ollama() -> None:
-    """Log Ollama reachability and confirm the vision model is available."""
+def _ollama_status() -> dict:
+    """Probe the local Ollama server. Returns reachability + available models.
+
+    Used both at startup (logging) and by GET /engine/ollama-status so the
+    "Choose Your Engine" picker can show a real detected/not-detected state.
+    """
     try:
         import httpx
         r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
+        r.raise_for_status()
         models = [m["name"] for m in r.json().get("models", [])]
-        logger.info("Ollama reachable at %s — models: %s", OLLAMA_BASE_URL, models)
-        base = OLLAMA_VISION_MODEL.split(":")[0]
-        if not any(m.startswith(base) for m in models):
+        vbase = OLLAMA_VISION_MODEL.split(":")[0]
+        return {
+            "running": True,
+            "base_url": OLLAMA_BASE_URL,
+            "models": models,
+            "chat_model": OLLAMA_MODEL,
+            "vision_model": OLLAMA_VISION_MODEL,
+            "vision_available": any(m.startswith(vbase) for m in models),
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "running": False,
+            "base_url": OLLAMA_BASE_URL,
+            "models": [],
+            "chat_model": OLLAMA_MODEL,
+            "vision_model": OLLAMA_VISION_MODEL,
+            "vision_available": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _check_ollama() -> None:
+    """Log Ollama reachability and confirm the vision model is available."""
+    status = _ollama_status()
+    if status["running"]:
+        logger.info("Ollama reachable at %s — models: %s", OLLAMA_BASE_URL, status["models"])
+        if not status["vision_available"]:
             logger.warning(
                 "Vision model %r not found in Ollama (available: %s). "
                 "Ollama image fallback will fail until the model is pulled.",
-                OLLAMA_VISION_MODEL, models,
+                OLLAMA_VISION_MODEL, status["models"],
             )
-    except Exception as exc:
-        logger.warning("Ollama unreachable at %s (%s: %s). Image fallback disabled.",
-                       OLLAMA_BASE_URL, type(exc).__name__, exc)
+    else:
+        logger.warning("Ollama unreachable at %s (%s). Image fallback disabled.",
+                       OLLAMA_BASE_URL, status["error"])
 
 _check_ollama()
+
+
+@app.get("/engine/ollama-status")
+async def engine_ollama_status():
+    """Live probe for the engine picker: is a local Ollama server available?"""
+    return _ollama_status()
+
+
+@app.get("/health")
+async def health():
+    """Readiness probe used by the frontend (offline banner) and any monitor."""
+    ollama = _ollama_status()
+    return {
+        "status": "ok",
+        "decimer_ready": _decimer_fn is not None,
+        "ollama_running": ollama["running"],
+        "hosted_key_configured": bool(
+            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        ),
+    }
+
+
+@app.get("/engine/usage")
+async def engine_usage():
+    """In-memory generative-call counts per engine mode/provider (since restart)."""
+    return {"usage": dict(_ENGINE_USAGE), "total": sum(_ENGINE_USAGE.values())}
 
 
 def _is_valid_smiles(smiles: str) -> bool:
@@ -423,6 +626,80 @@ def _mol_svg(smiles: str, width: int, height: int) -> str:
     return drawer.GetDrawingText()
 
 
+def _render_smiles_png(smiles: str, size: int = 320) -> bytes | None:
+    """Render a SMILES to PNG bytes for round-trip visual verification."""
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    try:
+        from rdkit.Chem.Draw import rdMolDraw2D
+        d = rdMolDraw2D.MolDraw2DCairo(size, size)
+        d.DrawMolecule(mol)
+        d.FinishDrawing()
+        return d.GetDrawingText()
+    except Exception:
+        pass
+    try:
+        from rdkit.Chem.Draw import MolToImage
+        pil = MolToImage(mol, size=(size, size))
+        buf = io.BytesIO()
+        pil.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        logger.warning("render PNG failed (%s): %s", type(exc).__name__, exc)
+        return None
+
+
+def _vision_compare(original_png: bytes, rendered_png: bytes) -> bool | None:
+    """Ask the local vision model whether a rendered structure matches the
+    original image. Returns True/False, or None if verification couldn't run
+    (e.g. Ollama unavailable) — verification is best-effort, never a hard gate.
+
+    Runs synchronously — call from a thread pool, never the event loop.
+    """
+    import httpx
+    orig_b64 = base64.b64encode(original_png).decode()
+    guess_b64 = base64.b64encode(rendered_png).decode()
+    prompt = (
+        "Two images of a chemical structure are provided. The FIRST is the "
+        "original photo/drawing. The SECOND is a computer-rendered structure "
+        "produced by an automated recognition guess. Do they represent the SAME "
+        "molecule — same skeleton, connectivity, and functional groups?\n"
+        "Answer with exactly one word: YES or NO."
+    )
+    try:
+        resp = httpx.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={
+                "model": OLLAMA_VISION_MODEL,
+                "messages": [{"role": "user", "content": prompt, "images": [orig_b64, guess_b64]}],
+                "stream": False,
+            },
+            timeout=90.0,
+        )
+        resp.raise_for_status()
+        text = resp.json()["message"]["content"].strip().upper()
+        logger.info("Vision compare verdict: %r", text[:80])
+    except Exception as exc:
+        logger.warning("Vision compare unavailable (%s): %s", type(exc).__name__, exc)
+        return None
+
+    if text.startswith("YES") or ("YES" in text and "NO" not in text):
+        return True
+    if text.startswith("NO") or ("NO" in text and "YES" not in text):
+        return False
+    return None
+
+
+def _verify_smiles(original_png: bytes, smiles: str) -> bool | None:
+    """Round-trip check: render `smiles`, compare to the original image."""
+    rendered = _render_smiles_png(smiles)
+    if not rendered:
+        return None
+    return _vision_compare(original_png, rendered)
+
+
 # ── Image processing (runs in thread pool) ────────────────────────────────────
 
 def _process(raw_bytes: bytes) -> dict:
@@ -448,8 +725,10 @@ def _process(raw_bytes: bytes) -> dict:
             result = fn(current)
             if result is not None and isinstance(result, np.ndarray):
                 current = result
-        except Exception:
-            pass
+        except Exception as exc:
+            # A failed stage is non-fatal — keep the last good image and continue,
+            # but surface the cause instead of hiding it.
+            logger.warning("Preprocessing stage %r failed (%s): %s", name, type(exc).__name__, exc)
         stages[name] = _to_b64(current)
 
     stages["final"] = _to_b64(current)
@@ -478,7 +757,38 @@ def _process(raw_bytes: bytes) -> dict:
             valid = True
             error = None
 
-    return {"smiles": smiles, "valid": valid, "error": error, "stages": stages}
+    # Round-trip verification: render our guess and ask the vision model whether
+    # it matches the original photo. Catches valid-but-wrong DECIMER reads.
+    # Best-effort — if the vision model is unavailable, confidence is "unverified"
+    # and we still return the SMILES.
+    verified: bool | None = None
+    if valid and smiles:
+        _, orig_buf = cv2.imencode(".png", img)   # original (pre-binarization) image
+        original_png = orig_buf.tobytes()
+        verified = _verify_smiles(original_png, smiles)
+        if verified is False:
+            # DECIMER gave a plausible-but-wrong structure — try a vision re-read.
+            _, cur_buf = cv2.imencode(".png", current)
+            reread = _ollama_vision_smiles(cur_buf.tobytes())
+            if reread and reread != smiles:
+                smiles = reread
+                verified = _verify_smiles(original_png, reread)
+
+    if verified is True:
+        confidence = "high"
+    elif verified is False:
+        confidence = "low"
+    else:
+        confidence = "unverified"
+
+    return {
+        "smiles": smiles,
+        "valid": valid,
+        "verified": verified,
+        "confidence": confidence,
+        "error": error,
+        "stages": stages,
+    }
 
 
 def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
@@ -537,6 +847,8 @@ async def analyze(file: UploadFile = File(...)):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 8 MB).")
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(_executor, _process, contents)
@@ -619,6 +931,32 @@ async def structure(
         raise HTTPException(status_code=422, detail="Invalid SMILES")
     return Response(content=svg, media_type="image/svg+xml",
                     headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.get("/molfile")
+async def molfile(
+    smiles: str = Query(...),
+    name: str = Query("molecule"),
+):
+    """Return an MDL Molfile (.mol) for a SMILES, as a downloadable attachment."""
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        raise HTTPException(status_code=422, detail="Invalid SMILES")
+    try:
+        mol = Chem.AddHs(mol)
+        AllChem.Compute2DCoords(mol)
+    except Exception:
+        pass
+    block = Chem.MolToMolBlock(mol)
+    safe = "".join(c for c in name if c.isalnum() or c in ("-", "_")) or "molecule"
+    return Response(
+        content=block,
+        media_type="chemical/x-mdl-molfile",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.mol"'},
+    )
 
 
 MAX_SEARCH_DEPTH = 10   # hard cap enforced server-side
@@ -1082,10 +1420,13 @@ class ExplainRequest(BaseModel):
     node_smiles: Optional[str] = None
     node_role: Optional[str] = None       # 'start' | 'intermediate' | 'product'
     node_step_text: Optional[str] = None  # raw execution_history entry for this step
+    engine: Optional[EngineConfig] = None  # generative engine selection (Choose Your Engine)
 
 
-@app.post("/explain")
+@app.post("/explain", dependencies=[Depends(require_auth)])
 async def explain(req: ExplainRequest):
+    if len(req.execution_history) > MAX_HISTORY_LINES:
+        raise HTTPException(status_code=413, detail="Execution history too large.")
     system_prompt = (
         "You are an organic chemistry teaching assistant for Orgo AI. "
         "You will be given exact chemical data computed by a verified deterministic engine. "
@@ -1133,7 +1474,59 @@ async def explain(req: ExplainRequest):
         )
 
     return StreamingResponse(
-        _sse_stream(system_prompt, [{"role": "user", "content": user_prompt}], 350),
+        _sse_stream(system_prompt, [{"role": "user", "content": user_prompt}], 350, req.engine),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class StereoRequest(BaseModel):
+    substrate_smiles: str
+    product_smiles: str
+    reagent_name: str
+    reagent_smiles: str
+    reaction_name: str
+    execution_history: list[str] = []
+    environment_used: str = ""
+    engine: Optional[EngineConfig] = None
+
+
+@app.post("/stereo", dependencies=[Depends(require_auth)])
+async def stereo(req: StereoRequest):
+    """Opt-in stereo/regiochemistry annotation pass.
+
+    The deterministic SMARTS engine owns connectivity but cannot express
+    stereochemistry or regiochemistry. This asks the LLM to ANNOTATE the
+    stereo/regio outcome of the engine's product — it must not propose a
+    different product structure.
+    """
+    system_prompt = (
+        "You are an organic chemistry stereochemistry specialist for Orgo AI.\n"
+        "You are given a reaction whose CONNECTIVITY was computed by a verified "
+        "deterministic engine. The product SMILES is ground truth for atom "
+        "connectivity.\n\n"
+        "HARD RULES:\n"
+        "- Do NOT propose a different product or change the connectivity.\n"
+        "- Annotate ONLY stereochemistry and regiochemistry: E/Z, cis/trans, "
+        "R/S, syn/anti addition, Markovnikov vs anti-Markovnikov, and whether the "
+        "product is racemic or a single stereoisomer.\n"
+        "- If the reaction creates no new stereocenter or the outcome is not "
+        "stereospecific, say so plainly.\n"
+        "- Be concise: 2-4 sentences. Flag uncertainty rather than inventing detail."
+    )
+    history_text = "\n".join(req.execution_history) if req.execution_history else "N/A"
+    user_prompt = (
+        "Annotate the stereochemistry and regiochemistry of this reaction:\n\n"
+        f"Starting material: {req.substrate_smiles}\n"
+        f"Reagent: {req.reagent_name} ({req.reagent_smiles})\n"
+        f"Reaction type: {req.reaction_name}\n"
+        f"Control environment: {req.environment_used}\n"
+        f"Engine product (connectivity is ground truth): {req.product_smiles}\n"
+        f"Engine steps:\n{history_text}\n\n"
+        "State the expected stereochemical/regiochemical outcome for THIS product."
+    )
+    return StreamingResponse(
+        _sse_stream(system_prompt, [{"role": "user", "content": user_prompt}], 300, req.engine),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -1147,10 +1540,12 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     context: Optional[dict] = None
+    engine: Optional[EngineConfig] = None  # generative engine selection (Choose Your Engine)
 
 
-@app.post("/chat")
+@app.post("/chat", dependencies=[Depends(require_auth)])
 async def chat(req: ChatRequest):
+    _guard_messages(req.messages)
     context_block = ""
     if req.context:
         lines = ["\n--- Currently displayed reaction ---"]
@@ -1181,7 +1576,130 @@ async def chat(req: ChatRequest):
     messages = [{"role": m.role, "content": m.content} for m in req.messages]
 
     return StreamingResponse(
-        _sse_stream(system_prompt, messages, 250),
+        _sse_stream(system_prompt, messages, 250, req.engine),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── /assist — grounded LLM help for the non-pathway file types ───────────────
+
+class AssistRequest(BaseModel):
+    file_type: str                         # mechanism | retrosynthesis | molecule_note | chat
+    content: dict = {}
+    engine: Optional[EngineConfig] = None
+
+
+def _engine_ground_from_text(text: str) -> str:
+    """If `text` parses into 2+ components (substrate + reagent), run the
+    deterministic engine and return a ground-truth summary the LLM must not
+    contradict. Returns '' when no grounding is possible."""
+    try:
+        from rdkit import Chem
+        from rdkit import RDLogger
+        RDLogger.DisableLog("rdApp.*")
+        mol = Chem.MolFromSmiles(text.replace("+", "."))
+        if mol is None:
+            return ""
+        frags = Chem.GetMolFrags(mol, asMols=True)
+        if len(frags) < 2:
+            return ""
+        comps = [Chem.MolToSmiles(f) for f in frags]
+        substrate, reagent = comps[0], ".".join(comps[1:])
+        conditions = TemplateEngine._infer_conditions(reagent)
+        branches = _engine.run_for_reagent(substrate, reagent, conditions)
+        if not branches:
+            return ""
+        lines = [
+            "ENGINE GROUND TRUTH (deterministic — never contradict):",
+            f"  Substrate: {substrate}   Reagent: {reagent}",
+        ]
+        for b in branches[:4]:
+            lines.append(
+                f"  - {b['reaction_name']}: product {b['final_product']}; "
+                f"steps: {' | '.join(b['execution_history'])}"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        logger.warning("assist grounding failed (%s): %s", type(exc).__name__, exc)
+        return ""
+
+
+def _assist_prompts(file_type: str, content: dict, ground: str = "") -> tuple[str, str]:
+    """Build (system, user) prompts per file type. The LLM explains/proposes;
+    it must not override deterministic engine facts when ground truth is given."""
+    base_rules = (
+        "You are an organic chemistry teaching assistant for Orgo AI.\n"
+        "HARD RULES:\n"
+        "- When ENGINE GROUND TRUTH is provided below, treat it as verified fact. "
+        "Never contradict the engine's products, connectivity, or reaction names.\n"
+        "- Distinguish clearly between engine-computed facts and general chemistry reasoning.\n"
+        "- Flag uncertainty rather than fabricating mechanism or stereochemical detail.\n"
+        "- Be concise and accessible to an undergraduate student."
+    )
+    g = f"\n\n{ground}" if ground else ""
+
+    def field(key, default="(none provided)"):
+        v = content.get(key)
+        if isinstance(v, list):
+            return ", ".join(str(x) for x in v) or default
+        return str(v) if v not in (None, "") else default
+
+    if file_type == "mechanism":
+        system = base_rules + g
+        user = (
+            "Explain the step-by-step mechanism for this reaction.\n\n"
+            f"Reaction input: {field('reactionInput')}\n"
+            f"Student's mechanism notes: {field('mechanismStepsText', '')}\n"
+            f"Electron-pushing notes: {field('electronPushingNotes', '')}\n"
+            f"Other notes: {field('notes', '')}\n\n"
+            "Describe each elementary step: which bonds break/form, the nucleophile/"
+            "electrophile roles, and the electron-pushing (curved-arrow) logic."
+        )
+    elif file_type == "retrosynthesis":
+        system = base_rules + g
+        user = (
+            "Propose a retrosynthetic analysis for the target below.\n\n"
+            f"Target molecule: {field('targetMolecule')}\n"
+            f"Known/attempted disconnections: {field('disconnectionsText', '')}\n"
+            f"Proposed precursors: {field('proposedPrecursorsText', '')}\n"
+            f"Notes/constraints: {field('notes', '')}\n\n"
+            "Suggest key disconnections with rationale and plausible precursors "
+            "and forward reactions. Flag where multiple routes are possible."
+        )
+    elif file_type == "molecule_note":
+        system = base_rules + g
+        user = (
+            "Give a concise chemical profile of this molecule.\n\n"
+            f"Name: {field('moleculeName')}\n"
+            f"SMILES: {field('smiles')}\n"
+            f"Functional groups (student): {field('functionalGroupsText', '')}\n"
+            f"Notes: {field('notes', '')}\n\n"
+            "Identify the functional groups, typical reactivity, and any hazards or "
+            "synthesis context worth noting."
+        )
+    else:  # chat / general
+        system = base_rules + g
+        user = (
+            "Respond to the student's project note or question.\n\n"
+            f"{field('notes', '')}"
+        )
+    return system, user
+
+
+@app.post("/assist", dependencies=[Depends(require_auth)])
+async def assist(req: AssistRequest):
+    content = req.content or {}
+    ground = ""
+    if req.file_type == "mechanism":
+        text = str(content.get("reactionInput", "")).strip()
+        if text:
+            loop = asyncio.get_event_loop()
+            ground = await loop.run_in_executor(_executor, _engine_ground_from_text, text)
+
+    system, user = _assist_prompts(req.file_type, content, ground)
+    return StreamingResponse(
+        _sse_stream(system, [{"role": "user", "content": user}], 500, req.engine),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -1429,6 +1947,8 @@ async def react_from_image(file: UploadFile = File(...)):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image too large (max 8 MB).")
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(_executor, _react_from_image, contents)
@@ -1437,9 +1957,5 @@ async def react_from_image(file: UploadFile = File(...)):
     return result
 
 
-# ── Static file serving — mount AFTER all API routes ─────────────────────────
-# Vite build outputs to static/. html=True serves index.html for any unmatched
-# path, enabling client-side routing.
-_static = Path(__file__).parent / "static"
-_static.mkdir(exist_ok=True)
-app.mount("/", StaticFiles(directory=str(_static), html=True), name="spa")
+# The web UI is served separately by the Next.js frontend (port 3000), which
+# proxies these API routes via next.config.mjs rewrites. FastAPI is API-only.
