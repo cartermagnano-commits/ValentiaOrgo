@@ -175,6 +175,8 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
               {files.map(file => {
                 const meta = fileTypeMeta(file.type)
                 const Icon = meta.icon
+                const content = file.content as Record<string, unknown> | null
+                const hasAiRun = Boolean(content?.aiResponse || content?.pathwaysData || content?.result)
                 return (
                   <div
                     key={file.id}
@@ -192,7 +194,7 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
                         {file.title}
                         <span className="file-type-badge">{meta.code}</span>
                       </strong>
-                      <small>{statusText(file.updated_at)} · AI not run yet</small>
+                      <small>{statusText(file.updated_at)} · {hasAiRun ? 'AI response saved' : 'AI not run yet'}</small>
                     </span>
                     <button
                       className="file-delete-button"

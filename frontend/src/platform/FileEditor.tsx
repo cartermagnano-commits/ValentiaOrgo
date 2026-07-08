@@ -1,13 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, CheckCircle2, Save } from 'lucide-react'
 import PathwayExplorer from '../components/PathwayExplorer'
 import DirectReact from '../components/DirectReact'
 import ReactPredict from '../components/ReactPredict'
-import type { ChemistryFile, ChemistryFileContent } from '../types'
+import type { ChatContent, ChemistryFile, ChemistryFileContent } from '../types'
 import { makeInitialContent } from '../../lib/content'
-import { streamAssist } from '../api'
+import { streamAssist, streamChat } from '../api'
 import { updateChemistryFileContent } from '../../lib/database'
 import { useToast } from './Toast'
 import { fileTypeMeta } from './fileTypes'
@@ -31,6 +31,9 @@ export default function FileEditor({
   const meta = fileTypeMeta(file.type)
   const Icon = meta.icon
   const { notify } = useToast()
+  const hasAiRun = Boolean(
+    (draft as any).aiResponse || (draft as any).pathwaysData || (draft as any).result
+  )
 
   useEffect(() => {
     setDraft(file.content || makeInitialContent(file.type))
@@ -70,6 +73,7 @@ export default function FileEditor({
         acc += delta
         setDraft(prev => ({ ...(prev as Record<string, unknown>), aiResponse: acc }) as ChemistryFileContent)
       })
+      if (!acc) throw new Error('The AI engine returned no response. Check Settings → Engine.')
       await saveContent({ ...fields, aiResponse: acc } as ChemistryFileContent)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'AI request failed.')
@@ -86,8 +90,10 @@ export default function FileEditor({
           <div>
             <div className="file-heading-meta">
               <span className="file-type-badge strong">{meta.code}</span>
-              <span className="status-pill saved">Saved</span>
-              <span className="status-pill muted">{saving ? 'Saving...' : 'AI not run yet'}</span>
+              <span className="status-pill saved">{saving ? 'Saving…' : 'Saved'}</span>
+              <span className="status-pill muted">
+                {aiRunning ? 'AI running…' : hasAiRun ? 'AI response saved' : 'AI not run yet'}
+              </span>
             </div>
             <h3>{file.title}</h3>
           </div>
@@ -179,16 +185,12 @@ export default function FileEditor({
           />
         )}
         {file.type === 'chat' && (
-          <StructuredEditor
+          <PersistedChat
+            key={file.id}
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runAssist}
-            saving={saving || aiRunning}
-            actionLabel="Generate Reply"
-            fields={[
-              ['notes', 'Chat notes', 'Use this file as a project-scoped chat scratchpad for now.'],
-            ]}
+            saving={saving}
           />
         )}
       </div>
@@ -204,53 +206,6 @@ function RelatedTabs({ currentFile, related }: { currentFile: ChemistryFile; rel
         <span key={file.id} className="related-tab">{file.title}</span>
       ))}
       {!related.length && <span className="related-empty">No previous saved files of this type in this project.</span>}
-    </div>
-  )
-}
-
-function SavedContextPanel({
-  content,
-  onChange,
-  onSave,
-  onPlaceholder,
-  actionLabel,
-  saving,
-}: {
-  content: ChemistryFileContent
-  onChange: (content: ChemistryFileContent) => void
-  onSave: (content?: ChemistryFileContent) => Promise<void>
-  onPlaceholder: () => Promise<void>
-  actionLabel: string
-  saving: boolean
-}) {
-  const data = content as Record<string, unknown>
-
-  return (
-    <div className="saved-context-panel">
-      <label>
-        <span>Saved notes</span>
-        <textarea
-          rows={3}
-          value={String(data.notes ?? '')}
-          onChange={event => onChange({ ...data, notes: event.target.value } as ChemistryFileContent)}
-          onBlur={() => onSave()}
-          placeholder="Project-specific context, constraints, observations, or follow-up ideas."
-        />
-      </label>
-      <div className="ai-response-box">
-        <Bot size={16} />
-        <span>{String(data.aiResponse || 'AI response has not been generated yet.')}</span>
-      </div>
-      <div className="editor-actions">
-        <button className="btn-secondary action-button" onClick={() => onSave()} disabled={saving}>
-          <Save size={15} />
-          Save
-        </button>
-        <button className="btn-primary action-button" onClick={onPlaceholder} disabled={saving}>
-          <CheckCircle2 size={15} />
-          {actionLabel}
-        </button>
-      </div>
     </div>
   )
 }
@@ -338,4 +293,122 @@ function StructuredEditor({
 
 function splitLines(value: string) {
   return value.split('\n').map(item => item.trim()).filter(Boolean)
+}
+
+type ChatMessage = ChatContent['messages'][number]
+
+// Real persisted chat for "chat" files: streams replies from /chat and saves
+// the full transcript into the file's jsonb content after each exchange.
+function PersistedChat({
+  content,
+  onChange,
+  onSave,
+  saving,
+}: {
+  content: ChemistryFileContent
+  onChange: (content: ChemistryFileContent) => void
+  onSave: (content?: ChemistryFileContent) => Promise<void>
+  saving: boolean
+}) {
+  const data = content as ChatContent
+  const messages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : []
+  const [input, setInput] = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages.length, streaming])
+
+  async function handleSend() {
+    const text = input.trim()
+    if (!text || streaming || saving) return
+    setInput('')
+
+    const userMessage: ChatMessage = {
+      id: `msg_${Date.now()}`,
+      role: 'user',
+      content: text,
+      createdAt: new Date().toISOString(),
+    }
+    const history = [...messages, userMessage]
+    const assistantId = `msg_${Date.now()}_reply`
+    const withReply = (replyText: string): ChatContent => ({
+      ...data,
+      messages: [
+        ...history,
+        { id: assistantId, role: 'assistant', content: replyText, createdAt: new Date().toISOString() },
+      ],
+    })
+
+    onChange({ ...data, messages: history })
+    setStreaming(true)
+    let acc = ''
+    try {
+      await streamChat(
+        history.map(message => ({ role: message.role, content: message.content })),
+        null,
+        (delta: string) => {
+          acc += delta
+          onChange(withReply(acc))
+        },
+      )
+      if (!acc) throw new Error('The AI engine returned no response. Check Settings → Engine.')
+      await onSave(withReply(acc))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Chat request failed.'
+      onChange(withReply(`Error: ${message}`))
+    } finally {
+      setStreaming(false)
+    }
+  }
+
+  return (
+    <div className="panel-body" style={{ gap: 10, minHeight: 380 }}>
+      <div className="chat-messages" style={{ flex: 1 }}>
+        {!messages.length && (
+          <div className="chat-bubble assistant">
+            Hi! Ask me anything about organic chemistry. This conversation is saved with the file.
+          </div>
+        )}
+        {messages.map(message => (
+          <div key={message.id} className={`chat-bubble ${message.role}`}>
+            {message.content}
+          </div>
+        ))}
+        {streaming && messages[messages.length - 1]?.role === 'user' && (
+          <div className="chat-bubble assistant">
+            <div className="loading-row" style={{ margin: 0 }}>
+              <div className="spinner" /> Thinking…
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="chat-input-row">
+        <textarea
+          className="chat-input"
+          rows={2}
+          value={input}
+          placeholder="Ask about mechanisms, reagents, or any orgo concept…"
+          onChange={event => setInput(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              handleSend()
+            }
+          }}
+        />
+        <button
+          className="btn-primary"
+          style={{ alignSelf: 'flex-end', padding: '8px 14px' }}
+          onClick={handleSend}
+          disabled={streaming || saving || !input.trim()}
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  )
 }

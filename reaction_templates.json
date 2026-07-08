@@ -131,6 +131,14 @@
       "enabled": true
     },
     {
+      "id": "ammonium_deprotonation",
+      "name": "Ammonium proton transfer (excess NH3) → primary amine",
+      "smarts": "[CX4:1][NX4+:2]>>[CX4:1][NH2+0:2]",
+      "conditions": ["amine_nucleophile"],
+      "provenance": "Completes the Hartenfeller N-alkylation: excess ammonia deprotonates the alkylammonium salt to the neutral primary amine.",
+      "enabled": true
+    },
+    {
       "id": "carbonyl_hydration",
       "name": "Carbonyl gem-diol formation (hydration)",
       "smarts": "[CX3:1]=[OX1:2].[OH2:3]>>[CX4:1]([OH:2])([OH:3])",

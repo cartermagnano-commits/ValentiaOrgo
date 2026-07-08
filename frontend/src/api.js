@@ -89,7 +89,10 @@ async function streamSSE(path, body, onDelta) {
       if (!line.startsWith('data: ')) continue
       const data = line.slice(6).trim()
       if (data === '[DONE]') return
-      try { const p = JSON.parse(data); if (p.delta) onDelta(p.delta) } catch {}
+      let p = null
+      try { p = JSON.parse(data) } catch { continue }
+      if (p?.error) throw new Error(p.error)
+      if (p?.delta) onDelta(p.delta)
     }
   }
 }

@@ -35,3 +35,7 @@ static/
 # OS
 .DS_Store
 Thumbs.db
+
+# Nested scratch repo (not a submodule)
+Image Pre-Processing/
+frontend/tsconfig.tsbuildinfo

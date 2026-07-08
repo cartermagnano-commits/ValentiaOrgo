@@ -59,7 +59,42 @@ from reaction_classifier import classify_reaction
 # ── LLM config — Ollama is used when no Anthropic key is present ─────────────
 OLLAMA_BASE_URL    = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
-OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
+# Explicit env override for the vision model; when unset, auto-detect below.
+OLLAMA_VISION_MODEL_ENV = os.environ.get("OLLAMA_VISION_MODEL")
+
+# Vision-capable model families that current Ollama engines can load, best
+# first. llama3.2-vision is intentionally last: its 'mllama' architecture was
+# dropped by Ollama ≥ 0.30, so it only works on older installs.
+_VISION_MODEL_CANDIDATES = [
+    "qwen3-vl", "qwen2.5vl", "gemma3", "minicpm-v", "llava", "moondream",
+    "llama3.2-vision",
+]
+_vision_model_cache: str | None = None
+
+
+def _ollama_vision_model() -> str | None:
+    """Resolve the vision model to use: env override, else the best installed
+    candidate from /api/tags. Cached after first success; returns None when no
+    vision-capable model is installed (callers already treat failure as soft)."""
+    global _vision_model_cache
+    if OLLAMA_VISION_MODEL_ENV:
+        return OLLAMA_VISION_MODEL_ENV
+    if _vision_model_cache:
+        return _vision_model_cache
+    try:
+        import httpx
+        r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
+        r.raise_for_status()
+        installed = [m.get("name", "") for m in r.json().get("models", [])]
+    except Exception:
+        return None
+    for family in _VISION_MODEL_CANDIDATES:
+        for name in installed:
+            if name.split(":")[0] == family:
+                _vision_model_cache = name
+                logger.info("Vision model auto-detected: %s", name)
+                return name
+    return None
 
 
 def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
@@ -72,17 +107,22 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
     import httpx
     from rdkit import Chem
 
+    model = _ollama_vision_model()
+    if not model:
+        logger.warning("No vision-capable Ollama model installed — skipping vision call")
+        return None
     b64 = base64.b64encode(img_bytes).decode()
-    logger.info("Ollama call → model=%s url=%s", OLLAMA_VISION_MODEL, OLLAMA_BASE_URL)
+    logger.info("Ollama call → model=%s url=%s", model, OLLAMA_BASE_URL)
     try:
         resp = httpx.post(
             f"{OLLAMA_BASE_URL}/api/chat",
             json={
-                "model": OLLAMA_VISION_MODEL,
+                "model": model,
                 "messages": [{"role": "user", "content": prompt, "images": [b64]}],
                 "stream": False,
             },
-            timeout=90.0,
+            # Generous: the first call after idle has to load the model (~6 GB)
+            timeout=300.0,
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
@@ -243,6 +283,47 @@ async def _stream_openai(system: str, messages: list[dict], max_tokens: int,
     yield "data: [DONE]\n\n"
 
 
+def _friendly_stream_error(exc: Exception) -> str:
+    """Map a provider/transport exception to a message a user can act on.
+
+    Never include request payloads or API keys — only the exception class
+    and a safe summary.
+    """
+    name = type(exc).__name__
+    text = str(exc)
+    if "Connect" in name or "ConnectionError" in name:
+        return (
+            "The Local (Ollama) engine is not reachable. Start Ollama, or pick a "
+            "different engine under Settings → Engine."
+        )
+    if "404" in text and "ollama" in text.lower() or "not found, try pulling" in text.lower():
+        return (
+            "The selected local model isn't installed in Ollama. "
+            "Run `ollama pull <model>` or pick another model in Settings → Engine."
+        )
+    if "authentication" in name.lower() or "401" in text:
+        return "The API key was rejected by the provider. Check your key in Settings → Engine."
+    if "rate" in name.lower() or "429" in text:
+        return "The provider is rate-limiting requests. Wait a moment and try again."
+    return f"The AI engine failed mid-response ({name}). Try again or switch engines in Settings → Engine."
+
+
+async def _with_error_frames(gen):
+    """Wrap a provider stream so failures surface as an SSE error frame.
+
+    Provider generators start emitting only after the HTTP 200 headers are
+    already sent, so a connect/auth failure can't become a normal HTTP error —
+    without this wrapper the client just sees an empty stream and spins forever.
+    """
+    try:
+        async for chunk in gen:
+            yield chunk
+    except Exception as exc:
+        logger.warning("LLM stream failed (%s): %s", type(exc).__name__, exc)
+        yield f"data: {json.dumps({'error': _friendly_stream_error(exc)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+
 def _sse_stream(system: str, messages: list[dict], max_tokens: int,
                 engine: Optional[EngineConfig] = None):
     """Return the streaming generator for the selected engine.
@@ -251,6 +332,12 @@ def _sse_stream(system: str, messages: list[dict], max_tokens: int,
     surface as a normal HTTP response rather than mid-stream. When no engine is
     supplied, fall back to env-based selection for back-compat.
     """
+    return _with_error_frames(
+        _select_stream(system, messages, max_tokens, engine))
+
+
+def _select_stream(system: str, messages: list[dict], max_tokens: int,
+                   engine: Optional[EngineConfig] = None):
     if engine is None:
         _record_usage("env", None)
         if os.environ.get("ANTHROPIC_API_KEY"):
@@ -488,8 +575,17 @@ def _load_decimer():
     return _decimer_fn
 
 
-# Warm DECIMER at startup so the first user request doesn't pay the cold-start penalty
-_load_decimer()
+# Warm DECIMER at startup so the first user request doesn't pay the cold-start penalty.
+# Non-fatal: without DECIMER the /analyze OSR path degrades to the vision-model
+# fallback, and every non-image feature still works.
+try:
+    _load_decimer()
+except Exception as _exc:
+    logger.warning(
+        "DECIMER unavailable (%s: %s) — image structure recognition will rely on "
+        "the vision-model fallback. Install with: pip install decimer",
+        type(_exc).__name__, _exc,
+    )
 
 
 def _ollama_status() -> dict:
@@ -503,14 +599,14 @@ def _ollama_status() -> dict:
         r = httpx.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5.0)
         r.raise_for_status()
         models = [m["name"] for m in r.json().get("models", [])]
-        vbase = OLLAMA_VISION_MODEL.split(":")[0]
+        vision_model = _ollama_vision_model()
         return {
             "running": True,
             "base_url": OLLAMA_BASE_URL,
             "models": models,
             "chat_model": OLLAMA_MODEL,
-            "vision_model": OLLAMA_VISION_MODEL,
-            "vision_available": any(m.startswith(vbase) for m in models),
+            "vision_model": vision_model,
+            "vision_available": vision_model is not None,
             "error": None,
         }
     except Exception as exc:
@@ -519,7 +615,7 @@ def _ollama_status() -> dict:
             "base_url": OLLAMA_BASE_URL,
             "models": [],
             "chat_model": OLLAMA_MODEL,
-            "vision_model": OLLAMA_VISION_MODEL,
+            "vision_model": None,
             "vision_available": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -532,9 +628,10 @@ def _check_ollama() -> None:
         logger.info("Ollama reachable at %s — models: %s", OLLAMA_BASE_URL, status["models"])
         if not status["vision_available"]:
             logger.warning(
-                "Vision model %r not found in Ollama (available: %s). "
-                "Ollama image fallback will fail until the model is pulled.",
-                OLLAMA_VISION_MODEL, status["models"],
+                "No vision-capable model found in Ollama (available: %s). "
+                "Ollama image fallback will fail until one is pulled "
+                "(e.g. `ollama pull qwen2.5vl:7b`).",
+                status["models"],
             )
     else:
         logger.warning("Ollama unreachable at %s (%s). Image fallback disabled.",
@@ -626,78 +723,32 @@ def _mol_svg(smiles: str, width: int, height: int) -> str:
     return drawer.GetDrawingText()
 
 
-def _render_smiles_png(smiles: str, size: int = 320) -> bytes | None:
-    """Render a SMILES to PNG bytes for round-trip visual verification."""
-    from rdkit import Chem
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return None
-    try:
-        from rdkit.Chem.Draw import rdMolDraw2D
-        d = rdMolDraw2D.MolDraw2DCairo(size, size)
-        d.DrawMolecule(mol)
-        d.FinishDrawing()
-        return d.GetDrawingText()
-    except Exception:
-        pass
-    try:
-        from rdkit.Chem.Draw import MolToImage
-        pil = MolToImage(mol, size=(size, size))
-        buf = io.BytesIO()
-        pil.save(buf, format="PNG")
-        return buf.getvalue()
-    except Exception as exc:
-        logger.warning("render PNG failed (%s): %s", type(exc).__name__, exc)
-        return None
+def _verify_smiles(original_png: bytes, smiles: str) -> bool | None:
+    """Independent-reader agreement check.
 
+    Ask the vision model to read the structure from the original image on its
+    own, then canonically compare its SMILES with `smiles` (DECIMER's read).
+    Small local VLMs proved unreliable as *judges* ("do these two drawings
+    match?") — they blessed wrong reads and rejected correct ones. Exact
+    canonical agreement between two independent readers is deterministic and
+    almost never blesses a wrong structure.
 
-def _vision_compare(original_png: bytes, rendered_png: bytes) -> bool | None:
-    """Ask the local vision model whether a rendered structure matches the
-    original image. Returns True/False, or None if verification couldn't run
-    (e.g. Ollama unavailable) — verification is best-effort, never a hard gate.
-
+    True = both readers agree; False = vision read is valid but different;
+    None = no usable vision read (verification unavailable, never a hard gate).
     Runs synchronously — call from a thread pool, never the event loop.
     """
-    import httpx
-    orig_b64 = base64.b64encode(original_png).decode()
-    guess_b64 = base64.b64encode(rendered_png).decode()
-    prompt = (
-        "Two images of a chemical structure are provided. The FIRST is the "
-        "original photo/drawing. The SECOND is a computer-rendered structure "
-        "produced by an automated recognition guess. Do they represent the SAME "
-        "molecule — same skeleton, connectivity, and functional groups?\n"
-        "Answer with exactly one word: YES or NO."
-    )
-    try:
-        resp = httpx.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
-            json={
-                "model": OLLAMA_VISION_MODEL,
-                "messages": [{"role": "user", "content": prompt, "images": [orig_b64, guess_b64]}],
-                "stream": False,
-            },
-            timeout=90.0,
-        )
-        resp.raise_for_status()
-        text = resp.json()["message"]["content"].strip().upper()
-        logger.info("Vision compare verdict: %r", text[:80])
-    except Exception as exc:
-        logger.warning("Vision compare unavailable (%s): %s", type(exc).__name__, exc)
+    from rdkit import Chem
+    vision_read = _ollama_vision_smiles(original_png)
+    if not vision_read:
         return None
-
-    if text.startswith("YES") or ("YES" in text and "NO" not in text):
-        return True
-    if text.startswith("NO") or ("NO" in text and "YES" not in text):
-        return False
-    return None
-
-
-def _verify_smiles(original_png: bytes, smiles: str) -> bool | None:
-    """Round-trip check: render `smiles`, compare to the original image."""
-    rendered = _render_smiles_png(smiles)
-    if not rendered:
+    ours = Chem.MolFromSmiles(smiles)
+    theirs = Chem.MolFromSmiles(vision_read)
+    if ours is None or theirs is None:
         return None
-    return _vision_compare(original_png, rendered)
+    agree = Chem.MolToSmiles(ours) == Chem.MolToSmiles(theirs)
+    logger.info("Verification: decimer=%r vision=%r agree=%s",
+                Chem.MolToSmiles(ours), Chem.MolToSmiles(theirs), agree)
+    return agree
 
 
 # ── Image processing (runs in thread pool) ────────────────────────────────────
@@ -757,22 +808,15 @@ def _process(raw_bytes: bytes) -> dict:
             valid = True
             error = None
 
-    # Round-trip verification: render our guess and ask the vision model whether
-    # it matches the original photo. Catches valid-but-wrong DECIMER reads.
-    # Best-effort — if the vision model is unavailable, confidence is "unverified"
-    # and we still return the SMILES.
+    # Verification: an independent vision-model read of the original photo,
+    # canonically compared with DECIMER's read. Agreement → high confidence;
+    # disagreement → keep DECIMER's read (the specialist) but flag low
+    # confidence. Best-effort — if the vision model is unavailable, confidence
+    # is "unverified" and we still return the SMILES.
     verified: bool | None = None
     if valid and smiles:
         _, orig_buf = cv2.imencode(".png", img)   # original (pre-binarization) image
-        original_png = orig_buf.tobytes()
-        verified = _verify_smiles(original_png, smiles)
-        if verified is False:
-            # DECIMER gave a plausible-but-wrong structure — try a vision re-read.
-            _, cur_buf = cv2.imencode(".png", current)
-            reread = _ollama_vision_smiles(cur_buf.tobytes())
-            if reread and reread != smiles:
-                smiles = reread
-                verified = _verify_smiles(original_png, reread)
+        verified = _verify_smiles(orig_buf.tobytes(), smiles)
 
     if verified is True:
         confidence = "high"
@@ -1757,7 +1801,10 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         recognized_smiles = _load_decimer()(tmp_path)
         logger.info("DECIMER output: %r", recognized_smiles)
     except Exception as exc:
-        return {"error": f"Structure recognition failed: {exc}", "products": []}
+        # DECIMER missing/broken is recoverable — the Ollama vision fallback
+        # below gets a chance, same as the /analyze pipeline.
+        logger.warning("DECIMER failed (%s): %s — trying vision fallback", type(exc).__name__, exc)
+        recognized_smiles = None
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)

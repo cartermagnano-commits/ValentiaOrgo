@@ -17,7 +17,11 @@ function NodeInfoView({ nodeData, branch, substrateSMILES }) {
     setExplanation({ text: '', loading: true, error: null })
     streamNodeExplanation(nodeData, branch, substrateSMILES, delta =>
       setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
-    ).catch(e => setExplanation({ text: '', loading: false, error: e.message }))
+    )
+      .then(() => setExplanation(prev => prev.loading
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.' }
+        : prev))
+      .catch(e => setExplanation({ text: '', loading: false, error: e.message }))
   }, [nodeData?.smiles, nodeData?.nodeType, branch?.id, substrateSMILES])
 
   if (!nodeData) return null
@@ -137,14 +141,22 @@ function BranchInfoView({ branch, substrateSMILES }) {
     setStereo({ text: '', loading: false, error: null, requested: false })
     streamExplanation(branch, substrateSMILES, delta =>
       setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
-    ).catch(e => setExplanation({ text: '', loading: false, error: e.message }))
+    )
+      .then(() => setExplanation(prev => prev.loading
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.' }
+        : prev))
+      .catch(e => setExplanation({ text: '', loading: false, error: e.message }))
   }, [branch?.id, substrateSMILES])
 
   function analyzeStereo() {
     setStereo({ text: '', loading: true, error: null, requested: true })
     streamStereo(branch, substrateSMILES, delta =>
       setStereo(prev => ({ ...prev, text: prev.text + delta, loading: false }))
-    ).catch(e => setStereo({ text: '', loading: false, error: e.message, requested: true }))
+    )
+      .then(() => setStereo(prev => prev.loading
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.', requested: true }
+        : prev))
+      .catch(e => setStereo({ text: '', loading: false, error: e.message, requested: true }))
   }
 
   if (!branch) {
