@@ -1131,6 +1131,39 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 
 .btn-icon:hover:not(:disabled) { color: var(--text); background: var(--card); }
+.btn-icon.active { color: var(--accent); border-color: var(--accent); }
+
+/* Preprocessing stage strip inside MoleculeInput */
+.stage-strip {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+}
+
+.stage-thumb {
+  flex: 0 0 auto;
+  margin: 0;
+  text-align: center;
+}
+
+.stage-thumb img {
+  width: 84px;
+  height: 64px;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.stage-thumb figcaption {
+  font-size: 9px;
+  color: var(--muted);
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
 
 .analyze-btn {
   display: inline-flex;

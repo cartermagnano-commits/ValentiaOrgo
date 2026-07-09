@@ -25,13 +25,19 @@ interface OllamaStatus {
   error: string | null
 }
 
-const MODULES: { mode: EngineMode; title: string; tagline: string; strip: string; Icon: any }[] = [
-  { mode: 'local', title: 'Local (Ollama)', tagline: '$0 · your hardware', strip: '#6d5bd0', Icon: Cpu },
-  { mode: 'byok', title: 'Bring Your Own Key', tagline: '~$0 · billed to you', strip: '#1f6f5c', Icon: KeyRound },
-  { mode: 'hosted', title: 'Hosted — "Just Works"', tagline: '$5/mo placeholder', strip: '#c0562f', Icon: Cloud },
+const MODULES: { mode: EngineMode; title: string; tagline: string; Icon: any }[] = [
+  { mode: 'local', title: 'Local (Ollama)', tagline: 'Free, private, on your hardware', Icon: Cpu },
+  { mode: 'byok', title: 'Your own API key', tagline: 'Anthropic or OpenAI, billed to you', Icon: KeyRound },
+  { mode: 'hosted', title: 'Hosted', tagline: 'No setup — we run everything', Icon: Cloud },
 ]
 
-export default function EngineSettings() {
+export default function EngineSettings({
+  onboarding = false,
+  onDone,
+}: {
+  onboarding?: boolean
+  onDone?: () => void
+} = {}) {
   const [prefs, setPrefs] = useState<EnginePrefs>(loadPrefs())
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [ollama, setOllama] = useState<OllamaStatus | null>(null)
@@ -91,6 +97,15 @@ export default function EngineSettings() {
     notify(apiKeyInput.trim() ? 'API key saved for this session' : 'API key cleared', 'success')
   }
 
+  async function finishOnboarding() {
+    // Persist even untouched defaults — the saved row is what tells the
+    // dashboard this user has been through onboarding.
+    if (userId) {
+      try { await saveEngineSettings(userId, prefs as unknown as Record<string, unknown>) } catch { /* offline — dashboard gate degrades gracefully */ }
+    }
+    onDone?.()
+  }
+
   const strengthStops = STRENGTH[prefs.provider]
   const strengthIndex = Math.max(0, strengthStops.findIndex(s => s.model === prefs.model))
   const activeStrength = strengthStops[strengthIndex] ?? strengthStops[0]
@@ -100,18 +115,19 @@ export default function EngineSettings() {
   return (
     <div className="engine-settings">
       <header className="es-head">
-        <h2>Choose your engine</h2>
+        <h2>{onboarding ? 'Welcome — choose your AI engine' : 'Choose your engine'}</h2>
         <p className="es-framing">
-          Structure recognition and the reaction engine always run <strong>free and keyless</strong>.
-          This setting only controls what powers the generative <em>explanations and chat</em>.
+          {onboarding
+            ? 'One quick choice before you start: what should power AI explanations and chat? Chemistry itself — structure recognition and reaction prediction — is always free and keyless. You can change this anytime under Settings.'
+            : 'Structure recognition and the reaction engine always run free and keyless. This setting only controls what powers explanations and chat.'}
         </p>
       </header>
 
       <div className="es-stack">
-        {MODULES.map(({ mode, title, tagline, strip, Icon }) => {
+        {MODULES.map(({ mode, title, tagline, Icon }) => {
           const active = prefs.mode === mode
           return (
-            <div key={mode} className={`es-card ${active ? 'active' : ''}`} style={{ ['--strip' as any]: strip }}>
+            <div key={mode} className={`es-card ${active ? 'active' : ''}`}>
               <button
                 type="button"
                 className="es-card-head"
@@ -164,72 +180,86 @@ export default function EngineSettings() {
         })}
       </div>
 
+      {onboarding && (
+        <footer className="es-continue">
+          <button type="button" className="es-continue-btn" onClick={finishOnboarding}>
+            Continue to your workspace →
+          </button>
+          <p className="es-note" style={{ textAlign: 'center' }}>
+            Not sure? Just continue — the default works out of the box.
+          </p>
+        </footer>
+      )}
+
       <style jsx>{`
         .engine-settings {
-          --paper: #f3f0e7; --ink: #16201c; --muted: #5c6560; --flask: #1f6f5c;
-          max-width: 720px; margin: 0 auto; padding: 28px 22px 48px;
-          color: var(--ink); font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+          max-width: 640px; margin: 0 auto; padding: 32px 22px 48px;
+          color: var(--text);
         }
-        .es-head h2 {
-          font-family: 'Iowan Old Style', Georgia, serif; font-size: 30px;
-          margin: 0 0 8px; letter-spacing: -0.01em;
-        }
-        .es-framing { color: var(--muted); font-size: 14px; line-height: 1.5; margin: 0 0 22px; }
-        .es-stack { display: flex; flex-direction: column; gap: 14px; }
+        .es-head h2 { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
+        .es-framing { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 0 0 20px; }
+        .es-stack { display: flex; flex-direction: column; gap: 10px; }
         .es-card {
-          background: var(--paper); border: 1px solid rgba(22,32,28,0.12);
-          border-left: 5px solid var(--strip); border-radius: 16px; overflow: hidden;
-          box-shadow: 0 1px 2px rgba(22,32,28,0.05); transition: box-shadow .2s, border-color .2s;
+          background: var(--card); border: 1px solid var(--border);
+          border-radius: 10px; overflow: hidden;
+          box-shadow: var(--shadow-sm); transition: box-shadow .2s, border-color .2s;
         }
-        .es-card.active { box-shadow: 0 8px 24px rgba(22,32,28,0.12); border-color: var(--strip); }
+        .es-card.active { border-color: var(--accent); box-shadow: 0 4px 14px rgba(24,32,42,0.10); }
         .es-card-head {
           width: 100%; display: flex; align-items: center; gap: 12px;
-          padding: 16px 18px; background: none; border: none; cursor: pointer; text-align: left;
+          padding: 14px 16px; background: none; border: none; cursor: pointer; text-align: left;
+          color: var(--text); font: inherit;
         }
         .es-radio {
-          width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--muted);
+          width: 17px; height: 17px; border-radius: 50%; border: 2px solid var(--border-strong);
           display: inline-flex; align-items: center; justify-content: center; color: #fff; flex: none;
         }
-        .es-radio[data-on='true'] { background: var(--strip); border-color: var(--strip); }
-        .es-icon { color: var(--strip); display: inline-flex; flex: none; }
-        .es-titles { display: flex; flex-direction: column; }
-        .es-title { font-weight: 600; font-size: 15px; }
+        .es-radio[data-on='true'] { background: var(--accent); border-color: var(--accent); }
+        .es-icon { color: var(--accent); display: inline-flex; flex: none; }
+        .es-titles { display: flex; flex-direction: column; gap: 1px; }
+        .es-title { font-weight: 600; font-size: 14px; }
         .es-tag { font-size: 12px; color: var(--muted); }
         .es-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .28s ease; }
         .es-body.open { grid-template-rows: 1fr; }
         .es-body-inner { overflow: hidden; }
+        .es-continue { margin-top: 24px; display: flex; flex-direction: column; gap: 10px; }
+        .es-continue-btn {
+          width: 100%; padding: 12px; border: none; border-radius: 8px; cursor: pointer;
+          background: var(--primary); color: #fff; font: inherit; font-weight: 600; font-size: 14px;
+        }
+        .es-continue-btn:hover { background: var(--primary-hover); }
       `}</style>
       <style jsx global>{`
-        .engine-settings .es-panel { padding: 4px 18px 20px; display: flex; flex-direction: column; gap: 14px; font-size: 14px; }
-        .engine-settings .es-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 999px; font-weight: 600; }
-        .engine-settings .es-pill.ok { background: rgba(31,111,92,0.14); color: #1f6f5c; }
-        .engine-settings .es-pill.bad { background: rgba(192,86,47,0.14); color: #c0562f; }
+        .engine-settings .es-panel { padding: 2px 16px 18px 45px; display: flex; flex-direction: column; gap: 13px; font-size: 13.5px; }
+        .engine-settings .es-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 10px; border-radius: 999px; font-weight: 600; }
+        .engine-settings .es-pill.ok { background: rgba(35,107,69,0.12); color: var(--success); }
+        .engine-settings .es-pill.bad { background: rgba(169,74,66,0.12); color: var(--danger); }
         .engine-settings .es-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .engine-settings .es-label { font-weight: 600; font-size: 13px; }
+        .engine-settings .es-label { font-weight: 600; font-size: 12.5px; }
         .engine-settings select, .engine-settings input[type='password'] {
-          font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(22,32,28,0.2);
-          background: #fff; color: #16201c;
+          font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--border);
+          background: #fff; color: var(--text);
         }
-        .engine-settings input[type='password'] { width: 100%; }
-        .engine-settings .es-tabs { display: inline-flex; border: 1px solid rgba(22,32,28,0.2); border-radius: 8px; overflow: hidden; }
-        .engine-settings .es-tab { padding: 7px 14px; background: #fff; border: none; cursor: pointer; font: inherit; }
-        .engine-settings .es-tab.on { background: #1f6f5c; color: #fff; }
-        .engine-settings .es-note { font-size: 12px; color: #5c6560; }
+        .engine-settings input[type='password'] { width: 100%; margin-top: 6px; }
+        .engine-settings .es-tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+        .engine-settings .es-tab { padding: 6px 14px; background: #fff; border: none; cursor: pointer; font: inherit; font-size: 13px; color: var(--text); }
+        .engine-settings .es-tab.on { background: var(--accent); color: #fff; }
+        .engine-settings .es-note { font-size: 12px; color: var(--muted); line-height: 1.5; margin: 0; }
         .engine-settings .es-slider { display: flex; align-items: center; gap: 0; padding: 6px 0; }
         .engine-settings .es-stop { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; position: relative; }
-        .engine-settings .es-stop::before { content: ''; position: absolute; top: 7px; left: -50%; width: 100%; height: 2px; background: rgba(22,32,28,0.18); z-index: 0; }
+        .engine-settings .es-stop::before { content: ''; position: absolute; top: 7px; left: -50%; width: 100%; height: 2px; background: var(--border); z-index: 0; }
         .engine-settings .es-stop:first-child::before { display: none; }
-        .engine-settings .es-dot { width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid rgba(22,32,28,0.3); z-index: 1; }
-        .engine-settings .es-stop.on .es-dot { background: #1f6f5c; border-color: #1f6f5c; }
-        .engine-settings .es-stop-label { font-size: 11px; color: #5c6560; text-align: center; }
-        .engine-settings .es-readout { font-size: 13px; }
-        .engine-settings .es-readout strong { color: #16201c; }
+        .engine-settings .es-dot { width: 15px; height: 15px; border-radius: 50%; background: #fff; border: 2px solid var(--border-strong); z-index: 1; }
+        .engine-settings .es-stop.on .es-dot { background: var(--accent); border-color: var(--accent); }
+        .engine-settings .es-stop-label { font-size: 11px; color: var(--muted); text-align: center; }
+        .engine-settings .es-readout { font-size: 12.5px; color: var(--muted); }
+        .engine-settings .es-readout strong { color: var(--text); }
         .engine-settings .es-cta {
-          align-self: flex-start; margin-top: 4px; padding: 9px 16px; border-radius: 10px; border: none;
-          background: #1f6f5c; color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+          align-self: flex-start; margin-top: 2px; padding: 8px 16px; border-radius: 8px; border: none;
+          background: var(--accent); color: #fff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
         }
-        .engine-settings .es-cta.accent { background: #c0562f; }
-        .engine-settings a.es-link { color: #1f6f5c; display: inline-flex; align-items: center; gap: 4px; }
+        .engine-settings .es-cta.accent { background: var(--accent2); }
+        .engine-settings a.es-link { color: var(--accent); display: inline-flex; align-items: center; gap: 4px; }
       `}</style>
     </div>
   )

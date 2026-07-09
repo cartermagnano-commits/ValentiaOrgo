@@ -2,18 +2,18 @@
 
 import { FormEvent, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { CalendarDays, Clock3, FileText, FlaskConical, FolderKanban, Network, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react'
+import { Clock3, FileText, FolderKanban, Plus, Trash2, Wand2 } from 'lucide-react'
 import type { User } from '@supabase/supabase-js'
 import {
   createProject, deleteProject, fetchProjects, getCurrentUser,
-  createChemistryFile, updateChemistryFileContent,
+  createChemistryFile, updateChemistryFileContent, loadEngineSettings,
 } from '../../lib/database'
 import { isSupabaseConfigured } from '../../lib/supabaseClient'
 import type { Project } from '../types'
 import AppTopbar from './AppTopbar'
 import Modal from './Modal'
 import { useToast } from './Toast'
-import { formatDate, statusText } from './format'
+import { statusText } from './format'
 
 export default function DashboardPage() {
   const router = useRouter()
@@ -22,12 +22,10 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
-  const [modalHint, setModalHint] = useState('')
   const [creatingExample, setCreatingExample] = useState(false)
   const { notify } = useToast()
 
-  function openNewProject(hint = '') {
-    setModalHint(hint)
+  function openNewProject() {
     setModalOpen(true)
   }
 
@@ -44,6 +42,19 @@ export default function DashboardPage() {
       }
       if (cancelled) return
       setUser(currentUser)
+      // First-time users (no saved engine settings yet) go through onboarding:
+      // choose an engine once, then land back here. Best-effort — if the
+      // settings table isn't reachable we just show the dashboard.
+      try {
+        const engine = await loadEngineSettings(currentUser.id)
+        if (!engine) {
+          router.replace('/settings?onboarding=1')
+          return
+        }
+      } catch {
+        /* table missing or offline — skip onboarding gate */
+      }
+      if (cancelled) return
       try {
         setProjects(await fetchProjects(currentUser.id))
       } catch (err) {
@@ -134,7 +145,6 @@ export default function DashboardPage() {
           <div>
             <div className="eyebrow">Projects</div>
             <h2>Chemistry workspaces</h2>
-            <p>Organize synthesis plans, homework sets, reaction predictions, and research notes by project.</p>
           </div>
           <button className="btn-primary action-button" onClick={() => openNewProject()}>
             <Plus size={16} />
@@ -148,33 +158,6 @@ export default function DashboardPage() {
           </div>
         )}
         {error && <div className="error-banner wide">{error}</div>}
-
-        <div className="quick-tools-section">
-          <div className="eyebrow">Start a new project</div>
-          <div className="quick-tools-grid">
-            <button className="quick-tool-card" onClick={() => openNewProject('Synthesis Pathways')}>
-              <Network size={22} />
-              <div>
-                <strong>Synthesis Pathways</strong>
-                <span>Explore reagent routes from a starting molecule</span>
-              </div>
-            </button>
-            <button className="quick-tool-card" onClick={() => openNewProject('Direct Reaction')}>
-              <FlaskConical size={22} />
-              <div>
-                <strong>Direct Reaction</strong>
-                <span>Predict products from substrate + reagent</span>
-              </div>
-            </button>
-            <button className="quick-tool-card" onClick={() => openNewProject('Predict from Image')}>
-              <Sparkles size={22} />
-              <div>
-                <strong>Predict from Image</strong>
-                <span>Upload a whiteboard photo to predict reaction products</span>
-              </div>
-            </button>
-          </div>
-        </div>
 
         <div className="project-grid">
           {!projects.length && !error && (
@@ -211,17 +194,12 @@ export default function DashboardPage() {
                 <FolderKanban size={20} />
               </div>
               <div className="project-card-main">
-                <div className="project-status-row">
-                  <span className="status-pill saved">Saved</span>
-                  <span className="status-pill muted">{statusText(project.updated_at)}</span>
-                </div>
                 <h3>{project.name}</h3>
-                <p>{project.description || 'No description yet.'}</p>
+                {project.description && <p>{project.description}</p>}
               </div>
               <div className="project-card-meta">
                 <span><FileText size={13} /> {project.fileCount ?? 0} file{project.fileCount === 1 ? '' : 's'}</span>
-                <span><CalendarDays size={13} /> Created {formatDate(project.created_at)}</span>
-                <span><Clock3 size={13} /> Updated {formatDate(project.updated_at)}</span>
+                <span><Clock3 size={13} /> {statusText(project.updated_at)}</span>
               </div>
               <button
                 className="project-delete-button"
@@ -240,8 +218,7 @@ export default function DashboardPage() {
 
       {modalOpen && (
         <NewProjectModal
-          hint={modalHint}
-          onClose={() => { setModalOpen(false); setModalHint('') }}
+          onClose={() => setModalOpen(false)}
           onCreate={handleCreateProject}
         />
       )}
@@ -250,11 +227,9 @@ export default function DashboardPage() {
 }
 
 function NewProjectModal({
-  hint,
   onClose,
   onCreate,
 }: {
-  hint?: string
   onClose: () => void
   onCreate: (payload: { name: string; description: string }) => Promise<void>
 }) {
@@ -278,11 +253,6 @@ function NewProjectModal({
 
   return (
     <Modal title="New Project" onClose={onClose}>
-      {hint && (
-        <p className="modal-hint">
-          You'll find <strong>{hint}</strong> and the other chemistry tools inside your new project.
-        </p>
-      )}
       <form className="modal-form" onSubmit={submit}>
         <label>
           <span>Project name</span>

@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import StructureView from './StructureView'
 import { reactFromImage } from '../api'
-import { ArrowLeft, Camera, Check, Copy, X } from 'lucide-react'
+import { imageFileFromClipboard, pasteTargetIsEditable, readImageFromClipboard } from '../../lib/clipboard'
+import { ArrowLeft, Camera, Check, ClipboardPaste, Copy, X } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -151,6 +152,22 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
     if (file) handleFile(file)
   }
 
+  // Ctrl+V anywhere on this view feeds a clipboard image (screen snip)
+  // straight into the pipeline — no need to click the drop zone first.
+  useEffect(() => {
+    function onPaste(e) {
+      if (e.defaultPrevented || loading || pasteTargetIsEditable(e)) return
+      const file = imageFileFromClipboard(e)
+      if (file) {
+        e.preventDefault()
+        handleFile(file)
+      }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading])
+
   function onDragOver(e) {
     e.preventDefault()
     setDragOver(true)
@@ -161,6 +178,21 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
     setError(null)
     setPreview(null)
     if (fileRef.current) fileRef.current.value = ''
+  }
+
+  async function pasteFromClipboard(e) {
+    e.stopPropagation()  // don't also open the file picker
+    setError(null)
+    try {
+      const file = await readImageFromClipboard()
+      if (!file) {
+        setError('No image in the clipboard — take a screen snip first (Win+Shift+S).')
+        return
+      }
+      handleFile(file)
+    } catch (err) {
+      setError(err.message)
+    }
   }
 
   return (
@@ -230,11 +262,20 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
           <>
             <Camera size={38} strokeWidth={1.45} style={{ opacity: 0.55 }} />
             <div style={{ fontSize: 13, color: 'var(--text)', fontWeight: 500 }}>
-              Drop an image here or click to upload
+              Drop an image, click to upload, or paste (Ctrl+V)
             </div>
             <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-              Supports structural drawings with substrate + reagent
+              Supports structural drawings with substrate + reagent — a screen snip works
             </div>
+            <button
+              className="btn-secondary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 16px', marginTop: 2 }}
+              title="Paste an image from your clipboard"
+              onClick={pasteFromClipboard}
+            >
+              <ClipboardPaste size={14} />
+              Paste from clipboard
+            </button>
           </>
         )}
       </div>

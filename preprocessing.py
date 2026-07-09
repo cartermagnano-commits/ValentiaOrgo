@@ -214,7 +214,34 @@ def normalize_binarize(img: np.ndarray) -> np.ndarray:
     if np.mean(binary) < 127:
         binary = cv2.bitwise_not(binary)
 
+    binary = _despeckle(binary)
+
+    # White margin around the structure — OSR models are trained on depictions
+    # with breathing room; ink touching the frame edge hurts recognition.
+    pad = max(8, int(0.03 * max(binary.shape[:2])))
+    binary = cv2.copyMakeBorder(binary, pad, pad, pad, pad,
+                                cv2.BORDER_CONSTANT, value=255)
+
     return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+
+def _despeckle(binary: np.ndarray) -> np.ndarray:
+    """
+    Remove tiny isolated ink blobs (sensor noise, paper grain, JPEG artifacts
+    that survived thresholding) from a black-on-white binary image.
+
+    Ink components smaller than ~0.001% of the frame are almost never part of
+    a chemical structure — even a stereo-bond dot or the dot of an 'i' in an
+    atom label is bigger — but they routinely confuse OSR models into
+    hallucinating extra atoms.
+    """
+    ink = cv2.bitwise_not(binary)  # connected components of INK (white on black)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    min_area = max(6, binary.shape[0] * binary.shape[1] // 100_000)
+    for i in range(1, num):
+        if stats[i, cv2.CC_STAT_AREA] < min_area:
+            binary[labels == i] = 255
+    return binary
 
 
 # ── Pipeline Runner ────────────────────────────────────────────────────────────

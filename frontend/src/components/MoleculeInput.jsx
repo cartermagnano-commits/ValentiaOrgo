@@ -1,7 +1,35 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import StructureView from './StructureView'
 import { analyzeImage } from '../api'
-import { Camera, ChevronUp, Pencil, UploadCloud, X, ShieldCheck, AlertTriangle } from 'lucide-react'
+import { imageFileFromClipboard, pasteTargetIsEditable, readImageFromClipboard } from '../../lib/clipboard'
+import { Camera, ChevronUp, ClipboardPaste, Eye, Pencil, UploadCloud, X, ShieldCheck, AlertTriangle } from 'lucide-react'
+
+// Page-level paste routing: when the user hits Ctrl+V without having clicked
+// into a specific card (e.g. right after taking a screen snip), the image goes
+// to the first mounted MoleculeInput that doesn't have a structure yet.
+// Card-level onPaste handlers preventDefault first, so a paste aimed at a
+// specific card never double-fires here.
+const _pasteTargets = []
+if (typeof window !== 'undefined') {
+  window.addEventListener('paste', e => {
+    if (e.defaultPrevented || pasteTargetIsEditable(e)) return
+    const file = imageFileFromClipboard(e)
+    if (!file) return
+    const target = _pasteTargets.find(t => t.isEmpty()) ?? _pasteTargets[0]
+    if (target) {
+      e.preventDefault()
+      target.handle(file)
+    }
+  })
+}
+
+const STAGE_LABELS = {
+  original: 'Original',
+  perspective: 'Perspective',
+  deskew: 'Deskew',
+  denoise: 'Denoise',
+  binarize: 'Binarized',
+}
 
 function isSmallHydrocarbon(smiles) {
   if (!smiles) return false
@@ -20,18 +48,68 @@ export default function MoleculeInput({ label, value, onChange }) {
   const [error, setError]   = useState(null)
   const [showSmiles, setShowSmiles] = useState(false)
   const [confidence, setConfidence] = useState(null)  // 'high' | 'low' | 'unverified' | null
+  const [stages, setStages] = useState(null)          // { original, ..., binarize } base64 PNGs
+  const [showStages, setShowStages] = useState(false)
   const fileRef = useRef(null)
+
+  // Register with the page-level paste router (see top of file). Refs keep the
+  // registry entry stable while always seeing the latest value/handler.
+  const valueRef = useRef(value)
+  valueRef.current = value
+  const handleFileRef = useRef(null)
+
+  useEffect(() => {
+    const entry = {
+      isEmpty: () => !(valueRef.current ?? '').trim(),
+      handle: file => handleFileRef.current?.(file),
+    }
+    _pasteTargets.push(entry)
+    return () => {
+      const i = _pasteTargets.indexOf(entry)
+      if (i >= 0) _pasteTargets.splice(i, 1)
+    }
+  }, [])
+
+  function onCardPaste(e) {
+    const file = imageFileFromClipboard(e)
+    if (file) {
+      e.preventDefault()
+      handleFile(file)
+    }
+  }
+
+  async function pasteFromClipboard() {
+    setError(null)
+    try {
+      const file = await readImageFromClipboard()
+      if (!file) {
+        setError('No image in the clipboard — take a screen snip first (Win+Shift+S).')
+        setShowSmiles(true)
+        return
+      }
+      handleFile(file)
+    } catch (e) {
+      setError(e.message)
+      setShowSmiles(true)
+    }
+  }
 
   async function handleFile(file) {
     if (!file) return
     setLoading(true)
     setError(null)
     setConfidence(null)
+    setStages(null)
+    setShowStages(false)
     try {
       const result = await analyzeImage(file)
+      setStages(result.stages ?? null)
       if (result.smiles) {
         onChange(result.smiles)
         setConfidence(result.confidence ?? null)
+        // Auto-open the stage strip on a doubtful read so the user can compare
+        // the recognized structure against what the reader actually saw.
+        setShowStages(result.confidence === 'low')
         // Always reveal the editable SMILES when the read isn't confidently verified.
         setShowSmiles(result.confidence !== 'high')
       } else {
@@ -45,19 +123,21 @@ export default function MoleculeInput({ label, value, onChange }) {
       setLoading(false)
     }
   }
+  handleFileRef.current = handleFile
 
   const hint = isSmallHydrocarbon(value)
 
   return (
-    <div className="card mol-input-card">
+    <div className="card mol-input-card" onPaste={onCardPaste}>
       <div className="card-title" style={{ paddingBottom: 8 }}>{label}</div>
 
       {/* Structure display — clickable to trigger upload */}
       <div
         className={`mol-structure-area${value ? '' : ' empty'}`}
         style={{ height: 140 }}
+        tabIndex={0}
         onClick={() => !value && fileRef.current?.click()}
-        title={value ? undefined : 'Click to upload or capture image'}
+        title={value ? undefined : 'Click to upload, or paste an image (Ctrl+V)'}
       >
         {loading ? (
           <>
@@ -86,7 +166,8 @@ export default function MoleculeInput({ label, value, onChange }) {
         ) : (
           <>
             <UploadCloud className="upload-icon" size={30} strokeWidth={1.6} />
-            <span>Upload or capture image</span>
+            <span>Upload, capture, or paste image</span>
+            <span style={{ fontSize: 10, color: 'var(--subtle)' }}>Ctrl+V a screen snip works</span>
           </>
         )}
       </div>
@@ -111,18 +192,51 @@ export default function MoleculeInput({ label, value, onChange }) {
           </span>
         </label>
         <button
+          className="btn-secondary"
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
+          title="Paste an image from your clipboard"
+          onClick={pasteFromClipboard}
+          disabled={loading}
+        >
+          <ClipboardPaste size={14} />
+          Paste
+        </button>
+        <button
           className="btn-icon"
           title={showSmiles ? 'Hide SMILES' : 'Edit SMILES'}
           onClick={() => setShowSmiles(s => !s)}
         >
           {showSmiles ? <ChevronUp size={14} /> : <><Pencil size={13} /> SMILES</>}
         </button>
+        {stages && (
+          <button
+            className={`btn-icon${showStages ? ' active' : ''}`}
+            title="See what the structure reader saw at each preprocessing step"
+            onClick={() => setShowStages(s => !s)}
+          >
+            <Eye size={14} />
+          </button>
+        )}
         {value && (
-          <button className="btn-icon" title="Clear" onClick={() => { onChange(''); setShowSmiles(false); setConfidence(null) }}>
+          <button className="btn-icon" title="Clear" onClick={() => { onChange(''); setShowSmiles(false); setConfidence(null); setStages(null); setShowStages(false) }}>
             <X size={14} />
           </button>
         )}
       </div>
+
+      {/* Preprocessing stage strip — what the OSR reader actually saw */}
+      {showStages && stages && (
+        <div className="stage-strip">
+          {Object.entries(STAGE_LABELS)
+            .filter(([key]) => stages[key])
+            .map(([key, label]) => (
+              <figure key={key} className="stage-thumb">
+                <img src={`data:image/png;base64,${stages[key]}`} alt={label} loading="lazy" />
+                <figcaption>{label}</figcaption>
+              </figure>
+            ))}
+        </div>
+      )}
 
       {/* Editable SMILES — shown when toggled or after recognition */}
       {showSmiles && (

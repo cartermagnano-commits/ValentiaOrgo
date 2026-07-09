@@ -575,17 +575,25 @@ def _load_decimer():
     return _decimer_fn
 
 
-# Warm DECIMER at startup so the first user request doesn't pay the cold-start penalty.
+# Warm DECIMER in the background so the first user request doesn't pay the
+# cold-start penalty. Runs on _executor — the same single-worker pool that
+# serves /analyze — so the API binds its port immediately and any early image
+# request simply queues behind the warm-up instead of failing.
 # Non-fatal: without DECIMER the /analyze OSR path degrades to the vision-model
 # fallback, and every non-image feature still works.
-try:
-    _load_decimer()
-except Exception as _exc:
-    logger.warning(
-        "DECIMER unavailable (%s: %s) — image structure recognition will rely on "
-        "the vision-model fallback. Install with: pip install decimer",
-        type(_exc).__name__, _exc,
-    )
+def _warm_decimer() -> None:
+    try:
+        _load_decimer()
+        logger.info("DECIMER warm-load complete")
+    except Exception as _exc:
+        logger.warning(
+            "DECIMER unavailable (%s: %s) — image structure recognition will rely on "
+            "the vision-model fallback. Install with: pip install decimer",
+            type(_exc).__name__, _exc,
+        )
+
+
+_executor.submit(_warm_decimer)
 
 
 def _ollama_status() -> dict:
@@ -723,35 +731,39 @@ def _mol_svg(smiles: str, width: int, height: int) -> str:
     return drawer.GetDrawingText()
 
 
-def _verify_smiles(original_png: bytes, smiles: str) -> bool | None:
-    """Independent-reader agreement check.
-
-    Ask the vision model to read the structure from the original image on its
-    own, then canonically compare its SMILES with `smiles` (DECIMER's read).
-    Small local VLMs proved unreliable as *judges* ("do these two drawings
-    match?") — they blessed wrong reads and rejected correct ones. Exact
-    canonical agreement between two independent readers is deterministic and
-    almost never blesses a wrong structure.
-
-    True = both readers agree; False = vision read is valid but different;
-    None = no usable vision read (verification unavailable, never a hard gate).
-    Runs synchronously — call from a thread pool, never the event loop.
-    """
-    from rdkit import Chem
-    vision_read = _ollama_vision_smiles(original_png)
-    if not vision_read:
-        return None
-    ours = Chem.MolFromSmiles(smiles)
-    theirs = Chem.MolFromSmiles(vision_read)
-    if ours is None or theirs is None:
-        return None
-    agree = Chem.MolToSmiles(ours) == Chem.MolToSmiles(theirs)
-    logger.info("Verification: decimer=%r vision=%r agree=%s",
-                Chem.MolToSmiles(ours), Chem.MolToSmiles(theirs), agree)
-    return agree
-
-
 # ── Image processing (runs in thread pool) ────────────────────────────────────
+
+def _is_clean_digital(img: np.ndarray) -> bool:
+    """Detect an already-clean digital depiction (screenshot, PDF render,
+    ChemDraw export). These are bimodal — mostly pure-white background with
+    crisp dark ink and almost no midtones — whereas phone photos are full of
+    midtones from shadows, paper texture, and uneven lighting.
+
+    For clean digital images the photo-repair stages (perspective warp,
+    deskew, NLM denoise) are pure downside: slow (NLM takes seconds) and able
+    to warp or blur a depiction that was already perfect.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    white = float(np.mean(gray > 235))
+    dark = float(np.mean(gray < 90))
+    midtone = 1.0 - white - dark
+    return white > 0.60 and dark < 0.25 and midtone < 0.10
+
+
+def _decimer_read(arr: np.ndarray) -> str | None:
+    """Run DECIMER on an image array; return canonical SMILES or None."""
+    from rdkit import Chem
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = tmp.name
+        cv2.imwrite(tmp_path, arr)
+        raw = _load_decimer()(tmp_path)
+        mol = Chem.MolFromSmiles(raw) if raw else None
+        return Chem.MolToSmiles(mol) if mol else None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 def _process(raw_bytes: bytes) -> dict:
     try:
@@ -770,8 +782,14 @@ def _process(raw_bytes: bytes) -> dict:
     stages: dict[str, str | None] = {"original": _to_b64(img)}
     current = img.copy()
 
-    for name, fn in [("perspective", perspective_correct), ("deskew", deskew),
-                     ("denoise", denoise), ("binarize", normalize_binarize)]:
+    # Clean digital depictions (screenshots, PDF renders) skip the photo-repair
+    # stages — they're slow and can only degrade an already-flat, noise-free
+    # image. Photos get the full pipeline.
+    digital = _is_clean_digital(img)
+    photo_stages = [] if digital else [
+        ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
+    ]
+    for name, fn in photo_stages + [("binarize", normalize_binarize)]:
         try:
             result = fn(current)
             if result is not None and isinstance(result, np.ndarray):
@@ -784,39 +802,63 @@ def _process(raw_bytes: bytes) -> dict:
 
     stages["final"] = _to_b64(current)
 
-    smiles: str | None = None
-    valid = False
+    # ── Multi-candidate OSR ───────────────────────────────────────────────
+    # DECIMER reads BOTH the original and the binarized image: binarization
+    # rescues badly-lit photos but can destroy thin bonds in clean depictions,
+    # so neither rendition wins universally. The vision model reads the
+    # original independently and serves as tiebreaker + verifier. All
+    # comparisons are on canonical SMILES. Small local VLMs proved unreliable
+    # as *judges* ("do these two drawings match?") — they blessed wrong reads
+    # and rejected correct ones — but exact canonical agreement between
+    # independent readers almost never blesses a wrong structure.
     error: str | None = None
-    tmp_path: str | None = None
+    bin_read: str | None = None
+    orig_read: str | None = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp_path = tmp.name
-        cv2.imwrite(tmp_path, current)
-        smiles = _load_decimer()(tmp_path)
-        valid = _is_valid_smiles(smiles)
+        # For clean digital images DECIMER reads the ORIGINAL first — that's
+        # closest to its training distribution — and the binarized rendition
+        # only as a fallback. Photos get both reads for the agreement signal.
+        if digital:
+            orig_read = _decimer_read(img)
+            if not orig_read:
+                bin_read = _decimer_read(current)
+        else:
+            bin_read = _decimer_read(current)
+            orig_read = _decimer_read(img)
     except Exception as exc:
         error = str(exc)
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
-    if not valid:
-        _, buf = cv2.imencode(".png", current)
-        fallback = _ollama_vision_smiles(buf.tobytes())
-        if fallback:
-            smiles = fallback
-            valid = True
-            error = None
+    _, orig_buf = cv2.imencode(".png", img)
+    vision_read = _ollama_vision_smiles(orig_buf.tobytes())  # canonical or None
 
-    # Verification: an independent vision-model read of the original photo,
-    # canonically compared with DECIMER's read. Agreement → high confidence;
-    # disagreement → keep DECIMER's read (the specialist) but flag low
-    # confidence. Best-effort — if the vision model is unavailable, confidence
-    # is "unverified" and we still return the SMILES.
+    smiles: str | None = None
+    if orig_read and bin_read and orig_read != bin_read:
+        # The two DECIMER reads disagree — let the vision reader break the tie;
+        # with no tiebreak available, trust the rendition suited to the input
+        # (original for digital images, binarized for photos).
+        if vision_read == orig_read:
+            smiles = orig_read
+        elif vision_read == bin_read:
+            smiles = bin_read
+        else:
+            smiles = orig_read if digital else bin_read
+        logger.info("OSR disagreement: orig=%r bin=%r vision=%r → chose %r",
+                    orig_read, bin_read, vision_read, smiles)
+    else:
+        smiles = orig_read or bin_read or vision_read
+
+    valid = smiles is not None
+    if valid:
+        error = None
+
+    # Verification: True only when the vision model — an independent reader —
+    # agrees with the chosen SMILES. When the vision model itself was the only
+    # successful reader there is no independent confirmation, so verified stays
+    # None. Best-effort: never a hard gate.
     verified: bool | None = None
-    if valid and smiles:
-        _, orig_buf = cv2.imencode(".png", img)   # original (pre-binarization) image
-        verified = _verify_smiles(orig_buf.tobytes(), smiles)
+    if smiles and vision_read and (orig_read or bin_read):
+        verified = vision_read == smiles
+        logger.info("Verification: chosen=%r vision=%r agree=%s", smiles, vision_read, verified)
 
     if verified is True:
         confidence = "high"
@@ -832,6 +874,12 @@ def _process(raw_bytes: bytes) -> dict:
         "confidence": confidence,
         "error": error,
         "stages": stages,
+        "reads": {
+            "decimer_original": orig_read,
+            "decimer_binarized": bin_read,
+            "vision": vision_read,
+            "clean_digital": digital,
+        },
     }
 
 

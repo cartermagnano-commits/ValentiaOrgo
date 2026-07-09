@@ -43,6 +43,9 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
 
       if (mode === 'signup' && !result.data.session) {
         setMessage('Account created. Check your email to confirm your address, then log in.')
+      } else if (mode === 'signup') {
+        // Brand-new account → straight to engine onboarding before the dashboard.
+        router.replace('/settings?onboarding=1')
       } else {
         router.replace('/dashboard')
       }
