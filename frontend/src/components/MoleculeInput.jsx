@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import StructureView from './StructureView'
-import { analyzeImage } from '../api'
+import { analyzeImage, verifyAnalysis } from '../api'
 import { imageFileFromClipboard, pasteTargetIsEditable, readImageFromClipboard } from '../../lib/clipboard'
 import { Camera, ChevronUp, ClipboardPaste, Eye, Pencil, UploadCloud, X, ShieldCheck, AlertTriangle } from 'lucide-react'
 
@@ -47,10 +47,13 @@ export default function MoleculeInput({ label, value, onChange }) {
   const [loading, setLoading] = useState(false)
   const [error, setError]   = useState(null)
   const [showSmiles, setShowSmiles] = useState(false)
-  const [confidence, setConfidence] = useState(null)  // 'high' | 'low' | 'unverified' | null
+  const [confidence, setConfidence] = useState(null)  // 'high' | 'low' | 'unverified' | 'verifying' | null
   const [stages, setStages] = useState(null)          // { original, ..., binarize } base64 PNGs
   const [showStages, setShowStages] = useState(false)
   const fileRef = useRef(null)
+  // Bumped on every new upload / clear / manual edit so a background
+  // verification that lands late can't overwrite fresher state.
+  const verifySeq = useRef(0)
 
   // Register with the page-level paste router (see top of file). Refs keep the
   // registry entry stable while always seeing the latest value/handler.
@@ -94,8 +97,18 @@ export default function MoleculeInput({ label, value, onChange }) {
     }
   }
 
+  function applyVerdict(conf) {
+    setConfidence(conf ?? null)
+    // Auto-open the stage strip on a doubtful read so the user can compare
+    // the recognized structure against what the reader actually saw.
+    setShowStages(conf === 'low')
+    // Always reveal the editable SMILES when the read isn't confidently verified.
+    setShowSmiles(conf !== 'high' && conf !== 'verifying')
+  }
+
   async function handleFile(file) {
     if (!file) return
+    const seq = ++verifySeq.current
     setLoading(true)
     setError(null)
     setConfidence(null)
@@ -106,12 +119,15 @@ export default function MoleculeInput({ label, value, onChange }) {
       setStages(result.stages ?? null)
       if (result.smiles) {
         onChange(result.smiles)
-        setConfidence(result.confidence ?? null)
-        // Auto-open the stage strip on a doubtful read so the user can compare
-        // the recognized structure against what the reader actually saw.
-        setShowStages(result.confidence === 'low')
-        // Always reveal the editable SMILES when the read isn't confidently verified.
-        setShowSmiles(result.confidence !== 'high')
+        applyVerdict(result.confidence)
+        // Fast path: the structure is already on screen; the vision check is
+        // still running server-side. Collect it in the background and update
+        // the badge when it lands — the structure itself never changes.
+        if (result.verify_token) {
+          verifyAnalysis(result.verify_token)
+            .then(v => { if (verifySeq.current === seq) applyVerdict(v.confidence) })
+            .catch(() => { if (verifySeq.current === seq) setConfidence('unverified') })
+        }
       } else {
         setError('Could not recognize a structure. Please enter SMILES manually.')
         setShowSmiles(true)
@@ -155,6 +171,11 @@ export default function MoleculeInput({ label, value, onChange }) {
             {confidence === 'low' && (
               <span className="conf-badge warn" title="Recognition may be wrong — please check">
                 <AlertTriangle size={12} /> Check structure
+              </span>
+            )}
+            {confidence === 'verifying' && (
+              <span className="conf-badge muted" title="Structure recognized — double-checking against your image in the background">
+                <ShieldCheck size={12} /> Verifying…
               </span>
             )}
             {confidence === 'unverified' && (
@@ -218,7 +239,7 @@ export default function MoleculeInput({ label, value, onChange }) {
           </button>
         )}
         {value && (
-          <button className="btn-icon" title="Clear" onClick={() => { onChange(''); setShowSmiles(false); setConfidence(null); setStages(null); setShowStages(false) }}>
+          <button className="btn-icon" title="Clear" onClick={() => { verifySeq.current++; onChange(''); setShowSmiles(false); setConfidence(null); setStages(null); setShowStages(false) }}>
             <X size={14} />
           </button>
         )}
@@ -253,7 +274,7 @@ export default function MoleculeInput({ label, value, onChange }) {
             rows={2}
             value={value}
             placeholder="e.g. CC(=O)CCBr"
-            onChange={e => { onChange(e.target.value); setConfidence(null) }}
+            onChange={e => { verifySeq.current++; onChange(e.target.value); setConfidence(null) }}
             spellCheck={false}
           />
           {error && (

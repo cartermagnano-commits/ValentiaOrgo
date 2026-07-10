@@ -20,10 +20,17 @@ const apiPaths = [
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   async rewrites() {
-    return apiPaths.map(path => ({
-      source: `/${path}`,
-      destination: `${apiBase}/${path}`,
-    }))
+    return [
+      ...apiPaths.map(path => ({
+        source: `/${path}`,
+        destination: `${apiBase}/${path}`,
+      })),
+      // Deferred image-recognition verification (dynamic token segment)
+      {
+        source: '/analyze/verify/:token',
+        destination: `${apiBase}/analyze/verify/:token`,
+      },
+    ]
   },
 }
 

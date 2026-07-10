@@ -2,7 +2,9 @@
 app.py — Orgo AI FastAPI backend.
 
 Endpoints:
-  POST /analyze         image → SMILES + stage images (base64)
+  POST /analyze         image → SMILES + stage images (base64); fast path returns
+                        confidence "verifying" + verify_token for deferred check
+  GET  /analyze/verify/{token}  collect the deferred vision verification
   POST /predict         substrate + reagent → product
   GET  /structure       SMILES → SVG (for UI rendering)
   POST /pathways        substrate → branching graph over REAGENT_LIST
@@ -21,6 +23,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -105,7 +108,6 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
     """
     import re
     import httpx
-    from rdkit import Chem
 
     model = _ollama_vision_model()
     if not model:
@@ -120,6 +122,9 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt, "images": [b64]}],
                 "stream": False,
+                # SMILES output is short — capping decode length stops the
+                # occasional VLM ramble from wasting tens of seconds.
+                "options": {"temperature": 0, "num_predict": 256},
             },
             # Generous: the first call after idle has to load the model (~6 GB)
             timeout=300.0,
@@ -131,16 +136,14 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
         logger.warning("Ollama vision error (%s): %s", type(exc).__name__, exc)
         return None
 
-    mol = Chem.MolFromSmiles(text)
-    if mol:
-        result = Chem.MolToSmiles(mol)
+    result = _canonical_smiles(text)
+    if result:
         logger.info("Ollama → valid SMILES (full response): %r", result)
         return result
 
     for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
-        mol = Chem.MolFromSmiles(candidate)
-        if mol:
-            result = Chem.MolToSmiles(mol)
+        result = _canonical_smiles(candidate)
+        if result:
             logger.info("Ollama → valid SMILES (extracted token): %r", result)
             return result
 
@@ -450,6 +453,27 @@ def _guard_messages(messages) -> None:
 _decimer_fn = None
 _executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER + chemistry engine (not thread-safe)
 _svg_pool  = ThreadPoolExecutor(max_workers=4)   # RDKit SVG rendering (thread-safe, fast)
+_vision_pool = ThreadPoolExecutor(max_workers=2) # Ollama vision HTTP calls — must not
+                                                 # share _executor or they'd serialize
+                                                 # behind DECIMER instead of running
+                                                 # concurrently with it
+
+# Deferred verification: /analyze returns the DECIMER read immediately and hands
+# the client a token; the in-flight vision read is parked here until the client
+# collects it via GET /analyze/verify/{token}. Entries the client never claims
+# (tab closed, etc.) are purged by TTL on the next insert.
+_PENDING_VERIFY: dict[str, dict] = {}
+_PENDING_VERIFY_TTL = 600.0  # seconds
+
+
+def _store_pending_verify(future, smiles: str) -> str:
+    now = time.monotonic()
+    for stale in [t for t, e in _PENDING_VERIFY.items()
+                  if now - e["created"] > _PENDING_VERIFY_TTL]:
+        _PENDING_VERIFY.pop(stale, None)
+    token = uuid.uuid4().hex
+    _PENDING_VERIFY[token] = {"future": future, "smiles": smiles, "created": now}
+    return token
 MAX_DIM = 1024
 
 # Load templates once at startup — avoids re-parsing JSON per request
@@ -596,6 +620,45 @@ def _warm_decimer() -> None:
 _executor.submit(_warm_decimer)
 
 
+# ── MolScribe — second local OSR reader ──────────────────────────────────────
+# A different architecture from DECIMER (Swin transformer, trained with
+# explicit-H and hand-drawn augmentation), so its errors are largely
+# uncorrelated: exact canonical agreement between the two gives an instant
+# "verified" without waiting on the (slow) vision model. Needs the vendored
+# OpenNMT subset in _vendor/ — see _vendor/onmt/__init__.py for why.
+_molscribe_model = None
+
+
+def _load_molscribe():
+    global _molscribe_model
+    if _molscribe_model is None:
+        import sys
+        vendor = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
+        if vendor not in sys.path:
+            sys.path.insert(0, vendor)
+        import torch
+        from huggingface_hub import hf_hub_download
+        from molscribe import MolScribe as _MolScribe
+        ckpt = hf_hub_download("yujieq/MolScribe", "swin_base_char_aux_1m.pth")
+        _molscribe_model = _MolScribe(ckpt, device=torch.device("cpu"))
+    return _molscribe_model
+
+
+def _warm_molscribe() -> None:
+    try:
+        _load_molscribe()
+        logger.info("MolScribe warm-load complete")
+    except Exception as exc:
+        logger.warning(
+            "MolScribe unavailable (%s: %s) — reader-agreement verification is off; "
+            "/analyze falls back to vision-model verification alone.",
+            type(exc).__name__, exc,
+        )
+
+
+_executor.submit(_warm_molscribe)
+
+
 def _ollama_status() -> dict:
     """Probe the local Ollama server. Returns reachability + available models.
 
@@ -661,6 +724,7 @@ async def health():
     return {
         "status": "ok",
         "decimer_ready": _decimer_fn is not None,
+        "molscribe_ready": _molscribe_model is not None,
         "ollama_running": ollama["running"],
         "hosted_key_configured": bool(
             os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -750,20 +814,55 @@ def _is_clean_digital(img: np.ndarray) -> bool:
     return white > 0.60 and dark < 0.25 and midtone < 0.10
 
 
+def _canonical_smiles(raw: str | None) -> str | None:
+    """
+    Validate + canonicalize reader output; None if unparseable.
+
+    Explicitly drawn hydrogens are collapsed (RemoveHs): the same molecule
+    drawn with and without spelled-out H's must canonicalize to the SAME
+    string, because reader agreement/verification compares these strings —
+    and the displayed SMILES shouldn't be cluttered with [H] atoms either.
+    """
+    if not raw:
+        return None
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(raw)
+    if mol is None:
+        return None
+    try:
+        mol = Chem.RemoveHs(mol)
+    except Exception:
+        pass  # exotic H's (isotopes, bridging) can refuse removal — keep as-is
+    return Chem.MolToSmiles(mol)
+
+
 def _decimer_read(arr: np.ndarray) -> str | None:
     """Run DECIMER on an image array; return canonical SMILES or None."""
-    from rdkit import Chem
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp_path = tmp.name
         cv2.imwrite(tmp_path, arr)
-        raw = _load_decimer()(tmp_path)
-        mol = Chem.MolFromSmiles(raw) if raw else None
-        return Chem.MolToSmiles(mol) if mol else None
+        return _canonical_smiles(_load_decimer()(tmp_path))
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+def _molscribe_read(arr: np.ndarray) -> str | None:
+    """Run MolScribe on a BGR image array; return canonical SMILES or None."""
+    try:
+        model = _load_molscribe()
+    except Exception as exc:
+        logger.warning("MolScribe load failed (%s): %s", type(exc).__name__, exc)
+        return None
+    try:
+        rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+        out = model.predict_image(rgb)
+        return _canonical_smiles(out.get("smiles"))
+    except Exception as exc:
+        logger.warning("MolScribe read failed (%s): %s", type(exc).__name__, exc)
+        return None
+
 
 def _process(raw_bytes: bytes) -> dict:
     try:
@@ -814,6 +913,13 @@ def _process(raw_bytes: bytes) -> dict:
     error: str | None = None
     bin_read: str | None = None
     orig_read: str | None = None
+
+    # Kick off the vision read FIRST, on its own pool — it's an HTTP call to
+    # Ollama, so it runs concurrently with the DECIMER reads below instead of
+    # after them. Total latency becomes max(DECIMER, vision), not the sum.
+    _, orig_buf = cv2.imencode(".png", img)
+    vision_future = _vision_pool.submit(_ollama_vision_smiles, orig_buf.tobytes())
+
     try:
         # For clean digital images DECIMER reads the ORIGINAL first — that's
         # closest to its training distribution — and the binarized rendition
@@ -828,39 +934,89 @@ def _process(raw_bytes: bytes) -> dict:
     except Exception as exc:
         error = str(exc)
 
-    _, orig_buf = cv2.imencode(".png", img)
-    vision_read = _ollama_vision_smiles(orig_buf.tobytes())  # canonical or None
+    # Second local reader — different architecture, largely uncorrelated errors.
+    ms_read = _molscribe_read(img)
+
+    vision_awaited = False
+
+    def _await_vision() -> str | None:
+        nonlocal vision_awaited
+        vision_awaited = True
+        try:
+            return vision_future.result(timeout=310)
+        except Exception as exc:
+            logger.warning("Vision read failed (%s): %s", type(exc).__name__, exc)
+            return None
 
     smiles: str | None = None
+    vision_read: str | None = None
+    verified: bool | None = None
+    verify_token: str | None = None
+
+    # Resolve DECIMER's two renditions into one candidate. When they disagree
+    # (photos where binarization changed the read), MolScribe breaks the tie
+    # for free; the vision model is awaited only if MolScribe can't decide.
     if orig_read and bin_read and orig_read != bin_read:
-        # The two DECIMER reads disagree — let the vision reader break the tie;
-        # with no tiebreak available, trust the rendition suited to the input
-        # (original for digital images, binarized for photos).
-        if vision_read == orig_read:
-            smiles = orig_read
-        elif vision_read == bin_read:
-            smiles = bin_read
+        if ms_read in (orig_read, bin_read):
+            decimer_read = ms_read
         else:
-            smiles = orig_read if digital else bin_read
-        logger.info("OSR disagreement: orig=%r bin=%r vision=%r → chose %r",
-                    orig_read, bin_read, vision_read, smiles)
+            vision_read = _await_vision()
+            if vision_read == orig_read:
+                decimer_read = orig_read
+            elif vision_read == bin_read:
+                decimer_read = bin_read
+            else:
+                decimer_read = orig_read if digital else bin_read
+        logger.info("DECIMER disagreement: orig=%r bin=%r molscribe=%r vision=%r → %r",
+                    orig_read, bin_read, ms_read, vision_read, decimer_read)
     else:
-        smiles = orig_read or bin_read or vision_read
+        decimer_read = orig_read or bin_read
+
+    if decimer_read and ms_read == decimer_read:
+        # Two independent local readers agree — instant "verified", no wait
+        # on the vision model at all (its in-flight result is simply unused).
+        smiles = decimer_read
+        verified = True
+        logger.info("Reader agreement: decimer=%r == molscribe → verified", smiles)
+    elif decimer_read and ms_read:
+        # The local readers disagree — the structure itself is in question, so
+        # block on the vision model to arbitrate (an early return here could
+        # show a structure that later flips). Two-of-three agreement verifies;
+        # no agreement keeps DECIMER's pick, flagged low.
+        if vision_read is None and not vision_awaited:
+            vision_read = _await_vision()
+        if vision_read in (decimer_read, ms_read):
+            smiles = vision_read
+            verified = True
+        else:
+            smiles = decimer_read
+            verified = False
+        logger.info("Reader disagreement: decimer=%r molscribe=%r vision=%r → chose %r (verified=%s)",
+                    decimer_read, ms_read, vision_read, smiles, verified)
+    elif decimer_read or ms_read:
+        # Only one local reader succeeded — return its structure immediately;
+        # the in-flight vision read becomes a deferred verification the client
+        # collects via GET /analyze/verify/{token}. It can only change the
+        # badge, never the structure. (If vision was already awaited above,
+        # settle the verdict now instead of issuing a token.)
+        smiles = decimer_read or ms_read
+        if vision_awaited:
+            verified = (vision_read == smiles) if vision_read else None
+        else:
+            verify_token = _store_pending_verify(vision_future, smiles)
+    else:
+        # No local reader succeeded — the vision read is the structure source
+        # itself, so there is no independent confirmation (verified stays None).
+        vision_read = _await_vision()
+        smiles = vision_read
 
     valid = smiles is not None
     if valid:
         error = None
 
-    # Verification: True only when the vision model — an independent reader —
-    # agrees with the chosen SMILES. When the vision model itself was the only
-    # successful reader there is no independent confirmation, so verified stays
-    # None. Best-effort: never a hard gate.
-    verified: bool | None = None
-    if smiles and vision_read and (orig_read or bin_read):
-        verified = vision_read == smiles
-        logger.info("Verification: chosen=%r vision=%r agree=%s", smiles, vision_read, verified)
-
-    if verified is True:
+    if verify_token:
+        confidence = "verifying"
+    elif verified is True:
         confidence = "high"
     elif verified is False:
         confidence = "low"
@@ -872,11 +1028,13 @@ def _process(raw_bytes: bytes) -> dict:
         "valid": valid,
         "verified": verified,
         "confidence": confidence,
+        "verify_token": verify_token,
         "error": error,
         "stages": stages,
         "reads": {
             "decimer_original": orig_read,
             "decimer_binarized": bin_read,
+            "molscribe": ms_read,
             "vision": vision_read,
             "clean_digital": digital,
         },
@@ -949,6 +1107,36 @@ async def analyze(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Processing failed: {exc}") from exc
     return result
+
+
+@app.get("/analyze/verify/{token}")
+async def analyze_verify(token: str):
+    """
+    Collect the deferred vision verification for a prior /analyze response.
+    Blocks until the in-flight vision read completes (or fails). One-shot:
+    the token is consumed on first retrieval.
+    """
+    entry = _PENDING_VERIFY.pop(token, None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired verification token")
+    try:
+        vision_read = await asyncio.wait_for(
+            asyncio.wrap_future(entry["future"]), timeout=330.0
+        )
+    except Exception as exc:
+        logger.warning("Deferred verification failed (%s): %s", type(exc).__name__, exc)
+        vision_read = None
+
+    smiles = entry["smiles"]
+    verified: bool | None = (vision_read == smiles) if vision_read else None
+    if verified is True:
+        confidence = "high"
+    elif verified is False:
+        confidence = "low"
+    else:
+        confidence = "unverified"
+    logger.info("Deferred verification: chosen=%r vision=%r → %s", smiles, vision_read, confidence)
+    return {"smiles": smiles, "verified": verified, "confidence": confidence, "vision": vision_read}
 
 
 class PredictRequest(BaseModel):

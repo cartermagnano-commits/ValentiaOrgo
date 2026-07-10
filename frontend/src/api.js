@@ -39,6 +39,18 @@ export async function analyzeImage(file) {
   return res.json()
 }
 
+// Collect the deferred vision verification for an /analyze response that
+// returned confidence "verifying". Blocks server-side until the vision read
+// finishes; the token is single-use.
+export async function verifyAnalysis(token) {
+  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || 'Verification failed')
+  }
+  return res.json()
+}
+
 export async function reactDirect(substrateSMILES, reagentSMILES) {
   return post('/react', { substrate_smiles: substrateSMILES, reagent_smiles: reagentSMILES })
 }
