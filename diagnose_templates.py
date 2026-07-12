@@ -8,10 +8,15 @@ Usage:
 
 Reports:
   1. Load summary: total / enabled / disabled / parse failures
-  2. Per-template firing matrix across sample substrates
-  3. Dead templates (never fire on any sample)
-  4. Templates with empty or missing condition metadata
-  5. Suggested new templates for common Orgo 1 reactions (disabled, for your review)
+  2. Condition wiring: template condition tags vs the REAGENT_LIST catalog
+  3. Per-template firing matrix across sample substrates (via the REAL engine —
+     TemplateEngine.run_for_reagent over every reagent in reagents.py, so
+     eligibility gating and chaining behave exactly as in the app)
+  4. Dead templates (never fire on any sample substrate under any reagent)
+
+A template listed as dead is NOT necessarily broken — it may just need a
+substrate class missing from the sample set. Add one via --substrates before
+concluding anything.
 """
 
 import argparse
@@ -24,41 +29,51 @@ from pathlib import Path
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from reagents import REAGENT_LIST
+
 DEFAULT_TEMPLATE_FILE = Path(__file__).parent / "reaction_templates.json"
 
-# Sample substrates covering common functional groups
+# Sample substrates covering the functional groups the template set targets.
+# Extend this list when adding templates for a new substrate class.
 DEFAULT_SUBSTRATES = [
-    "CC(=O)CCBr",   # 4-bromobutan-2-one (ketone + alkyl bromide)
-    "CCBr",          # ethyl bromide
-    "CCI",           # ethyl iodide
-    "CCCl",          # propyl chloride
-    "BrCCBr",        # 1,2-dibromoethane
-    "CC(=O)C",      # acetone (no halide)
-    "CCCCC(=O)C",   # 2-heptanone (ketone, longer chain)
-    "CC(=O)CBr",    # 1-bromoacetone (alpha-halo ketone)
+    "CC(=O)CCBr",       # 4-bromobutan-2-one (ketone + alkyl bromide)
+    "CCBr",             # ethyl bromide
+    "CCC(C)Br",         # 2-bromobutane (secondary halide — E2/SN2)
+    "CCI",              # ethyl iodide
+    "CCCCl",            # propyl chloride
+    "CC(=O)C",          # acetone
+    "CC(=O)CC",         # butanone (unsymmetric ketone)
+    "CCC=O",            # propanal (aldehyde)
+    "C=O",              # formaldehyde
+    "CCO",              # ethanol
+    "CC(C)(C)O",        # tert-butanol
+    "CC#C",             # propyne (terminal alkyne)
+    "CC=CC",            # 2-butene (internal alkene)
+    "C=C(C)C",          # isobutylene (1,1-disubstituted alkene)
+    "C=CCC",            # 1-butene (monosubstituted alkene)
+    "CC(=O)OCC",        # ethyl acetate (ester)
+    "O=C1CCCO1",        # gamma-butyrolactone (lactone)
+    "CC(=O)O",          # acetic acid
+    "CC[NH3+]",         # ethylammonium (alkylation intermediate)
+    "CC(C)=CC",         # 2-methyl-2-butene (trisubstituted alkene)
+    # Intermediates & organometallics — these feed the coupling templates,
+    # which pair molecules from the synthesis pool rather than reagents:
+    "CC[Mg]Br",         # ethylmagnesium bromide (Grignard)
+    "[C-]#CC",          # propynide (acetylide anion)
+    "CC[O-]",           # ethoxide
+    "C=C(C)[O-]",       # acetone enolate
 ]
-
-# Minimal representative fragment per condition tag (for firing tests)
-CONDITION_REAGENT_FRAGMENTS = {
-    "kinetic_base":      "CC(C)[N-]C(C)C",
-    "strong_base":       "[OH-]",
-    "alkoxide":          "CC[O-]",
-    "hydroxide":         "[OH-]",
-    "protic":            "O",
-    "halide_nucleophile": "[I-]",
-    "amine_nucleophile": "N",
-}
 
 DIVIDER = "-" * 70
 
 
 def load_and_parse(template_file: Path):
-    """Return (all_entries, loaded_templates, failures)."""
-    from rdkit import Chem, RDLogger
+    """Return (all_entries, parse_failures) — a parse check independent of the
+    engine, so a bad SMARTS is reported by id instead of silently skipped."""
+    from rdkit import RDLogger
     from rdkit.Chem import AllChem
 
     RDLogger.logger().setLevel(RDLogger.CRITICAL)
-
     try:
         data = json.loads(template_file.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -66,8 +81,7 @@ def load_and_parse(template_file: Path):
         sys.exit(1)
 
     all_entries = data.get("templates", [])
-    loaded, failures = [], []
-
+    failures = []
     for entry in all_entries:
         if not entry.get("enabled", True):
             continue
@@ -77,120 +91,10 @@ def load_and_parse(template_file: Path):
             if rxn is None:
                 raise ValueError("ReactionFromSmarts returned None")
             rxn.Initialize()
-            loaded.append({
-                "id": tid,
-                "name": entry.get("name", tid),
-                "smarts": entry["smarts"],
-                "conditions": entry.get("conditions", []),
-                "coupling": entry.get("coupling", False),
-                "rxn": rxn,
-                "n_reactants": rxn.GetNumReactantTemplates(),
-            })
         except Exception as exc:
             failures.append({"id": tid, "reason": str(exc)})
-
     RDLogger.logger().setLevel(RDLogger.WARNING)
-    return all_entries, loaded, failures
-
-
-def test_template_fires(template: dict, substrate_smi: str) -> bool:
-    """Try each condition-compatible reagent fragment; return True if any product forms."""
-    from rdkit import Chem
-
-    sub_mol = Chem.MolFromSmiles(substrate_smi)
-    if sub_mol is None:
-        return False
-
-    rxn = template["rxn"]
-    n = template["n_reactants"]
-    conds = template["conditions"]
-
-    reagent_smiles_to_try = []
-    if conds:
-        for cond in conds:
-            frag_smi = CONDITION_REAGENT_FRAGMENTS.get(cond)
-            if frag_smi:
-                reagent_smiles_to_try.append(frag_smi)
-    else:
-        reagent_smiles_to_try = ["O"]  # fallback for unconditioned templates
-
-    for rea_smi in reagent_smiles_to_try:
-        rea_mol = Chem.MolFromSmiles(rea_smi)
-        if rea_mol is None:
-            continue
-
-        try:
-            if n == 1:
-                products = rxn.RunReactants((sub_mol,))
-            else:
-                products = rxn.RunReactants((sub_mol, rea_mol))
-        except Exception:
-            continue
-
-        if products:
-            return True
-
-    return False
-
-
-def suggest_new_templates() -> list[dict]:
-    """Return a list of suggested Orgo 1 templates not in the current set."""
-    return [
-        {
-            "id": "nabh4_carbonyl_reduction",
-            "name": "NaBH4 carbonyl reduction (ketone/aldehyde -> alcohol)",
-            "smarts": "[CX3:1](=[OX1:2])>>[CX4:1][OH]",
-            "conditions": ["hydride_reductant"],
-            "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Nucleophilic hydride delivery to carbonyl. Requires new condition tag 'hydride_reductant' and NaBH4 reagent entry.",
-            "enabled": False,
-            "review_notes": "1-reactant template. Add NaBH4 to REAGENT_LIST with conditions=['hydride_reductant']. Verify SMARTS handles both ketones and aldehydes.",
-        },
-        {
-            "id": "hbr_markovnikov_alkene",
-            "name": "HBr addition to alkene (Markovnikov)",
-            "smarts": "[CX3:1]=[CX3:2].[Br-]>>[CX4:1][Br].[CX4:2]",
-            "conditions": ["protic_acid"],
-            "provenance": "Markovnikov, V. Ann. Chem. 1870. Requires new condition tag 'protic_acid' and HBr reagent entry. SMARTS is approximate — regiochemistry not enforced by template alone.",
-            "enabled": False,
-            "review_notes": "Regioselectivity (Markovnikov vs anti-Markovnikov) cannot be enforced by SMARTS alone without atom mapping to specify which C gets Br. Consider two separate templates for each regioisomer.",
-        },
-        {
-            "id": "hcl_markovnikov_alkene",
-            "name": "HCl addition to alkene (Markovnikov)",
-            "smarts": "[CX3:1]=[CX3:2].[Cl-]>>[CX4:1][Cl].[CX4:2]",
-            "conditions": ["protic_acid"],
-            "provenance": "Markovnikov addition with HCl. Same limitations as HBr template above.",
-            "enabled": False,
-            "review_notes": "Same caveats as hbr_markovnikov_alkene.",
-        },
-        {
-            "id": "aldol_condensation",
-            "name": "Aldol condensation (enolate + aldehyde)",
-            "smarts": "[CX3:1]([OX2-:2])=[CX3:3].[CX3H:4]=[OX1:5]>>[CX4:3][CX4:4]([OH:5])[CX3:1](=[OX1:2])",
-            "conditions": ["kinetic_base"],
-            "provenance": "Aldol condensation: enolate attacks aldehyde carbonyl. March, J. 'Advanced Organic Chemistry'. Product contains beta-hydroxy carbonyl.",
-            "enabled": False,
-            "review_notes": "Complex 2-reactant template. Test carefully — the enolate SMARTS [CX3]([OX2-])=[CX3] requires the enolate to already be formed (so this fires in step 2 of a kinetic_base pathway). Verify SMARTS against RDKit before enabling.",
-        },
-        {
-            "id": "esterification",
-            "name": "Fischer esterification (carboxylic acid + alcohol)",
-            "smarts": "[CX3:1](=[OX1:2])[OX2H:3].[OX2H:4][CX4:5]>>[CX3:1](=[OX1:2])[OX2:3][CX4:5].[OH2]",
-            "conditions": ["protic_acid"],
-            "provenance": "Fischer, E. and Speier, A. Ber. Dtsch. Chem. Ges. 1895. Acid-catalyzed esterification; equilibrium-driven. Requires 'protic_acid' condition and H2SO4/HCl reagent entry.",
-            "enabled": False,
-            "review_notes": "Add H2SO4 (or HCl) to REAGENT_LIST with conditions=['protic_acid']. The template captures the net transformation; mechanism (4 steps) is not shown.",
-        },
-        {
-            "id": "saponification",
-            "name": "Saponification (ester hydrolysis under base)",
-            "smarts": "[CX3:1](=[OX1:2])[OX2:3][CX4:4].[OH-]>>[CX3:1](=[OX1:2])[OH].[OX2-:3][CX4:4]",
-            "conditions": ["hydroxide"],
-            "provenance": "Base-mediated irreversible ester hydrolysis (saponification). March, J. 'Advanced Organic Chemistry'. Hydroxide conditions already defined.",
-            "enabled": False,
-            "review_notes": "Test SMARTS against methyl acetate (CC(=O)OC) + NaOH. Should give acetic acid + methoxide. Verify charge handling on product alkoxide.",
-        },
-    ]
+    return all_entries, failures
 
 
 def main():
@@ -202,85 +106,94 @@ def main():
     template_file = Path(args.file)
     substrates = [s.strip() for s in args.substrates.split(",") if s.strip()]
 
+    from reactivity_engine import TemplateEngine
+
     print(f"\nOrgo AI Template Diagnostic")
-    print(f"Template file : {template_file}")
+    print(f"Template file  : {template_file}")
     print(f"Test substrates: {len(substrates)}")
+    print(f"Reagents       : {len(REAGENT_LIST)} (from reagents.py)")
     print(DIVIDER)
 
     # ── 1. Load ───────────────────────────────────────────────────────────────
-    all_entries, loaded, failures = load_and_parse(template_file)
+    all_entries, failures = load_and_parse(template_file)
+    engine = TemplateEngine(template_file)
 
-    total     = len(all_entries)
-    enabled   = sum(1 for e in all_entries if e.get("enabled", True))
-    disabled  = total - enabled
+    total    = len(all_entries)
+    enabled  = sum(1 for e in all_entries if e.get("enabled", True))
+    loaded   = len(engine.templates) + len(engine.coupling_templates)
 
     print(f"\nLOAD SUMMARY")
     print(f"  Total entries   : {total}")
     print(f"  Enabled         : {enabled}")
-    print(f"  Disabled        : {disabled}")
-    print(f"  Parsed OK       : {len(loaded)}")
+    print(f"  Disabled        : {total - enabled}")
+    print(f"  Loaded by engine: {loaded} ({len(engine.templates)} reagent-based, {len(engine.coupling_templates)} coupling)")
     print(f"  Parse failures  : {len(failures)}")
+    for f in failures:
+        print(f"    [{f['id']}] {f['reason']}")
 
-    if failures:
-        print(f"\nPARSE FAILURES")
-        for f in failures:
-            print(f"  [{f['id']}] {f['reason']}")
+    # ── 2. Condition wiring ───────────────────────────────────────────────────
+    # A non-coupling template whose condition tags appear on NO reagent can
+    # never become eligible — it is statically dead no matter the substrate.
+    reagent_tags = {c for r in REAGENT_LIST for c in r.get("conditions", [])}
+    print(f"\nCONDITION WIRING")
+    print(f"  Reagent catalog tags: {sorted(reagent_tags)}")
+    unfireable = [
+        t for t in engine.templates
+        if t["conditions"] and not set(t["conditions"]) & reagent_tags
+    ]
+    if unfireable:
+        print(f"  STATICALLY DEAD (conditions match no reagent):")
+        for t in unfireable:
+            print(f"    [{t['id']}] conditions={t['conditions']}")
+    else:
+        print(f"  All template condition tags are wired to at least one reagent. OK.")
 
-    # ── 2. Missing conditions ─────────────────────────────────────────────────
-    # Coupling templates run via run_coupling() and legitimately have no
-    # condition tags; empty conditions also mean "always eligible" in
-    # eligible_templates(), so only flag it as informational.
-    no_conditions = [t for t in loaded if not t["conditions"] and not t.get("coupling")]
+    no_conditions = [t for t in engine.templates if not t["conditions"]]
     if no_conditions:
-        print(f"\nNON-COUPLING TEMPLATES WITH EMPTY CONDITIONS (eligible under ALL reagents)")
+        print(f"  Non-coupling templates with EMPTY conditions (eligible under ALL reagents):")
         for t in no_conditions:
-            print(f"  [{t['id']}] {t['name']}")
-            print(f"    SMARTS: {t['smarts']}")
-    else:
-        print(f"\nAll enabled non-coupling templates have condition tags. OK.")
+            print(f"    [{t['id']}] {t['name']}")
 
-    # ── 3. Firing matrix ─────────────────────────────────────────────────────
-    print(f"\nFIRING MATRIX  (Y = fires, - = no match)")
-    col_w = max(len(s) for s in substrates) + 2
-    header = f"  {'Template':<35}" + "".join(f"{s:>{col_w}}" for s in substrates)
-    print(header)
-    print("  " + "-" * (35 + col_w * len(substrates)))
+    # ── 3. Firing matrix (real engine, real reagents) ─────────────────────────
+    fired_by: dict[str, set] = {t["id"]: set() for t in engine.templates}
+    for sub in substrates:
+        for reagent in REAGENT_LIST:
+            try:
+                branches = engine.run_for_reagent(sub, reagent["smiles"], reagent["conditions"])
+            except Exception as exc:
+                print(f"  ENGINE ERROR: {sub} + {reagent['name']}: {exc}")
+                continue
+            for b in branches:
+                for step in b["steps"]:
+                    if step.get("template_id") in fired_by:
+                        fired_by[step["template_id"]].add(sub)
 
-    fire_counts: dict[str, int] = {}
-    for t in loaded:
-        row = f"  {t['id']:<35}"
-        hits = 0
-        for sub in substrates:
-            fired = test_template_fires(t, sub)
-            row += f"{'Y':>{col_w}}" if fired else f"{'-':>{col_w}}"
-            if fired:
-                hits += 1
-        print(row)
-        fire_counts[t["id"]] = hits
+    # Coupling templates: try all ordered substrate pairs.
+    coupling_fired: dict[str, set] = {t["id"]: set() for t in engine.coupling_templates}
+    for a in substrates:
+        for b_smi in substrates:
+            if a == b_smi:
+                continue
+            try:
+                for res in engine.run_coupling(a, b_smi):
+                    if res["template_id"] in coupling_fired:
+                        coupling_fired[res["template_id"]].add(f"{a}+{b_smi}")
+            except Exception:
+                continue
 
-    # ── 4. Dead templates ─────────────────────────────────────────────────────
-    dead = [t for t in loaded if fire_counts[t["id"]] == 0]
-    print(f"\nDEAD TEMPLATES (zero hits across all sample substrates)")
-    if dead:
-        for t in dead:
-            print(f"  [{t['id']}] {t['name']}")
-            print(f"    Conditions : {t['conditions']}")
-            print(f"    SMARTS     : {t['smarts']}")
-            print(f"    Likely cause: substrates don't contain the required substructure, OR")
-            print(f"    condition tag has no matching entry in CONDITION_REAGENT_FRAGMENTS above.")
-    else:
-        print("  None — all enabled templates fire on at least one sample substrate.")
+    print(f"\nFIRING SUMMARY (via TemplateEngine over all reagents)")
+    for t in engine.templates:
+        hits = fired_by[t["id"]]
+        mark = f"fires on {len(hits)}" if hits else "DEAD on samples"
+        print(f"  {t['id']:<38} {mark}")
+    for t in engine.coupling_templates:
+        hits = coupling_fired[t["id"]]
+        mark = f"fires on {len(hits)} pair(s)" if hits else "DEAD on samples"
+        print(f"  {t['id']:<38} {mark}  [coupling]")
 
-    # ── 5. Suggestions ────────────────────────────────────────────────────────
-    suggestions = suggest_new_templates()
-    print(f"\nSUGGESTED NEW TEMPLATES (disabled — for your review)")
-    print(f"Copy desired entries into reaction_templates.json and set \"enabled\": true after verifying.")
-    print()
-    for s in suggestions:
-        print(json.dumps({k: v for k, v in s.items() if k != "review_notes"}, indent=2))
-        print(f"  // REVIEW NOTES: {s['review_notes']}")
-        print()
-
+    dead = [tid for tid, hits in {**fired_by, **coupling_fired}.items() if not hits]
+    print(f"\n{len(dead)} template(s) never fired on the sample set."
+          + (" Add a matching substrate via --substrates before concluding they are broken." if dead else ""))
     print(DIVIDER)
     print("Done.")
 

@@ -22,7 +22,7 @@ Next.js app (port 3000)  ──proxy──►  FastAPI API (port 8000)
 
 Ground truth layer (deterministic):
     reactivity_engine.py   — RDKit-based reaction engine (template-driven)
-    reaction_classifier.py — SMARTS pattern lookup for reaction names
+    reaction_templates.json — all reaction SMARTS + names (the only place chemistry lives)
 
 Explanation layer (LLM) — "Choose Your Engine" (Settings → Engine):
     Local (Ollama)  — free, keyless, runs on the user's machine
@@ -183,12 +183,20 @@ selecting the generative provider. `api_key` (BYOK) is used per-request and neve
 
 ## Adding reagents
 
-Edit `REAGENT_LIST` at the top of `app.py` — each entry needs `name`, `smiles`, `description`.
+Edit `REAGENT_LIST` in `reagents.py` — each entry needs `name`, `smiles`,
+`description`, and `conditions` (tags matched against template conditions).
 
-## Adding reaction classifications
+## Testing
 
-Edit `REACTION_RULES` in `reaction_classifier.py` — each rule is a tuple of
-`(name, confidence, match_fn)`. Rules are checked in order; first match wins.
+```bash
+python test_templates.py      # template regression suite — run before committing
+                              # changes to reaction_templates.json, reagents.py,
+                              # or reactivity_engine.py
+python diagnose_templates.py  # firing matrix + dead-template report (real engine)
+```
+
+Reaction names come from the template that fired (`name` in
+`reaction_templates.json`) — there is no separate classifier.
 
 ## Project layout
 
@@ -197,11 +205,14 @@ Orgo AI/
 ├── app.py                  ← FastAPI backend + all endpoints
 ├── reactivity_engine.py    ← deterministic reaction engine (do not modify)
 ├── reaction_templates.json ← all reaction SMARTS (the only place chemistry lives)
+├── reagents.py             ← reagent catalog (name, SMILES, condition tags)
 ├── preprocessing.py        ← OpenCV image pipeline (do not modify)
-├── reaction_classifier.py  ← SMARTS reaction-name lookup (confidence scoring)
+├── test_templates.py       ← template regression suite (run before template edits)
+├── diagnose_templates.py   ← firing matrix / dead-template diagnostic
 ├── requirements.txt
 ├── .env.example            ← optional: ANTHROPIC_API_KEY / OPENAI_API_KEY for Hosted mode
-├── start.bat               ← starts FastAPI (:8000) + Next.js (:3000)
+├── start.bat               ← starts FastAPI (:8000) + Next.js (:3000) for dev
+├── start-prod.bat          ← production launcher (see "Production mode")
 ├── supabase/schema.sql     ← projects, chemistry_files, user_settings + RLS
 └── frontend/               ← Next.js app (App Router, TypeScript)
     ├── app/                 ← routes: /login /signup /dashboard /projects/[id] /settings
@@ -227,6 +238,6 @@ Orgo AI/
 ## Design constraints
 
 - The LLM **never names reactions or asserts connectivity** — that is always the
-  deterministic engine + `reaction_classifier.py`. The LLM only explains and annotates.
+  deterministic template engine. The LLM only explains and annotates.
 - Every product shown is RDKit-validated before being returned.
 - API keys never leave the server. BYOK keys are used per-request and never stored or logged.
