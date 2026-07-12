@@ -7,6 +7,7 @@ This module is a generic template loader and runner with no reaction-specific co
 
 import json
 import logging
+from collections import deque
 from pathlib import Path
 
 from rdkit import Chem, RDLogger
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _TEMPLATE_FILE = Path(__file__).parent / "reaction_templates.json"
 MAX_STEPS = 3
+MAX_BRANCHES = 12   # cap on branches per (substrate, reagent) — bounds chain fan-out
 
 
 class TemplateEngine:
@@ -184,8 +186,10 @@ class TemplateEngine:
         """
         Apply all eligible templates to the substrate under the given reagent.
 
-        Returns a list of branch dicts, one per unique canonical product (deduplicated
-        across templates). Each branch includes the full step chain up to MAX_STEPS.
+        Returns a list of branch dicts, one per unique final product (deduplicated
+        across templates and chains). Each branch includes the full step chain up
+        to MAX_STEPS; intermediates with several onward reactions fan out into
+        one branch per continuation, capped at MAX_BRANCHES.
 
         Branch dict keys:
             template_id, reaction_name, steps, final_product, steps_taken,
@@ -224,79 +228,83 @@ class TemplateEngine:
             return []
 
         # ── Build branches, chaining steps for reactive intermediates ─────────
+        # An intermediate may react onward through MORE than one eligible
+        # template (e.g. an enolate can alkylate or re-protonate). Every
+        # continuation becomes its own branch — taking whichever template
+        # happens to come first in the JSON file would silently pick the
+        # chemistry. Bounded by MAX_STEPS depth and MAX_BRANCHES total;
+        # complete chains are deduplicated by final product (the first chain
+        # in template order wins).
         branches: list[dict] = []
+        seen_finals: set[str] = set()
 
-        for step1_canon, tmeta in seen_products.items():
-            step1_mol = Chem.MolFromSmiles(step1_canon)
-            step_type = self._classify_step_type(step1_mol)
-            step_text = f"Step 1 ({'Intermediate State Generated' if step_type == 'intermediate' else 'Stable Product Finalized'}): {step1_canon}"
+        def _continuations(mol: Chem.Mol, visited: set[str]) -> dict[str, dict]:
+            """Distinct next products for an intermediate, keyed by canonical
+            SMILES → first-winning template metadata. Species already on the
+            current chain are excluded to prevent A→B→A cycles."""
+            found: dict[str, dict] = {}
+            for template in eligible:
+                for prod_smi in self._run_template(template, mol, reagent_frags):
+                    nc = Chem.MolToSmiles(Chem.MolFromSmiles(prod_smi))
+                    if nc not in visited and nc not in found:
+                        found[nc] = {
+                            "template_id": template["id"],
+                            "reaction_name": template["name"],
+                        }
+            return found
 
-            steps: list[dict] = [
-                {
-                    "smiles": substrate_canon,
-                    "label": "Starting Material",
-                    "type": "start",
-                    "step_index": 0,
-                    "step_text": "Starting material",
-                    "template_id": None,
-                    "reaction_name": None,
-                },
-                {
-                    "smiles": step1_canon,
-                    "label": tmeta["reaction_name"],
-                    "type": step_type,
-                    "step_index": 1,
-                    "step_text": step_text,
-                    "template_id": tmeta["template_id"],
-                    "reaction_name": tmeta["reaction_name"],
-                },
-            ]
+        # BFS over partial chains: each entry is the list of (canon, tmeta)
+        # steps beyond the starting material. FIFO keeps template-order
+        # priority — earlier-listed continuations finalize first.
+        queue: deque[list[tuple[str, dict]]] = deque(
+            [[(canon, tmeta)] for canon, tmeta in seen_products.items()]
+        )
+        while queue and len(branches) < MAX_BRANCHES:
+            chain = queue.popleft()
+            last_canon = chain[-1][0]
+            last_mol = Chem.MolFromSmiles(last_canon)
 
-            execution_history: list[str] = [step_text]
-            current_mol = step1_mol
-            current_canon = step1_canon
-            step_count = 1
+            if self._classify_step_type(last_mol) == "intermediate" and len(chain) < MAX_STEPS:
+                visited = {substrate_canon, *(c for c, _ in chain)}
+                nxt = _continuations(last_mol, visited)
+                if nxt:
+                    for nc, ntmeta in nxt.items():
+                        queue.append(chain + [(nc, ntmeta)])
+                    continue
+                # Dead-end intermediate: finalize the chain as-is below.
 
-            # ── Multi-step: continue if intermediate, up to MAX_STEPS ─────────
-            while step_type == "intermediate" and step_count < MAX_STEPS:
-                step_count += 1
-                next_seen: dict[str, dict] = {}
+            final_product = last_canon
+            if final_product in seen_finals:
+                continue
+            seen_finals.add(final_product)
 
-                for template in eligible:
-                    for prod_smi in self._run_template(template, current_mol, reagent_frags):
-                        nc = Chem.MolToSmiles(Chem.MolFromSmiles(prod_smi))
-                        if nc != current_canon and nc not in next_seen:
-                            next_seen[nc] = {
-                                "template_id": template["id"],
-                                "reaction_name": template["name"],
-                            }
-
-                if not next_seen:
-                    break
-
-                next_canon, next_tmeta = next(iter(next_seen.items()))
-                next_mol = Chem.MolFromSmiles(next_canon)
-                step_type = self._classify_step_type(next_mol)
-                step_text = f"Step {step_count} ({'Intermediate State Generated' if step_type == 'intermediate' else 'Stable Product Finalized'}): {next_canon}"
+            steps: list[dict] = [{
+                "smiles": substrate_canon,
+                "label": "Starting Material",
+                "type": "start",
+                "step_index": 0,
+                "step_text": "Starting material",
+                "template_id": None,
+                "reaction_name": None,
+            }]
+            execution_history: list[str] = []
+            for idx, (canon, meta) in enumerate(chain, start=1):
+                stype = self._classify_step_type(Chem.MolFromSmiles(canon))
+                step_text = f"Step {idx} ({'Intermediate State Generated' if stype == 'intermediate' else 'Stable Product Finalized'}): {canon}"
                 execution_history.append(step_text)
-
                 steps.append({
-                    "smiles": next_canon,
-                    "label": next_tmeta["reaction_name"],
-                    "type": step_type,
-                    "step_index": step_count,
+                    "smiles": canon,
+                    "label": meta["reaction_name"],
+                    "type": stype,
+                    "step_index": idx,
                     "step_text": step_text,
-                    "template_id": next_tmeta["template_id"],
-                    "reaction_name": next_tmeta["reaction_name"],
+                    "template_id": meta["template_id"],
+                    "reaction_name": meta["reaction_name"],
                 })
 
-                current_mol = next_mol
-                current_canon = next_canon
-
-            final_product = steps[-1]["smiles"]
             branches.append({
-                "template_id": tmeta["template_id"],
-                "reaction_name": tmeta["reaction_name"],
+                "template_id": chain[0][1]["template_id"],
+                "reaction_name": chain[0][1]["reaction_name"],
                 "steps": steps,
                 "steps_taken": len(steps) - 1,
                 "final_product": final_product,
@@ -444,14 +452,14 @@ class TemplateEngine:
 
         return list(conds)
 
-    # ── Backward-compat wrapper for /predict endpoint and test.py ─────────────
+    # ── Backward-compat wrapper for the predict_reactivity.py CLI ─────────────
 
     def process_reaction_pipeline(
         self, substrate_smiles: str, reagent_smiles: str, reagent_conditions: list[str] | None = None
     ) -> dict:
         """
         Single-result wrapper. If reagent_conditions is not supplied, infers them
-        from the reagent's chemistry so the old test.py call-site keeps working.
+        from the reagent's chemistry so the CLI call-site keeps working.
         Returns the first successful branch dict, or an error dict.
         """
         if not reagent_conditions:

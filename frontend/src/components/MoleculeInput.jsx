@@ -25,6 +25,7 @@ if (typeof window !== 'undefined') {
 
 const STAGE_LABELS = {
   original: 'Original',
+  invert: 'Inverted',
   perspective: 'Perspective',
   deskew: 'Deskew',
   denoise: 'Denoise',

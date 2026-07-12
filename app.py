@@ -5,7 +5,7 @@ Endpoints:
   POST /analyze         image → SMILES + stage images (base64); fast path returns
                         confidence "verifying" + verify_token for deferred check
   GET  /analyze/verify/{token}  collect the deferred vision verification
-  POST /predict         substrate + reagent → product
+  POST /react           substrate + reagent → all predicted products
   GET  /structure       SMILES → SVG (for UI rendering)
   POST /pathways        substrate → branching graph over REAGENT_LIST
   POST /explain         engine output + reaction name → LLM prose explanation
@@ -395,7 +395,7 @@ MAX_HISTORY_LINES = 500
 # Rate-limit only the expensive compute/generative endpoints — not /structure
 # image tiles or /health polls.
 RATE_LIMIT_PATHS = {
-    "/analyze", "/react-from-image", "/react", "/predict", "/pathways",
+    "/analyze", "/react-from-image", "/react", "/pathways",
     "/explain", "/chat", "/assist", "/stereo",
 }
 RATE_LIMIT_MAX    = 60      # requests per window per IP
@@ -930,11 +930,16 @@ def _mol_svg(smiles: str, width: int, height: int) -> str:
 
 # ── Image processing (runs in thread pool) ────────────────────────────────────
 
-def _is_clean_digital(img: np.ndarray) -> bool:
+def _digital_polarity(img: np.ndarray) -> str | None:
     """Detect an already-clean digital depiction (screenshot, PDF render,
-    ChemDraw export). These are bimodal — mostly pure-white background with
-    crisp dark ink and almost no midtones — whereas phone photos are full of
+    ChemDraw export). These are bimodal — mostly uniform background with
+    crisp ink and almost no midtones — whereas phone photos are full of
     midtones from shadows, paper texture, and uneven lighting.
+
+    Returns "light" for the classic dark-ink-on-white render, "dark" for a
+    dark-mode render (same bimodal signature, inverted), and None for photos.
+    Dark-mode screenshots previously fell through to the photo pipeline,
+    whose repair stages could only degrade them.
 
     For clean digital images the photo-repair stages (perspective warp,
     deskew, NLM denoise) are pure downside: slow (NLM takes seconds) and able
@@ -944,7 +949,13 @@ def _is_clean_digital(img: np.ndarray) -> bool:
     white = float(np.mean(gray > 235))
     dark = float(np.mean(gray < 90))
     midtone = 1.0 - white - dark
-    return white > 0.60 and dark < 0.25 and midtone < 0.10
+    if midtone >= 0.10:
+        return None
+    if white > 0.60 and dark < 0.25:
+        return "light"
+    if dark > 0.60 and white < 0.25:
+        return "dark"
+    return None
 
 
 def _canonical_smiles(raw: str | None) -> str | None:
@@ -1012,12 +1023,19 @@ def _process(raw_bytes: bytes) -> dict:
 
     img = _resize(img)
     stages: dict[str, str | None] = {"original": _stage_b64(img)}
-    current = img.copy()
 
     # Clean digital depictions (screenshots, PDF renders) skip the photo-repair
     # stages — they're slow and can only degrade an already-flat, noise-free
-    # image. Photos get the full pipeline.
-    digital = _is_clean_digital(img)
+    # image. Photos get the full pipeline. Dark-mode renders are flipped to
+    # dark-ink-on-white first: that's the polarity the OSR models and
+    # binarization expect. (The vision model still sees the raw upload — VLMs
+    # read dark mode natively.)
+    polarity = _digital_polarity(img)
+    if polarity == "dark":
+        img = cv2.bitwise_not(img)
+        stages["invert"] = _stage_b64(img)
+    digital = polarity is not None
+    current = img.copy()
     photo_stages = [] if digital else [
         ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
     ]
@@ -1157,6 +1175,17 @@ def _process(raw_bytes: bytes) -> dict:
     return result
 
 
+def _prefer_rendition(orig_read: str, bin_read: str, digital: bool) -> str:
+    """Uncorroborated tie between DECIMER's two renditions: prefer the read
+    that looks less like recognizer garbage. Hallucinated reads on noise are
+    fragment soups ('C.CC.CC.…'), so fewer '.'-separated fragments wins. On a
+    true tie keep the historical default — original for digital renders,
+    binarized for photos (binarization repairs bad lighting)."""
+    if orig_read.count(".") != bin_read.count("."):
+        return orig_read if orig_read.count(".") < bin_read.count(".") else bin_read
+    return orig_read if digital else bin_read
+
+
 def _resolve_with_vision(orig_read: str | None, bin_read: str | None,
                          ms_read: str | None, digital: bool,
                          vision_read: str | None) -> tuple[str | None, bool | None]:
@@ -1170,7 +1199,7 @@ def _resolve_with_vision(orig_read: str | None, bin_read: str | None,
         elif vision_read == bin_read:
             decimer_read = bin_read
         else:
-            decimer_read = orig_read if digital else bin_read
+            decimer_read = _prefer_rendition(orig_read, bin_read, digital)
     else:
         decimer_read = orig_read or bin_read
 
@@ -1323,64 +1352,6 @@ async def analyze_verify(token: str):
         confidence = "unverified"
     logger.info("Deferred verification: chosen=%r vision=%r → %s", smiles, vision_read, confidence)
     return {"smiles": smiles, "verified": verified, "confidence": confidence, "vision": vision_read}
-
-
-class PredictRequest(BaseModel):
-    substrate_smiles: str
-    reagent_smiles: str
-
-
-@app.post("/predict", dependencies=[Depends(require_auth)])
-async def predict(req: PredictRequest):
-    from rdkit import Chem
-    sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
-    if sub_mol is None:
-        raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
-    rea_mol = Chem.MolFromSmiles(req.reagent_smiles.strip())
-    if rea_mol is None:
-        raise HTTPException(status_code=422, detail="Invalid reagent SMILES")
-
-    substrate = Chem.MolToSmiles(sub_mol)
-    reagent_canon = Chem.MolToSmiles(rea_mol)
-
-    # Derive conditions by matching the reagent against REAGENT_LIST; unknown reagents get []
-    conditions: list[str] = []
-    for r in REAGENT_LIST:
-        r_mol = Chem.MolFromSmiles(r["smiles"])
-        if r_mol and Chem.MolToSmiles(r_mol) == reagent_canon:
-            conditions = r.get("conditions", [])
-            break
-
-    def _predict():
-        return _get_engine().run_for_reagent(substrate, reagent_canon, conditions)
-
-    loop = asyncio.get_event_loop()
-    branches = await loop.run_in_executor(_chem_pool, _predict)
-
-    if not branches:
-        raise HTTPException(
-            status_code=422,
-            detail="No templates matched this substrate/reagent combination."
-        )
-
-    b = branches[0]
-    product_mol = Chem.MolFromSmiles(b["final_product"])
-    if product_mol is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Engine produced an invalid product — blocked by RDKit validation"
-        )
-
-    environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
-    return {
-        "product_smiles": b["final_product"],
-        "environment_used": environment,
-        "steps_taken": b["steps_taken"],
-        "execution_history": b["execution_history"],
-        "rdkit_validated": True,
-        "template_id": b["template_id"],
-        "reaction_name": b["reaction_name"],
-    }
 
 
 MAX_SMILES_CHARS = 512  # generous for coursework molecules; blocks CPU-burn payloads
@@ -2189,6 +2160,35 @@ async def assist(req: AssistRequest, user_id: str | None = Depends(require_auth)
 
 # ── /react-from-image ─────────────────────────────────────────────────────────
 
+def _pick_substrate_and_react(components: list[str]) -> tuple[str, str, list[str], list[dict]]:
+    """Try each recognized fragment as the substrate (largest first), with the
+    remaining fragments as the reagent; the first assignment that fires any
+    template wins.
+
+    Image-recognized fragments carry no positional convention (unlike typed
+    input, where "substrate + reagent" order is assumed), so "largest fragment
+    = substrate" is only a starting guess — a bulky reagent like LDA out-weighs
+    a small substrate, and the correct assignment is the one the template
+    library actually recognizes.
+
+    Returns (substrate, reagent, conditions, branches); when no assignment
+    matches, branches is [] and substrate/reagent fall back to largest-first
+    so the caller can still display the split it tried.
+    """
+    engine = _get_engine()
+    fallback: tuple[str, str, list[str]] | None = None
+    for i, candidate in enumerate(components):
+        reagent = ".".join(components[:i] + components[i + 1:])
+        conditions = TemplateEngine._infer_conditions(reagent)
+        if fallback is None:
+            fallback = (candidate, reagent, conditions)
+        branches = engine.run_for_reagent(candidate, reagent, conditions)
+        if branches:
+            return candidate, reagent, conditions, branches
+    substrate, reagent, conditions = fallback
+    return substrate, reagent, conditions, []
+
+
 def _react_from_image(raw_bytes: bytes) -> dict:
     """
     Full pipeline: raw image bytes → preprocessing → DECIMER → split
@@ -2219,10 +2219,14 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         return {"error": f"Could not decode image: {exc}", "products": []}
 
     img = _resize(img)
-    current = img.copy()
     # Same gating as /analyze: clean digital depictions skip the photo-repair
-    # stages (slow, and binarization can destroy thin bonds in crisp renders).
-    digital = _is_clean_digital(img)
+    # stages (slow, and binarization can destroy thin bonds in crisp renders);
+    # dark-mode renders are flipped to the polarity OSR expects.
+    polarity = _digital_polarity(img)
+    if polarity == "dark":
+        img = cv2.bitwise_not(img)
+    digital = polarity is not None
+    current = img.copy()
     photo_stages = [] if digital else [
         ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
     ]
@@ -2316,17 +2320,13 @@ def _react_from_image(raw_bytes: bytes) -> dict:
             "products": [],
         }
 
-    substrate_smiles = components[0]
-    reagent_smiles   = ".".join(components[1:])
-
-    # 4. Infer conditions and run engine
-    conditions = TemplateEngine._infer_conditions(reagent_smiles)
+    # 4. Assign substrate/reagent and run the engine — every fragment gets a
+    # turn as the substrate; the first assignment that matches a template wins.
+    substrate_smiles, reagent_smiles, conditions, branches = _pick_substrate_and_react(components)
     logger.info(
-        "Template engine: substrate=%r  reagent=%r  conditions=%s",
-        substrate_smiles, reagent_smiles, conditions,
+        "Template engine: substrate=%r  reagent=%r  conditions=%s → %d branch(es)",
+        substrate_smiles, reagent_smiles, conditions, len(branches),
     )
-    branches = _get_engine().run_for_reagent(substrate_smiles, reagent_smiles, conditions)
-    logger.info("Template engine returned %d branch(es)", len(branches))
 
     # 5. Last-resort: if engine matched nothing, ask Ollama for a cleaner re-read and retry
     if not branches:
@@ -2342,15 +2342,13 @@ def _react_from_image(raw_bytes: bytes) -> dict:
                 if len(retry_components) >= 2:
                     recognized_smiles = retry_smiles
                     components        = retry_components
-                    substrate_smiles  = retry_components[0]
-                    reagent_smiles    = ".".join(retry_components[1:])
-                    conditions        = TemplateEngine._infer_conditions(reagent_smiles)
-                    logger.info(
-                        "Retrying engine with Ollama SMILES: substrate=%r  reagent=%r  conditions=%s",
-                        substrate_smiles, reagent_smiles, conditions,
+                    substrate_smiles, reagent_smiles, conditions, branches = (
+                        _pick_substrate_and_react(retry_components)
                     )
-                    branches = _get_engine().run_for_reagent(substrate_smiles, reagent_smiles, conditions)
-                    logger.info("Retry engine returned %d branch(es)", len(branches))
+                    logger.info(
+                        "Retry with Ollama SMILES: substrate=%r  reagent=%r  conditions=%s → %d branch(es)",
+                        substrate_smiles, reagent_smiles, conditions, len(branches),
+                    )
 
     products = [
         {

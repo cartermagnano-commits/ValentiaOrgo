@@ -152,7 +152,6 @@ both renderers are cheap with hard input caps.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/analyze` | Upload image → `{smiles, valid, verified, confidence, stages}` |
-| POST | `/predict` | `{substrate_smiles, reagent_smiles}` → product |
 | POST | `/react` | `{substrate_smiles, reagent_smiles}` → all products |
 | POST | `/react-from-image` | Image → recognized reaction → products |
 | GET  | `/structure` | `?smiles=&width=&height=` → SVG |
