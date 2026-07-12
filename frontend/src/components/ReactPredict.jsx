@@ -124,7 +124,10 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
     setLoading(true)
     setError(null)
     setResult(null)
-    setPreview(URL.createObjectURL(file))
+    setPreview(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return URL.createObjectURL(file)
+    })
     try {
       const data = await reactFromImage(file)
       setResult(data)
@@ -148,6 +151,7 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
   function onDrop(e) {
     e.preventDefault()
     setDragOver(false)
+    if (loading) return  // click and paste are guarded; drops must be too
     const file = e.dataTransfer.files[0]
     if (file) handleFile(file)
   }
@@ -176,7 +180,10 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
   function reset() {
     setResult(null)
     setError(null)
-    setPreview(null)
+    setPreview(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
     if (fileRef.current) fileRef.current.value = ''
   }
 

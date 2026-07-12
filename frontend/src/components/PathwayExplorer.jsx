@@ -152,6 +152,11 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
     setSelectedNodeData(null)
     try {
       const data = await fetchPathways(validStarts, targetSmiles.trim(), desiredDepth)
+      // The backend silently falls back to fan-out mode when the target SMILES
+      // doesn't parse — surface that instead of pretending the target was used.
+      if (targetSmiles.trim() && data.search_mode !== 'target_search') {
+        setError(`Target SMILES "${targetSmiles.trim()}" is invalid and was ignored — showing all pathways instead.`)
+      }
       setPathwaysData(data)
       onSave?.({ startingMaterials: validStarts, targetMolecule: targetSmiles.trim(), pathwaysData: data })
       if (data.routes?.length) {

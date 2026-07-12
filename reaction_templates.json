@@ -5,15 +5,15 @@
     {
       "id": "kinetic_enolate",
       "name": "Kinetic enolate formation",
-      "smarts": "[CX3:1](=[OX1:2])[CX4:3]>>[CX3:1]([OX2-:2])=[CX3:3]",
+      "smarts": "[CX3;!$([CX3][OX2]);!$([CX3][OX1-]);!$([CX3][NX3]):1](=[OX1:2])[CX4;!H0:3]>>[CX3:1]([OX2-:2])=[CX3:3]",
       "conditions": ["kinetic_base"],
-      "provenance": "Ported from original MolecularReactivityEngine.execute_first_principles_step pathway A. Chemistry: Fleming, I. 'Molecular Orbitals and Organic Chemical Reactions' (2010). Strong hindered bases (LDA, t-BuOK) deprotonate the alpha-carbon to give the enolate; branching over all alpha positions shows both kinetic and thermodynamic isomers.",
+      "provenance": "Ported from original MolecularReactivityEngine.execute_first_principles_step pathway A. Chemistry: Fleming, I. 'Molecular Orbitals and Organic Chemical Reactions' (2010). Strong hindered bases (LDA, t-BuOK) deprotonate the alpha-carbon to give the enolate; branching over all alpha positions shows both kinetic and thermodynamic isomers. Restricted to aldehyde/ketone carbonyls (acids/esters/amides excluded — their O-H or N-H chemistry dominates) and alpha-carbons that actually bear an H.",
       "enabled": true
     },
     {
       "id": "e2_elim_hbr",
       "name": "E2 beta-elimination (HBr)",
-      "smarts": "[CX4:1][CX4:2][Br:3]>>[CX3:1]=[CX3:2].[Br-:3]",
+      "smarts": "[CX4;!H0:1][CX4:2][Br:3]>>[CX3:1]=[CX3:2].[Br-:3]",
       "conditions": ["kinetic_base", "strong_base"],
       "provenance": "Hartenfeller M. et al. 'A Collection of Robust Organic Synthesis Reactions for In Silico Molecule Design' J. Chem. Inf. Model. 2011, 51, 3093-3098. Anti-periplanar E2 elimination: strong base abstracts beta-H while bromide departs.",
       "enabled": true
@@ -21,7 +21,7 @@
     {
       "id": "e2_elim_hcl",
       "name": "E2 beta-elimination (HCl)",
-      "smarts": "[CX4:1][CX4:2][Cl:3]>>[CX3:1]=[CX3:2].[Cl-:3]",
+      "smarts": "[CX4;!H0:1][CX4:2][Cl:3]>>[CX3:1]=[CX3:2].[Cl-:3]",
       "conditions": ["kinetic_base", "strong_base"],
       "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. Anti-periplanar E2 elimination with chloride leaving group.",
       "enabled": true
@@ -29,7 +29,7 @@
     {
       "id": "e2_elim_hi",
       "name": "E2 beta-elimination (HI)",
-      "smarts": "[CX4:1][CX4:2][I:3]>>[CX3:1]=[CX3:2].[I-:3]",
+      "smarts": "[CX4;!H0:1][CX4:2][I:3]>>[CX3:1]=[CX3:2].[I-:3]",
       "conditions": ["kinetic_base", "strong_base"],
       "provenance": "Hartenfeller M. et al. J. Chem. Inf. Model. 2011, 51, 3093-3098. E2 elimination with iodide leaving group; highly favored due to weak C-I bond.",
       "enabled": true
@@ -141,9 +141,9 @@
     {
       "id": "carbonyl_hydration",
       "name": "Carbonyl gem-diol formation (hydration)",
-      "smarts": "[CX3:1]=[OX1:2].[OH2:3]>>[CX4:1]([OH:2])([OH:3])",
+      "smarts": "[CX3;$([CX3H2]),$([CX3H1][#6]),$([CX3]([#6])[#6]);!$([CX3][OX2]);!$([CX3][NX3]):1]=[OX1:2].[OH2:3]>>[CX4:1]([OH:2])([OH:3])",
       "conditions": ["protic"],
-      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Reversible nucleophilic addition of water to carbonyl to give gem-diol. Equilibrium strongly disfavored for ketones (Keq << 1) but thermodynamically accessible for aldehydes.",
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Reversible nucleophilic addition of water to carbonyl to give gem-diol. Equilibrium strongly disfavored for ketones (Keq << 1) but thermodynamically accessible for aldehydes. Restricted to aldehyde/ketone carbonyls — acid/ester/amide carbonyls do not form gem-diols.",
       "enabled": true
     },
     {
@@ -256,9 +256,9 @@
     {
       "id": "nabh4_ketone",
       "name": "NaBH4 reduction: ketone → secondary alcohol",
-      "smarts": "[CX3H0:1](=[OX1:2]).[BH4-]>>[CX4:1]([OH:2])",
+      "smarts": "[#6:5][CX3H0:1](=[OX1:2])[#6:6].[BH4-]>>[#6:5][CX4:1]([OH:2])[#6:6]",
       "conditions": ["hydride"],
-      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. NaBH4 reduces a ketone to a secondary alcohol via 1,2-hydride delivery. Net: RCOR' → RCHOHR'.",
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. NaBH4 reduces a ketone to a secondary alcohol via 1,2-hydride delivery. Net: RCOR' → RCHOHR'. Carbon flanks are mapped (grignard_ketone pattern) so the carbonyl must sit between two carbons — esters, acids, and amides no longer match (NaBH4 does not reduce them).",
       "enabled": true
     },
     {
@@ -272,9 +272,9 @@
     {
       "id": "lialh4_ketone",
       "name": "LiAlH4 reduction: ketone → secondary alcohol",
-      "smarts": "[CX3H0:1](=[OX1:2]).[AlH4-]>>[CX4:1]([OH:2])",
+      "smarts": "[#6:5][CX3H0:1](=[OX1:2])[#6:6].[AlH4-]>>[#6:5][CX4:1]([OH:2])[#6:6]",
       "conditions": ["hydride"],
-      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 reduces ketones to secondary alcohols.",
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. LiAlH4 reduces ketones to secondary alcohols. Carbon flanks mapped so acids/esters route through their own dedicated templates instead of double-firing here.",
       "enabled": true
     },
     {
@@ -326,6 +326,62 @@
       "enabled": true
     },
     {
+      "id": "hi_markovnikov_disubstituted",
+      "name": "HI addition: trisubstituted alkene → tertiary iodide (Markovnikov)",
+      "smarts": "[CX3H1:1]=[CX3H0:2].[I:3]>>[CX4:1][CX4:2][I:3]",
+      "conditions": ["hi"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HI Markovnikov addition to trisubstituted alkene; mirrors the HBr/HCl variants.",
+      "enabled": true
+    },
+    {
+      "id": "hbr_markovnikov_geminal",
+      "name": "HBr addition: 1,1-disubstituted alkene → tertiary bromide (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H0:2].[Br:3]>>[CX4:1][CX4:2][Br:3]",
+      "conditions": ["hbr"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. The textbook Markovnikov case: CH2=CR2 (e.g. isobutylene) + HBr → tertiary bromide. Previously uncovered — the terminal template requires an internal C-H and the disubstituted template requires CHR=.",
+      "enabled": true
+    },
+    {
+      "id": "hcl_markovnikov_geminal",
+      "name": "HCl addition: 1,1-disubstituted alkene → tertiary chloride (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H0:2].[Cl:3]>>[CX4:1][CX4:2][Cl:3]",
+      "conditions": ["hcl"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HCl Markovnikov addition to a 1,1-disubstituted alkene (CH2=CR2) → tertiary chloride.",
+      "enabled": true
+    },
+    {
+      "id": "hi_markovnikov_geminal",
+      "name": "HI addition: 1,1-disubstituted alkene → tertiary iodide (Markovnikov)",
+      "smarts": "[CX3H2:1]=[CX3H0:2].[I:3]>>[CX4:1][CX4:2][I:3]",
+      "conditions": ["hi"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HI Markovnikov addition to a 1,1-disubstituted alkene (CH2=CR2) → tertiary iodide.",
+      "enabled": true
+    },
+    {
+      "id": "hbr_addition_internal",
+      "name": "HBr addition: 1,2-disubstituted alkene → secondary bromide",
+      "smarts": "[CX3H1:1]=[CX3H1:2].[Br:3]>>[CX4:1][CX4:2][Br:3]",
+      "conditions": ["hbr"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HX addition to an internal RCH=CHR' alkene: both carbons are equally substituted, so both regiochemical products form (RunReactants enumerates both atom mappings; unique products are kept).",
+      "enabled": true
+    },
+    {
+      "id": "hcl_addition_internal",
+      "name": "HCl addition: 1,2-disubstituted alkene → secondary chloride",
+      "smarts": "[CX3H1:1]=[CX3H1:2].[Cl:3]>>[CX4:1][CX4:2][Cl:3]",
+      "conditions": ["hcl"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HCl addition to an internal RCH=CHR' alkene; both regiochemical products enumerated.",
+      "enabled": true
+    },
+    {
+      "id": "hi_addition_internal",
+      "name": "HI addition: 1,2-disubstituted alkene → secondary iodide",
+      "smarts": "[CX3H1:1]=[CX3H1:2].[I:3]>>[CX4:1][CX4:2][I:3]",
+      "conditions": ["hi"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. HI addition to an internal RCH=CHR' alkene; both regiochemical products enumerated.",
+      "enabled": true
+    },
+    {
       "id": "br2_addition_alkene",
       "name": "Br2 addition: alkene → vicinal dibromide",
       "smarts": "[CX3:1]=[CX3:2].[Br:3][Br:4]>>[CX4:1]([Br:3])[CX4:2][Br:4]",
@@ -352,7 +408,7 @@
     {
       "id": "alcohol_dehydration",
       "name": "Acid-catalyzed dehydration: secondary/tertiary alcohol → alkene",
-      "smarts": "[CX4:1]([OH:3])[CX4:2]>>[CX3:1]=[CX3:2].[OH2:3]",
+      "smarts": "[CX4:1]([OH:3])[CX4;!H0:2]>>[CX3:1]=[CX3:2].[OH2:3]",
       "conditions": ["acid"],
       "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. E1 dehydration of a secondary or tertiary alcohol under acid catalysis (H2SO4, H3PO4) via carbocation intermediate. Net: -CHOH-CH- → -C=C- + H2O.",
       "enabled": true
@@ -369,9 +425,17 @@
     {
       "id": "ester_saponification",
       "name": "Ester saponification: ester + hydroxide → carboxylate + alcohol",
-      "smarts": "[CX4:1][OX2:2][CX3:3](=[OX1:4]).[OH-]>>[CX4:1][OH].[CX3:3](=[OX1:4])[O-]",
+      "smarts": "[CX4:1][OX2;!R:2][CX3:3](=[OX1:4]).[OH-]>>[CX4:1][OH].[CX3:3](=[OX1:4])[O-]",
       "conditions": ["hydroxide"],
-      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Base-promoted ester hydrolysis (saponification): hydroxide attacks carbonyl C, alkoxide leaves, gives carboxylate + alcohol.",
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Base-promoted ester hydrolysis (saponification): hydroxide attacks carbonyl C, alkoxide leaves, gives carboxylate + alcohol. Ester O restricted to non-ring (!R): on a lactone the two disconnected product fragments each duplicate the whole ring remnant, violating mass conservation — lactones use the dedicated ring-opening template.",
+      "enabled": true
+    },
+    {
+      "id": "lactone_saponification",
+      "name": "Lactone saponification: cyclic ester + hydroxide → hydroxy-carboxylate",
+      "smarts": "[CX4:1][OX2;R:2][CX3;R:3](=[OX1:4]).[OH-]>>([CX4:1][OH].[CX3:3](=[OX1:4])[O-])",
+      "conditions": ["hydroxide"],
+      "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Ring-opening saponification of a lactone: hydroxide attacks the carbonyl, the ring C-O bond breaks, giving a single open-chain hydroxy-carboxylate. Product atoms grouped as ONE component — writing them as two fragments duplicates the ring remnant into both.",
       "enabled": true
     }
   ]

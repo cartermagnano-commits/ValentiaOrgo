@@ -35,23 +35,45 @@ export default function FileEditor({
     (draft as any).aiResponse || (draft as any).pathwaysData || (draft as any).result
   )
 
+  // Reset the working draft only when switching to a DIFFERENT file. Depending
+  // on file.content here would re-apply the just-saved server copy after every
+  // save, reverting anything typed while the save round-trip was in flight.
+  const draftRef = useRef(draft)
+  draftRef.current = draft
   useEffect(() => {
     setDraft(file.content || makeInitialContent(file.type))
     setError('')
-  }, [file.id, file.content, file.type])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file.id])
 
   const related = useMemo(
     () => files.filter(other => other.type === file.type && other.id !== file.id),
     [file.id, file.type, files],
   )
 
+  // Optimistic-concurrency bookkeeping. lastSavedAtRef tracks the freshest
+  // updated_at we know about (updated the moment a save resolves, without
+  // waiting for the parent re-render), and saveChainRef serializes saves so a
+  // textarea onBlur save and a Save-button save firing back-to-back can't race
+  // each other into a false "modified elsewhere" conflict.
+  const lastSavedAtRef = useRef<string | null>(null)
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve())
+
   async function saveContent(nextContent: ChemistryFileContent = draft) {
     setSaving(true)
     setError('')
-    try {
-      const saved = await updateChemistryFileContent(file.id, file.project_id, userId, nextContent)
-      setDraft(saved.content || makeInitialContent(saved.type))
+    const run = async () => {
+      const expected = lastSavedAtRef.current ?? file.updated_at
+      const saved = await updateChemistryFileContent(file.id, file.project_id, userId, nextContent, expected)
+      lastSavedAtRef.current = saved.updated_at
+      // Deliberately do NOT reset the draft from the server response — the
+      // user may have kept typing during the round-trip; local state wins.
       onSaved(saved)
+    }
+    const attempt = saveChainRef.current.then(run, run)
+    saveChainRef.current = attempt.catch(() => {})
+    try {
+      await attempt
       notify('Saved', 'success')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Could not save file.'
@@ -66,15 +88,17 @@ export default function FileEditor({
     setError('')
     setAiRunning(true)
     let acc = ''
-    const fields = { ...(draft as Record<string, unknown>) }
-    setDraft({ ...fields, aiResponse: '' } as ChemistryFileContent)
+    const request = { ...(draft as Record<string, unknown>) }
+    setDraft(prev => ({ ...(prev as Record<string, unknown>), aiResponse: '' }) as ChemistryFileContent)
     try {
-      await streamAssist(file.type, draft, (delta: string) => {
+      await streamAssist(file.type, request, (delta: string) => {
         acc += delta
         setDraft(prev => ({ ...(prev as Record<string, unknown>), aiResponse: acc }) as ChemistryFileContent)
       })
       if (!acc) throw new Error('The AI engine returned no response. Check Settings → Engine.')
-      await saveContent({ ...fields, aiResponse: acc } as ChemistryFileContent)
+      // Save from the LATEST draft (via ref), not the pre-stream snapshot —
+      // fields the user edited while the AI streamed must survive the save.
+      await saveContent({ ...(draftRef.current as Record<string, unknown>), aiResponse: acc } as ChemistryFileContent)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'AI request failed.')
     } finally {
@@ -113,7 +137,9 @@ export default function FileEditor({
         {file.type === 'synthesis' && (
           <PathwayExplorer
             key={file.id}
-            initialSubstrate={(draft as any).startingMaterials?.filter(Boolean) ?? []}
+            initialSubstrate={Array.isArray((draft as any).startingMaterials)
+              ? (draft as any).startingMaterials.filter(Boolean)
+              : []}
             initialTarget={(draft as any).targetMolecule ?? ''}
             initialPathways={(draft as any).pathwaysData ?? null}
             onSave={(data: any) => saveContent({ ...draft, ...data })}
@@ -346,7 +372,11 @@ function PersistedChat({
     let acc = ''
     try {
       await streamChat(
-        history.map(message => ({ role: message.role, content: message.content })),
+        history
+          // Failed-request bubbles are UI state, not conversation — don't
+          // replay them to the model as if it had said "Error: ..." itself.
+          .filter(message => !(message.role === 'assistant' && message.content.startsWith('Error:')))
+          .map(message => ({ role: message.role, content: message.content })),
         null,
         (delta: string) => {
           acc += delta

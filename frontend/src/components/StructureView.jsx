@@ -1,7 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { structureUrl } from '../api'
 
+// Module-level render cache. Capped so long sessions with many unique
+// structures don't grow memory without bound (Map iterates in insertion
+// order, so evicting the first key is FIFO).
 const svgCache = new Map()
+const SVG_CACHE_MAX = 300
 
 export default function StructureView({ smiles, width = 200, height = 150, className = '' }) {
   const [svg, setSvg] = useState(null)
@@ -29,6 +33,7 @@ export default function StructureView({ smiles, width = 200, height = 150, class
         return r.text()
       })
       .then(text => {
+        if (svgCache.size >= SVG_CACHE_MAX) svgCache.delete(svgCache.keys().next().value)
         svgCache.set(url, text)
         setSvg(text)
         setError(false)

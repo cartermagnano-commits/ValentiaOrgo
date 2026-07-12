@@ -78,14 +78,21 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
   }
 
   function startTool(type: ChemistryFileType, defaultTitle: string) {
-    handleCreateFile({ title: defaultTitle, type }, false)
+    handleCreateFile({ title: defaultTitle, type }, false).catch(err => {
+      setError(err instanceof Error ? err.message : 'Could not create file.')
+    })
   }
 
   async function handleDeleteFile(file: ChemistryFile) {
     if (!user || !project) return
     const ok = window.confirm(`Delete "${file.title}"?`)
     if (!ok) return
-    await deleteChemistryFile(file.id, project.id, user.id)
+    try {
+      await deleteChemistryFile(file.id, project.id, user.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete file.')
+      return
+    }
     setFiles(prev => prev.filter(item => item.id !== file.id))
     if (activeFileId === file.id) {
       const remaining = files.filter(item => item.id !== file.id)
@@ -215,6 +222,11 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
           <main className="file-workspace">
             {activeFile && user ? (
               <FileEditor
+                // Keyed by file id so switching files unmounts the editor.
+                // Without this, an in-flight AI stream started on file A keeps
+                // writing into the shared draft after the user opens file B,
+                // and its completion handler saves B's draft into A's row.
+                key={activeFile.id}
                 file={activeFile}
                 files={files}
                 userId={user.id}

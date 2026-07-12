@@ -99,9 +99,17 @@ export default function EngineSettings({
 
   async function finishOnboarding() {
     // Persist even untouched defaults — the saved row is what tells the
-    // dashboard this user has been through onboarding.
-    if (userId) {
-      try { await saveEngineSettings(userId, prefs as unknown as Record<string, unknown>) } catch { /* offline — dashboard gate degrades gracefully */ }
+    // dashboard this user has been through onboarding. Resolve the user on
+    // demand rather than relying on the userId state: clicking "Continue"
+    // before the mount-time lookup resolves would otherwise skip the save and
+    // bounce the user straight back here from the dashboard gate.
+    try {
+      const uid = userId ?? (await getCurrentUser())?.id
+      if (uid) await saveEngineSettings(uid, prefs as unknown as Record<string, unknown>)
+    } catch {
+      // Offline / table not migrated — still proceed, but say so instead of
+      // silently letting the dashboard bounce back to onboarding.
+      notify('Could not save engine settings — you may see this screen again.', 'error')
     }
     onDone?.()
   }

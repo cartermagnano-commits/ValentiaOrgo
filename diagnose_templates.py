@@ -19,6 +19,11 @@ import json
 import sys
 from pathlib import Path
 
+# Windows consoles default to cp1252, which can't print Greek letters in
+# template names (e.g. "α-alkylation"); force UTF-8 output.
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 DEFAULT_TEMPLATE_FILE = Path(__file__).parent / "reaction_templates.json"
 
 # Sample substrates covering common functional groups
@@ -77,6 +82,7 @@ def load_and_parse(template_file: Path):
                 "name": entry.get("name", tid),
                 "smarts": entry["smarts"],
                 "conditions": entry.get("conditions", []),
+                "coupling": entry.get("coupling", False),
                 "rxn": rxn,
                 "n_reactants": rxn.GetNumReactantTemplates(),
             })
@@ -221,14 +227,17 @@ def main():
             print(f"  [{f['id']}] {f['reason']}")
 
     # ── 2. Missing conditions ─────────────────────────────────────────────────
-    no_conditions = [t for t in loaded if not t["conditions"]]
+    # Coupling templates run via run_coupling() and legitimately have no
+    # condition tags; empty conditions also mean "always eligible" in
+    # eligible_templates(), so only flag it as informational.
+    no_conditions = [t for t in loaded if not t["conditions"] and not t.get("coupling")]
     if no_conditions:
-        print(f"\nTEMPLATES WITH EMPTY CONDITIONS (silently excluded by reagent gating)")
+        print(f"\nNON-COUPLING TEMPLATES WITH EMPTY CONDITIONS (eligible under ALL reagents)")
         for t in no_conditions:
             print(f"  [{t['id']}] {t['name']}")
             print(f"    SMARTS: {t['smarts']}")
     else:
-        print(f"\nAll enabled templates have at least one condition tag. OK.")
+        print(f"\nAll enabled non-coupling templates have condition tags. OK.")
 
     # ── 3. Firing matrix ─────────────────────────────────────────────────────
     print(f"\nFIRING MATRIX  (Y = fires, - = no match)")

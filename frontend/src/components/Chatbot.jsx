@@ -5,8 +5,8 @@ function buildContext(branch, substrateSMILES) {
   if (!branch) return null
   return {
     substrate_smiles: substrateSMILES,
-    reagent_name: branch.reagent.name,
-    reagent_smiles: branch.reagent.smiles,
+    reagent_name: branch.reagent?.name,
+    reagent_smiles: branch.reagent?.smiles,
     reaction_name: branch.reaction_classification?.name ?? 'Unknown',
     product_smiles: branch.product_smiles,
     execution_history: branch.execution_history,
@@ -37,15 +37,26 @@ export default function Chatbot({ branch, substrateSMILES }) {
 
     try {
       const ctx = buildContext(branch, substrateSMILES)
+      let acc = ''
       await streamChat(
-        userMessages.slice(1), // strip welcome greeting before sending
+        userMessages
+          .slice(1) // strip welcome greeting before sending
+          // Failed-request bubbles are UI state, not conversation — don't
+          // replay them to the model as if it had said "Error: ..." itself.
+          .filter(m => !(m.role === 'assistant' && m.content.startsWith('Error:'))),
         ctx,
-        delta => setMessages(prev => {
-          const msgs = [...prev]
-          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: msgs[msgs.length - 1].content + delta }
-          return msgs
-        })
+        delta => {
+          acc += delta
+          setMessages(prev => {
+            const msgs = [...prev]
+            msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], content: msgs[msgs.length - 1].content + delta }
+            return msgs
+          })
+        }
       )
+      // A cleanly-ended stream with zero deltas would otherwise leave a
+      // permanently empty assistant bubble with no explanation.
+      if (!acc) throw new Error('The AI engine returned no response. Check Settings → Engine.')
     } catch (e) {
       setMessages(prev => {
         const msgs = [...prev]
@@ -68,7 +79,7 @@ export default function Chatbot({ branch, substrateSMILES }) {
           fontSize: 10, color: 'var(--accent)', background: 'rgba(88,166,255,0.08)',
           border: '1px solid rgba(88,166,255,0.2)', borderRadius: 4, padding: '4px 8px'
         }}>
-          Context: {branch.reagent.name} + {substrateSMILES}
+          Context: {branch.reagent?.name ?? 'Unknown reagent'} + {substrateSMILES}
         </div>
       )}
 

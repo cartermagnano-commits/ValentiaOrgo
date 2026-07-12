@@ -114,18 +114,27 @@ export async function updateChemistryFileContent(
   projectId: string,
   userId: string,
   content: ChemistryFileContent,
+  // Optimistic concurrency: when provided, the update only applies if the row's
+  // updated_at still matches — so a save from a stale tab fails loudly instead
+  // of silently overwriting work done in another tab or device.
+  expectedUpdatedAt?: string,
 ): Promise<ChemistryFile> {
   const now = new Date().toISOString()
-  const { data, error } = await supabase
+  let query = supabase
     .from('chemistry_files')
     .update({ content, updated_at: now })
     .eq('id', fileId)
     .eq('project_id', projectId)
     .eq('user_id', userId)
-    .select('*')
-    .single()
+  if (expectedUpdatedAt) query = query.eq('updated_at', expectedUpdatedAt)
+  const { data, error } = await query.select('*').maybeSingle()
 
   if (error) throw error
+  if (!data) {
+    throw new Error(
+      'This file was modified elsewhere (another tab or device). Reload the page to get the latest version before saving.',
+    )
+  }
   await touchProject(projectId, userId, now)
   return data as ChemistryFile
 }

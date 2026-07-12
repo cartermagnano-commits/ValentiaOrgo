@@ -107,7 +107,7 @@ export default function DashboardPage() {
         ...(file.content as Record<string, unknown>),
         startingMaterials: ['CC(=O)CCC'],
         targetMolecule: '',
-      } as typeof file.content)
+      } as typeof file.content, file.updated_at)
       notify('Example project created', 'success')
       router.push(`/projects/${project.id}`)
     } catch (err) {

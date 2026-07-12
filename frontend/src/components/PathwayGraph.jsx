@@ -107,7 +107,10 @@ function buildFanoutGraph(data, selectedBranchIds, selectedBranchId, selectedNod
 
     let prevId = startNodeId
 
-    branch.steps.slice(1).forEach((step, si) => {
+    // Saved pathwaysData round-trips through jsonb — guard the shape so one
+    // malformed branch can't crash the whole graph render.
+    const steps = Array.isArray(branch.steps) ? branch.steps : []
+    steps.slice(1).forEach((step, si) => {
       const nodeId = `${branch.id}_s${si + 1}`
       const label  = step.type === 'product'
         ? (branch.matches_target ? 'Target Match' : 'Product')

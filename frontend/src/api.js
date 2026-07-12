@@ -91,6 +91,16 @@ async function streamSSE(path, body, onDelta) {
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  const handleLine = (line) => {
+    if (!line.startsWith('data: ')) return false
+    const data = line.slice(6).trim()
+    if (data === '[DONE]') return true
+    let p = null
+    try { p = JSON.parse(data) } catch { return false }
+    if (p?.error) throw new Error(p.error)
+    if (p?.delta) onDelta(p.delta)
+    return false
+  }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -98,15 +108,14 @@ async function streamSSE(path, body, onDelta) {
     const lines = buffer.split('\n')
     buffer = lines.pop()
     for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      const data = line.slice(6).trim()
-      if (data === '[DONE]') return
-      let p = null
-      try { p = JSON.parse(data) } catch { continue }
-      if (p?.error) throw new Error(p.error)
-      if (p?.delta) onDelta(p.delta)
+      if (handleLine(line)) return
     }
   }
+  // A stream that ends without a trailing newline (mid-stream failure,
+  // proxy truncation) leaves its last event — often the error frame — in
+  // the buffer; deliver it instead of dropping it.
+  buffer += decoder.decode()
+  if (buffer) handleLine(buffer)
 }
 
 export async function streamExplanation(branch, substrateSMILES, onDelta) {

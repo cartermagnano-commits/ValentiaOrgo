@@ -116,6 +116,9 @@ export default function MoleculeInput({ label, value, onChange }) {
     setShowStages(false)
     try {
       const result = await analyzeImage(file)
+      // A newer upload, clear, or manual SMILES edit superseded this read —
+      // discard it so a slow response can't overwrite fresher state.
+      if (verifySeq.current !== seq) return
       setStages(result.stages ?? null)
       if (result.smiles) {
         onChange(result.smiles)
@@ -133,10 +136,11 @@ export default function MoleculeInput({ label, value, onChange }) {
         setShowSmiles(true)
       }
     } catch (e) {
+      if (verifySeq.current !== seq) return
       setError(e.message || 'Upload failed')
       setShowSmiles(true)
     } finally {
-      setLoading(false)
+      if (verifySeq.current === seq) setLoading(false)
     }
   }
   handleFileRef.current = handleFile

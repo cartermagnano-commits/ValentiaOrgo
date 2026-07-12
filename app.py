@@ -57,7 +57,6 @@ except ImportError:
 
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
 from reactivity_engine import TemplateEngine
-from reaction_classifier import classify_reaction
 
 # ── LLM config — Ollama is used when no Anthropic key is present ─────────────
 OLLAMA_BASE_URL    = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -402,15 +401,43 @@ RATE_LIMIT_MAX    = 60      # requests per window per IP
 RATE_LIMIT_WINDOW = 60.0    # seconds
 _rate_buckets: dict[str, deque] = {}
 
+_LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _client_ip(request) -> str:
+    """Best-effort real client IP.
+
+    All browser traffic arrives through the Next.js rewrite proxy, so
+    request.client.host is the proxy's address for every user — keying the
+    limiter on it collapses all clients into ONE shared bucket. Next.js sets
+    X-Forwarded-For with the real client; trust it only when the direct peer
+    is loopback (our own proxy), so a remote caller can't spoof the header
+    to dodge the limit.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if peer in _LOOPBACK_IPS:
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            return fwd.split(",")[0].strip() or peer
+    return peer
+
 
 @app.middleware("http")
 async def _rate_limit(request, call_next):
-    if request.url.path in RATE_LIMIT_PATHS:
-        ip = request.client.host if request.client else "unknown"
+    path = request.url.path
+    # /analyze/verify/{token} holds a server connection for minutes while it
+    # waits on the vision model — it must count against the budget too.
+    if path in RATE_LIMIT_PATHS or path.startswith("/analyze/verify/"):
+        ip = _client_ip(request)
         now = time.monotonic()
         bucket = _rate_buckets.setdefault(ip, deque())
         while bucket and now - bucket[0] > RATE_LIMIT_WINDOW:
             bucket.popleft()
+        if not bucket:
+            # Opportunistically drop other empty buckets so the per-IP dict
+            # can't grow without bound across many distinct clients.
+            for stale_ip in [k for k, v in _rate_buckets.items() if not v and k != ip]:
+                _rate_buckets.pop(stale_ip, None)
         if len(bucket) >= RATE_LIMIT_MAX:
             return JSONResponse(
                 status_code=429,
@@ -659,11 +686,20 @@ def _warm_molscribe() -> None:
 _executor.submit(_warm_molscribe)
 
 
+# /health is polled by every open tab (ApiStatusBanner), and the Ollama probe
+# inside it is a blocking HTTP call. Cache the probe result briefly so poll
+# storms cost one probe per window, and (below) run it off the event loop.
+_OLLAMA_STATUS_TTL = 5.0  # seconds
+_ollama_status_cache: tuple[float, dict] | None = None
+
+
 def _ollama_status() -> dict:
     """Probe the local Ollama server. Returns reachability + available models.
 
     Used both at startup (logging) and by GET /engine/ollama-status so the
     "Choose Your Engine" picker can show a real detected/not-detected state.
+    Synchronous (blocking up to ~5s when Ollama is down) — async endpoints
+    must call it via _ollama_status_async, never directly.
     """
     try:
         import httpx
@@ -688,8 +724,26 @@ def _ollama_status() -> dict:
             "chat_model": OLLAMA_MODEL,
             "vision_model": None,
             "vision_available": False,
-            "error": f"{type(exc).__name__}: {exc}",
+            # Class name only — full text can embed internal URLs/paths and
+            # this dict is served verbatim by /engine/ollama-status.
+            "error": type(exc).__name__,
         }
+
+
+async def _ollama_status_async() -> dict:
+    """TTL-cached, non-blocking wrapper around _ollama_status.
+
+    The probe is a synchronous HTTP call with a 5s connect timeout; calling it
+    directly from an async endpoint froze the WHOLE event loop for up to 5s
+    per /health poll whenever Ollama was down.
+    """
+    global _ollama_status_cache
+    now = time.monotonic()
+    if _ollama_status_cache and now - _ollama_status_cache[0] < _OLLAMA_STATUS_TTL:
+        return _ollama_status_cache[1]
+    status = await asyncio.to_thread(_ollama_status)
+    _ollama_status_cache = (time.monotonic(), status)
+    return status
 
 
 def _check_ollama() -> None:
@@ -714,13 +768,13 @@ _check_ollama()
 @app.get("/engine/ollama-status")
 async def engine_ollama_status():
     """Live probe for the engine picker: is a local Ollama server available?"""
-    return _ollama_status()
+    return await _ollama_status_async()
 
 
 @app.get("/health")
 async def health():
     """Readiness probe used by the frontend (offline banner) and any monitor."""
-    ollama = _ollama_status()
+    ollama = await _ollama_status_async()
     return {
         "status": "ok",
         "decimer_ready": _decimer_fn is not None,
@@ -1105,7 +1159,10 @@ async def analyze(file: UploadFile = File(...)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Processing failed: {exc}") from exc
+        # Full detail goes to the log; the response stays generic so internal
+        # paths/library errors don't leak to callers.
+        logger.exception("Image analysis failed")
+        raise HTTPException(status_code=500, detail="Image processing failed.") from exc
     return result
 
 
@@ -1123,6 +1180,12 @@ async def analyze_verify(token: str):
         vision_read = await asyncio.wait_for(
             asyncio.wrap_future(entry["future"]), timeout=330.0
         )
+    except asyncio.CancelledError:
+        # Client disconnected mid-wait (tab closed, page refreshed). Put the
+        # entry back — the token was consumed but the verdict never delivered,
+        # and a retry after reload should still be able to collect it.
+        _PENDING_VERIFY[token] = entry
+        raise
     except Exception as exc:
         logger.warning("Deferred verification failed (%s): %s", type(exc).__name__, exc)
         vision_read = None
@@ -1197,9 +1260,12 @@ async def predict(req: PredictRequest):
     }
 
 
+MAX_SMILES_CHARS = 512  # generous for coursework molecules; blocks CPU-burn payloads
+
+
 @app.get("/structure")
 async def structure(
-    smiles: str = Query(...),
+    smiles: str = Query(..., max_length=MAX_SMILES_CHARS),
     width: int = Query(200, ge=40, le=800),
     height: int = Query(150, ge=40, le=600),
 ):
@@ -1215,8 +1281,8 @@ async def structure(
 
 @app.get("/molfile")
 async def molfile(
-    smiles: str = Query(...),
-    name: str = Query("molecule"),
+    smiles: str = Query(..., max_length=MAX_SMILES_CHARS),
+    name: str = Query("molecule", max_length=128),
 ):
     """Return an MDL Molfile (.mol) for a SMILES, as a downloadable attachment."""
     from rdkit import Chem
@@ -1320,7 +1386,7 @@ def _trace_dag(pool: dict, target_smiles: str) -> tuple[list[dict], list[dict]]:
         is_target = (smi == target_smiles)
 
         if info.prov_type == "start":
-            label = f"Starting Material {info.source_index + 1}" if info.source_index else "Starting Material"
+            label = f"Starting Material {info.source_index + 1}" if info.source_index is not None else "Starting Material"
             node_type = "start"
         elif is_target:
             label = "Target"
@@ -1878,12 +1944,21 @@ def _engine_ground_from_text(text: str) -> str:
         from rdkit import Chem
         from rdkit import RDLogger
         RDLogger.DisableLog("rdApp.*")
-        mol = Chem.MolFromSmiles(text.replace("+", "."))
+        # Parse as-is first: blindly replacing '+' corrupts charged SMILES
+        # like [NH3+] or [Li+]. Only fall back to treating '+' as a fragment
+        # separator when the literal text doesn't parse.
+        mol = Chem.MolFromSmiles(text)
+        if mol is None:
+            mol = Chem.MolFromSmiles(text.replace("+", "."))
         if mol is None:
             return ""
         frags = Chem.GetMolFrags(mol, asMols=True)
         if len(frags) < 2:
             return ""
+        # First fragment AS WRITTEN is the substrate. Don't pick by size:
+        # reagent counterions/salt partners (e.g. LDA's diisopropylamide) can
+        # out-weigh a small substrate, and typed input follows the
+        # "substrate + reagent" convention anyway.
         comps = [Chem.MolToSmiles(f) for f in frags]
         substrate, reagent = comps[0], ".".join(comps[1:])
         conditions = TemplateEngine._infer_conditions(reagent)
@@ -2018,8 +2093,13 @@ def _react_from_image(raw_bytes: bytes) -> dict:
 
     img = _resize(img)
     current = img.copy()
-    for _, fn in [("perspective", perspective_correct), ("deskew", deskew),
-                  ("denoise", denoise), ("binarize", normalize_binarize)]:
+    # Same gating as /analyze: clean digital depictions skip the photo-repair
+    # stages (slow, and binarization can destroy thin bonds in crisp renders).
+    digital = _is_clean_digital(img)
+    photo_stages = [] if digital else [
+        ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
+    ]
+    for _, fn in photo_stages + [("binarize", normalize_binarize)]:
         try:
             result = fn(current)
             if result is not None and isinstance(result, np.ndarray):
@@ -2027,23 +2107,19 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         except Exception:
             pass
 
-    # 2. OSR via DECIMER
+    # 2. OSR via DECIMER — digital images read the original first (closest to
+    # DECIMER's training distribution), binarized only as fallback; photos the
+    # reverse, matching the /analyze pipeline.
     recognized_smiles: str | None = None
-    tmp_path: str | None = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp_path = tmp.name
-        cv2.imwrite(tmp_path, current)
-        recognized_smiles = _load_decimer()(tmp_path)
+        first, second = (img, current) if digital else (current, img)
+        recognized_smiles = _decimer_read(first) or _decimer_read(second)
         logger.info("DECIMER output: %r", recognized_smiles)
     except Exception as exc:
         # DECIMER missing/broken is recoverable — the Ollama vision fallback
         # below gets a chance, same as the /analyze pipeline.
         logger.warning("DECIMER failed (%s): %s — trying vision fallback", type(exc).__name__, exc)
         recognized_smiles = None
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
     # Encode the preprocessed image once; reused by all Ollama fallback calls below
     _, _ibuf = cv2.imencode(".png", current)
@@ -2236,7 +2312,8 @@ async def react_from_image(file: UploadFile = File(...)):
     try:
         result = await loop.run_in_executor(_executor, _react_from_image, contents)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Pipeline failed: {exc}") from exc
+        logger.exception("react-from-image pipeline failed")
+        raise HTTPException(status_code=500, detail="Reaction image processing failed.") from exc
     return result
 
 
