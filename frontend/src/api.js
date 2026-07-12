@@ -18,7 +18,7 @@ async function authHeaders() {
 async function post(path, body) {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -31,7 +31,11 @@ async function post(path, body) {
 export async function analyzeImage(file) {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(BASE + '/analyze', { method: 'POST', body: form })
+  const res = await fetch(BASE + '/analyze', {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: form,
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Analyze failed')
@@ -43,7 +47,9 @@ export async function analyzeImage(file) {
 // returned confidence "verifying". Blocks server-side until the vision read
 // finishes; the token is single-use.
 export async function verifyAnalysis(token) {
-  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`)
+  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`, {
+    headers: await authHeaders(),
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Verification failed')
@@ -58,7 +64,11 @@ export async function reactDirect(substrateSMILES, reagentSMILES) {
 export async function reactFromImage(file) {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(BASE + '/react-from-image', { method: 'POST', body: form })
+  const res = await fetch(BASE + '/react-from-image', {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: form,
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Prediction failed')

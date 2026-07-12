@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from collections import deque
@@ -453,6 +454,19 @@ async def _rate_limit(request, call_next):
 # must then attach `Authorization: Bearer <token>` to these requests.
 SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
 
+# Deployment mode. "dev" (default) keeps auth optional for local use. "prod"
+# refuses to start without the JWT secret, so the API can never reach a real
+# network with auth silently disabled — the failure is at boot, not after
+# someone finds the open endpoint.
+ORGO_ENV = os.environ.get("ORGO_ENV", "dev").lower()
+IS_PROD = ORGO_ENV in ("prod", "production")
+if IS_PROD and not SUPABASE_JWT_SECRET:
+    raise RuntimeError(
+        "ORGO_ENV=prod requires SUPABASE_JWT_SECRET (Supabase → Project Settings "
+        "→ API → JWT secret). Without it every endpoint would be unauthenticated. "
+        "Set the secret, or run with ORGO_ENV=dev for local development."
+    )
+
 
 async def require_auth(authorization: str = Header(default="")):
     if not SUPABASE_JWT_SECRET:
@@ -477,13 +491,64 @@ def _guard_messages(messages) -> None:
         raise HTTPException(status_code=413, detail="Message payload too large.")
 
 
+# ── Hosted-mode quota ─────────────────────────────────────────────────────────
+# Hosted mode spends the SERVER's LLM API key, so each user gets a daily request
+# cap. Local and BYOK modes spend the user's own resources — unmetered. Counters
+# are in-memory by design: the API runs as a single process (see the executor
+# notes below), and losing a day's counters on restart is acceptable for what is
+# abuse protection, not billing.
+HOSTED_DAILY_REQUESTS = int(os.environ.get("HOSTED_DAILY_REQUESTS", "200"))
+_hosted_usage: dict[tuple[str, str], int] = {}   # (user_id, YYYY-MM-DD) → requests
+
+
+def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -> None:
+    """Raise 429 when a hosted-mode generative request exceeds the daily cap.
+
+    A missing engine config falls back to env-based selection, which also uses
+    the server key when one is configured — so it's metered the same way.
+    Without auth (dev), all callers share the 'anon' bucket.
+    """
+    mode = (engine.mode or "hosted").lower() if engine else "hosted"
+    if mode != "hosted":
+        return
+    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+        return  # no server key configured → hosted degrades to local; nothing to meter
+    day = time.strftime("%Y-%m-%d")
+    for stale in [k for k in _hosted_usage if k[1] != day]:
+        _hosted_usage.pop(stale, None)
+    key = (user_id or "anon", day)
+    if _hosted_usage.get(key, 0) >= HOSTED_DAILY_REQUESTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Daily hosted AI quota reached. Switch to Local or BYOK in "
+                   "Settings → Engine, or try again tomorrow.",
+        )
+    _hosted_usage[key] = _hosted_usage.get(key, 0) + 1
+
+
 _decimer_fn = None
-_executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER + chemistry engine (not thread-safe)
+_executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER + MolScribe OSR only (not thread-safe)
 _svg_pool  = ThreadPoolExecutor(max_workers=4)   # RDKit SVG rendering (thread-safe, fast)
+_chem_pool = ThreadPoolExecutor(max_workers=4)   # template engine / pathway search — kept off
+                                                 # _executor so /react and /pathways never queue
+                                                 # behind an in-flight OSR read
 _vision_pool = ThreadPoolExecutor(max_workers=2) # Ollama vision HTTP calls — must not
                                                  # share _executor or they'd serialize
                                                  # behind DECIMER instead of running
                                                  # concurrently with it
+
+# One TemplateEngine per chem-pool thread: RDKit's compiled reaction objects
+# aren't documented thread-safe for concurrent RunReactants, and re-loading the
+# template JSON per thread costs milliseconds once.
+_thread_engines = threading.local()
+
+
+def _get_engine() -> TemplateEngine:
+    engine = getattr(_thread_engines, "engine", None)
+    if engine is None:
+        engine = TemplateEngine()
+        _thread_engines.engine = engine
+    return engine
 
 # Deferred verification: /analyze returns the DECIMER read immediately and hands
 # the client a token; the in-flight vision read is parked here until the client
@@ -502,9 +567,6 @@ def _store_pending_verify(future, smiles: str) -> str:
     _PENDING_VERIFY[token] = {"future": future, "smiles": smiles, "created": now}
     return token
 MAX_DIM = 1024
-
-# Load templates once at startup — avoids re-parsing JSON per request
-_engine = TemplateEngine()
 
 # ── Reagent list — edit here to add/remove reagents for /pathways fan-out ─────
 # "conditions" tags are matched against each template's "conditions" field in
@@ -809,6 +871,23 @@ def _to_b64(img: np.ndarray) -> str | None:
     return base64.b64encode(buf).decode() if ok else None
 
 
+STAGE_THUMB_DIM = 320  # stage previews are diagnostic thumbnails, not working images
+
+
+def _stage_b64(img: np.ndarray) -> str | None:
+    """Downscaled base64 PNG for the /analyze stage strip. Full-resolution
+    stages made every /analyze response multi-MB; the strip renders these at
+    ~100 px anyway, so a 320 px thumbnail loses nothing visible."""
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if max(h, w) > STAGE_THUMB_DIM:
+        scale = STAGE_THUMB_DIM / max(h, w)
+        img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
+                         interpolation=cv2.INTER_AREA)
+    return _to_b64(img)
+
+
 def _resize(img: np.ndarray) -> np.ndarray:
     h, w = img.shape[:2]
     if max(h, w) > MAX_DIM:
@@ -932,7 +1011,7 @@ def _process(raw_bytes: bytes) -> dict:
         raise ValueError(f"Could not decode image: {exc}") from exc
 
     img = _resize(img)
-    stages: dict[str, str | None] = {"original": _to_b64(img)}
+    stages: dict[str, str | None] = {"original": _stage_b64(img)}
     current = img.copy()
 
     # Clean digital depictions (screenshots, PDF renders) skip the photo-repair
@@ -951,9 +1030,9 @@ def _process(raw_bytes: bytes) -> dict:
             # A failed stage is non-fatal — keep the last good image and continue,
             # but surface the cause instead of hiding it.
             logger.warning("Preprocessing stage %r failed (%s): %s", name, type(exc).__name__, exc)
-        stages[name] = _to_b64(current)
+        stages[name] = _stage_b64(current)
 
-    stages["final"] = _to_b64(current)
+    stages["final"] = _stage_b64(current)
 
     # ── Multi-candidate OSR ───────────────────────────────────────────────
     # DECIMER reads BOTH the original and the binarized image: binarization
@@ -991,42 +1070,32 @@ def _process(raw_bytes: bytes) -> dict:
     # Second local reader — different architecture, largely uncorrelated errors.
     ms_read = _molscribe_read(img)
 
-    vision_awaited = False
-
-    def _await_vision() -> str | None:
-        nonlocal vision_awaited
-        vision_awaited = True
-        try:
-            return vision_future.result(timeout=310)
-        except Exception as exc:
-            logger.warning("Vision read failed (%s): %s", type(exc).__name__, exc)
-            return None
-
     smiles: str | None = None
-    vision_read: str | None = None
     verified: bool | None = None
     verify_token: str | None = None
+    pending = False   # verdict needs the in-flight vision read (endpoint awaits it)
 
     # Resolve DECIMER's two renditions into one candidate. When they disagree
     # (photos where binarization changed the read), MolScribe breaks the tie
-    # for free; the vision model is awaited only if MolScribe can't decide.
-    if orig_read and bin_read and orig_read != bin_read:
-        if ms_read in (orig_read, bin_read):
-            decimer_read = ms_read
-        else:
-            vision_read = _await_vision()
-            if vision_read == orig_read:
-                decimer_read = orig_read
-            elif vision_read == bin_read:
-                decimer_read = bin_read
-            else:
-                decimer_read = orig_read if digital else bin_read
-        logger.info("DECIMER disagreement: orig=%r bin=%r molscribe=%r vision=%r → %r",
-                    orig_read, bin_read, ms_read, vision_read, decimer_read)
+    # for free. Whenever the verdict needs the VISION read, this function does
+    # NOT wait for it — it runs on the single OSR worker, and parking that
+    # worker on a minutes-long HTTP call would freeze every other /analyze and
+    # /react-from-image request. The async endpoint awaits the future and
+    # settles the verdict via _resolve_with_vision instead.
+    disagreement = bool(orig_read and bin_read and orig_read != bin_read)
+    if disagreement and ms_read in (orig_read, bin_read):
+        decimer_read = ms_read
+        logger.info("DECIMER disagreement: orig=%r bin=%r → MolScribe broke tie: %r",
+                    orig_read, bin_read, ms_read)
+    elif disagreement:
+        decimer_read = None   # vision arbitrates between the two renditions
+        pending = True
     else:
         decimer_read = orig_read or bin_read
 
-    if decimer_read and ms_read == decimer_read:
+    if pending:
+        pass
+    elif decimer_read and ms_read == decimer_read:
         # Two independent local readers agree — instant "verified", no wait
         # on the vision model at all (its in-flight result is simply unused).
         smiles = decimer_read
@@ -1034,41 +1103,28 @@ def _process(raw_bytes: bytes) -> dict:
         logger.info("Reader agreement: decimer=%r == molscribe → verified", smiles)
     elif decimer_read and ms_read:
         # The local readers disagree — the structure itself is in question, so
-        # block on the vision model to arbitrate (an early return here could
-        # show a structure that later flips). Two-of-three agreement verifies;
-        # no agreement keeps DECIMER's pick, flagged low.
-        if vision_read is None and not vision_awaited:
-            vision_read = _await_vision()
-        if vision_read in (decimer_read, ms_read):
-            smiles = vision_read
-            verified = True
-        else:
-            smiles = decimer_read
-            verified = False
-        logger.info("Reader disagreement: decimer=%r molscribe=%r vision=%r → chose %r (verified=%s)",
-                    decimer_read, ms_read, vision_read, smiles, verified)
+        # the vision model must arbitrate before anything is shown (an early
+        # return could show a structure that later flips).
+        pending = True
     elif decimer_read or ms_read:
         # Only one local reader succeeded — return its structure immediately;
         # the in-flight vision read becomes a deferred verification the client
         # collects via GET /analyze/verify/{token}. It can only change the
-        # badge, never the structure. (If vision was already awaited above,
-        # settle the verdict now instead of issuing a token.)
+        # badge, never the structure.
         smiles = decimer_read or ms_read
-        if vision_awaited:
-            verified = (vision_read == smiles) if vision_read else None
-        else:
-            verify_token = _store_pending_verify(vision_future, smiles)
+        verify_token = _store_pending_verify(vision_future, smiles)
     else:
         # No local reader succeeded — the vision read is the structure source
         # itself, so there is no independent confirmation (verified stays None).
-        vision_read = _await_vision()
-        smiles = vision_read
+        pending = True
 
     valid = smiles is not None
     if valid:
         error = None
 
-    if verify_token:
+    if pending:
+        confidence = "unverified"   # placeholder; endpoint overwrites after vision
+    elif verify_token:
         confidence = "verifying"
     elif verified is True:
         confidence = "high"
@@ -1077,7 +1133,7 @@ def _process(raw_bytes: bytes) -> dict:
     else:
         confidence = "unverified"
 
-    return {
+    result = {
         "smiles": smiles,
         "valid": valid,
         "verified": verified,
@@ -1089,10 +1145,45 @@ def _process(raw_bytes: bytes) -> dict:
             "decimer_original": orig_read,
             "decimer_binarized": bin_read,
             "molscribe": ms_read,
-            "vision": vision_read,
+            "vision": None,
             "clean_digital": digital,
         },
     }
+    if pending:
+        result["_pending"] = {
+            "future": vision_future, "orig": orig_read, "bin": bin_read,
+            "ms": ms_read, "digital": digital,
+        }
+    return result
+
+
+def _resolve_with_vision(orig_read: str | None, bin_read: str | None,
+                         ms_read: str | None, digital: bool,
+                         vision_read: str | None) -> tuple[str | None, bool | None]:
+    """Settle an /analyze verdict that required the vision read: arbitrate a
+    DECIMER rendition disagreement and/or a DECIMER-vs-MolScribe conflict.
+    Pure function mirroring the decision order in _process; returns
+    (smiles, verified)."""
+    if orig_read and bin_read and orig_read != bin_read:
+        if vision_read == orig_read:
+            decimer_read = orig_read
+        elif vision_read == bin_read:
+            decimer_read = bin_read
+        else:
+            decimer_read = orig_read if digital else bin_read
+    else:
+        decimer_read = orig_read or bin_read
+
+    if decimer_read and ms_read:
+        # Two-of-three agreement verifies; no agreement keeps DECIMER's pick,
+        # flagged low.
+        if vision_read in (decimer_read, ms_read):
+            return vision_read, True
+        return decimer_read, False
+    if decimer_read or ms_read:
+        chosen = decimer_read or ms_read
+        return chosen, (vision_read == chosen) if vision_read else None
+    return vision_read, None
 
 
 def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
@@ -1105,7 +1196,7 @@ def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
     conditions = reagent.get("conditions", [])
 
     try:
-        branches = _engine.run_for_reagent(substrate, reagent["smiles"], conditions)
+        branches = _get_engine().run_for_reagent(substrate, reagent["smiles"], conditions)
     except Exception:
         logger.exception("Template engine error for reagent %s", reagent["name"])
         return []
@@ -1146,7 +1237,7 @@ def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.post("/analyze")
+@app.post("/analyze", dependencies=[Depends(require_auth)])
 async def analyze(file: UploadFile = File(...)):
     contents = await file.read()
     if not contents:
@@ -1163,10 +1254,42 @@ async def analyze(file: UploadFile = File(...)):
         # paths/library errors don't leak to callers.
         logger.exception("Image analysis failed")
         raise HTTPException(status_code=500, detail="Image processing failed.") from exc
+
+    pending = result.pop("_pending", None)
+    if pending:
+        # The verdict depends on the in-flight vision read. Await it here on
+        # the event loop — the OSR worker was already released, so a slow
+        # vision model delays only THIS request, not every other upload.
+        try:
+            vision_read = await asyncio.wait_for(
+                asyncio.wrap_future(pending["future"]), timeout=310.0)
+        except asyncio.CancelledError:
+            raise  # client disconnected — nothing to salvage
+        except Exception as exc:
+            logger.warning("Vision read failed (%s): %s", type(exc).__name__, exc)
+            vision_read = None
+        smiles, verified = _resolve_with_vision(
+            pending["orig"], pending["bin"], pending["ms"],
+            pending["digital"], vision_read)
+        logger.info(
+            "Vision-arbitrated read: orig=%r bin=%r molscribe=%r vision=%r → %r (verified=%s)",
+            pending["orig"], pending["bin"], pending["ms"], vision_read, smiles, verified)
+        result["smiles"] = smiles
+        result["valid"] = smiles is not None
+        result["verified"] = verified
+        if verified is True:
+            result["confidence"] = "high"
+        elif verified is False:
+            result["confidence"] = "low"
+        else:
+            result["confidence"] = "unverified"
+        if result["valid"]:
+            result["error"] = None
+        result["reads"]["vision"] = vision_read
     return result
 
 
-@app.get("/analyze/verify/{token}")
+@app.get("/analyze/verify/{token}", dependencies=[Depends(require_auth)])
 async def analyze_verify(token: str):
     """
     Collect the deferred vision verification for a prior /analyze response.
@@ -1207,7 +1330,7 @@ class PredictRequest(BaseModel):
     reagent_smiles: str
 
 
-@app.post("/predict")
+@app.post("/predict", dependencies=[Depends(require_auth)])
 async def predict(req: PredictRequest):
     from rdkit import Chem
     sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
@@ -1229,10 +1352,10 @@ async def predict(req: PredictRequest):
             break
 
     def _predict():
-        return _engine.run_for_reagent(substrate, reagent_canon, conditions)
+        return _get_engine().run_for_reagent(substrate, reagent_canon, conditions)
 
     loop = asyncio.get_event_loop()
-    branches = await loop.run_in_executor(_executor, _predict)
+    branches = await loop.run_in_executor(_chem_pool, _predict)
 
     if not branches:
         raise HTTPException(
@@ -1490,7 +1613,7 @@ def _bfs_convergent(
             environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
 
             try:
-                branches = _engine.run_for_reagent(current_smiles, reagent["smiles"], conditions)
+                branches = _get_engine().run_for_reagent(current_smiles, reagent["smiles"], conditions)
             except Exception:
                 logger.exception("BFS: engine error for reagent %s on %s", reagent["name"], current_smiles)
                 continue
@@ -1543,13 +1666,13 @@ def _bfs_convergent(
                     queue.append((product, new_depth))
 
         # ── 2. Coupling templates (both reactants from pool) ──────────────────
-        if not terminated_early and _engine.coupling_templates:
+        if not terminated_early and _get_engine().coupling_templates:
             pool_snapshot = list(pool.keys())  # snapshot to avoid mutation during iteration
             for other_smiles in pool_snapshot:
                 if other_smiles == current_smiles:
                     continue
                 try:
-                    coupling_results = _engine.run_coupling(current_smiles, other_smiles)
+                    coupling_results = _get_engine().run_coupling(current_smiles, other_smiles)
                 except Exception:
                     logger.exception("BFS: coupling error %s + %s", current_smiles, other_smiles)
                     continue
@@ -1631,7 +1754,7 @@ def _bfs_convergent(
     }
 
 
-@app.post("/pathways")
+@app.post("/pathways", dependencies=[Depends(require_auth)])
 async def pathways(req: PathwaysRequest):
     from rdkit import Chem
 
@@ -1673,7 +1796,7 @@ async def pathways(req: PathwaysRequest):
     # ── Target given: convergent BFS ──────────────────────────────────────────
     if target_canon:
         search_result = await loop.run_in_executor(
-            _executor, _bfs_convergent, canon_starts, target_canon, desired_depth
+            _chem_pool, _bfs_convergent, canon_starts, target_canon, desired_depth
         )
 
         status = search_result["result_status"]
@@ -1732,7 +1855,7 @@ async def pathways(req: PathwaysRequest):
     for substrate in canon_starts:
         for reagent in REAGENT_LIST:
             reagent_branches = await loop.run_in_executor(
-                _executor, _run_all_pathways_for_reagent, substrate, reagent
+                _chem_pool, _run_all_pathways_for_reagent, substrate, reagent
             )
             for branch in reagent_branches:
                 branch["id"] = f"branch_{branch_idx}_{branch['template_id']}"
@@ -1769,8 +1892,9 @@ class ExplainRequest(BaseModel):
     engine: Optional[EngineConfig] = None  # generative engine selection (Choose Your Engine)
 
 
-@app.post("/explain", dependencies=[Depends(require_auth)])
-async def explain(req: ExplainRequest):
+@app.post("/explain")
+async def explain(req: ExplainRequest, user_id: str | None = Depends(require_auth)):
+    _enforce_hosted_quota(req.engine, user_id)
     if len(req.execution_history) > MAX_HISTORY_LINES:
         raise HTTPException(status_code=413, detail="Execution history too large.")
     system_prompt = (
@@ -1837,8 +1961,8 @@ class StereoRequest(BaseModel):
     engine: Optional[EngineConfig] = None
 
 
-@app.post("/stereo", dependencies=[Depends(require_auth)])
-async def stereo(req: StereoRequest):
+@app.post("/stereo")
+async def stereo(req: StereoRequest, user_id: str | None = Depends(require_auth)):
     """Opt-in stereo/regiochemistry annotation pass.
 
     The deterministic SMARTS engine owns connectivity but cannot express
@@ -1846,6 +1970,7 @@ async def stereo(req: StereoRequest):
     stereo/regio outcome of the engine's product — it must not propose a
     different product structure.
     """
+    _enforce_hosted_quota(req.engine, user_id)
     system_prompt = (
         "You are an organic chemistry stereochemistry specialist for Orgo AI.\n"
         "You are given a reaction whose CONNECTIVITY was computed by a verified "
@@ -1889,8 +2014,9 @@ class ChatRequest(BaseModel):
     engine: Optional[EngineConfig] = None  # generative engine selection (Choose Your Engine)
 
 
-@app.post("/chat", dependencies=[Depends(require_auth)])
-async def chat(req: ChatRequest):
+@app.post("/chat")
+async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
+    _enforce_hosted_quota(req.engine, user_id)
     _guard_messages(req.messages)
     context_block = ""
     if req.context:
@@ -1962,7 +2088,7 @@ def _engine_ground_from_text(text: str) -> str:
         comps = [Chem.MolToSmiles(f) for f in frags]
         substrate, reagent = comps[0], ".".join(comps[1:])
         conditions = TemplateEngine._infer_conditions(reagent)
-        branches = _engine.run_for_reagent(substrate, reagent, conditions)
+        branches = _get_engine().run_for_reagent(substrate, reagent, conditions)
         if not branches:
             return ""
         lines = [
@@ -2042,15 +2168,16 @@ def _assist_prompts(file_type: str, content: dict, ground: str = "") -> tuple[st
     return system, user
 
 
-@app.post("/assist", dependencies=[Depends(require_auth)])
-async def assist(req: AssistRequest):
+@app.post("/assist")
+async def assist(req: AssistRequest, user_id: str | None = Depends(require_auth)):
+    _enforce_hosted_quota(req.engine, user_id)
     content = req.content or {}
     ground = ""
     if req.file_type == "mechanism":
         text = str(content.get("reactionInput", "")).strip()
         if text:
             loop = asyncio.get_event_loop()
-            ground = await loop.run_in_executor(_executor, _engine_ground_from_text, text)
+            ground = await loop.run_in_executor(_chem_pool, _engine_ground_from_text, text)
 
     system, user = _assist_prompts(req.file_type, content, ground)
     return StreamingResponse(
@@ -2198,7 +2325,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         "Template engine: substrate=%r  reagent=%r  conditions=%s",
         substrate_smiles, reagent_smiles, conditions,
     )
-    branches = _engine.run_for_reagent(substrate_smiles, reagent_smiles, conditions)
+    branches = _get_engine().run_for_reagent(substrate_smiles, reagent_smiles, conditions)
     logger.info("Template engine returned %d branch(es)", len(branches))
 
     # 5. Last-resort: if engine matched nothing, ask Ollama for a cleaner re-read and retry
@@ -2222,7 +2349,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
                         "Retrying engine with Ollama SMILES: substrate=%r  reagent=%r  conditions=%s",
                         substrate_smiles, reagent_smiles, conditions,
                     )
-                    branches = _engine.run_for_reagent(substrate_smiles, reagent_smiles, conditions)
+                    branches = _get_engine().run_for_reagent(substrate_smiles, reagent_smiles, conditions)
                     logger.info("Retry engine returned %d branch(es)", len(branches))
 
     products = [
@@ -2251,7 +2378,7 @@ class ReactRequest(BaseModel):
     reagent_smiles: str
 
 
-@app.post("/react")
+@app.post("/react", dependencies=[Depends(require_auth)])
 async def react(req: ReactRequest):
     """Return all predicted products for a given substrate + reagent SMILES pair."""
     from rdkit import Chem
@@ -2275,10 +2402,10 @@ async def react(req: ReactRequest):
             break
 
     def _run():
-        return _engine.run_for_reagent(substrate, reagent, conditions)
+        return _get_engine().run_for_reagent(substrate, reagent, conditions)
 
     loop = asyncio.get_event_loop()
-    branches = await loop.run_in_executor(_executor, _run)
+    branches = await loop.run_in_executor(_chem_pool, _run)
 
     environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
 
@@ -2301,7 +2428,7 @@ async def react(req: ReactRequest):
     }
 
 
-@app.post("/react-from-image")
+@app.post("/react-from-image", dependencies=[Depends(require_auth)])
 async def react_from_image(file: UploadFile = File(...)):
     contents = await file.read()
     if not contents:

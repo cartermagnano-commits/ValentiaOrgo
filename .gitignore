@@ -36,6 +36,9 @@ static/
 .DS_Store
 Thumbs.db
 
+# Claude Code machine-local settings (the skills/ dir IS committed)
+.claude/settings.local.json
+
 # Nested scratch repo (not a submodule)
 Image Pre-Processing/
 frontend/tsconfig.tsbuildinfo

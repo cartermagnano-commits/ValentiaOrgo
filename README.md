@@ -47,6 +47,13 @@ pip install -r requirements.txt
 
 First run downloads DECIMER model weights (~500 MB, one-time).
 
+For a reproducible install (exact versions known to work together), use the
+lock file instead:
+
+```bash
+pip install -r requirements.lock
+```
+
 ### 2. API key (required for AI explanations and chatbot)
 
 The AI explanation panel and chatbot use the Claude API, which is a **paid service**.
@@ -106,6 +113,39 @@ npm run dev
 ```
 
 Then open **http://localhost:3000**.
+
+### Production mode
+
+Local dev runs with auth optional so the app works out of the box. **Never expose
+that configuration to a real network** — set `ORGO_ENV=prod`, which changes the
+contract:
+
+- The backend **refuses to start** unless `SUPABASE_JWT_SECRET` is set
+  (Supabase → Project Settings → API → JWT secret). With the secret set, every
+  compute and AI endpoint requires a valid Supabase login token; the frontend
+  already attaches it to all API calls.
+- Hosted engine mode (server-side LLM key) is metered per user:
+  `HOSTED_DAILY_REQUESTS` requests per day (default 200), 429 beyond that.
+  Local (Ollama) and BYOK modes are unmetered — they spend the user's own
+  resources.
+
+```bash
+# Production backend — bind loopback and put a reverse proxy (or the Next.js
+# server) in front; the LAN-open 0.0.0.0 bind in start.bat is for dev only.
+ORGO_ENV=prod SUPABASE_JWT_SECRET=... ANTHROPIC_API_KEY=... \
+  uvicorn app:app --host 127.0.0.1 --port 8000
+
+# Production frontend
+cd frontend && npm run build && npm start
+```
+
+Run exactly **one** uvicorn worker (the default): rate-limit buckets, hosted-mode
+quota counters, and deferred-verification tokens live in process memory, and the
+OSR models load once per process.
+
+Only `/health`, `/engine/*`, `/structure`, and `/molfile` stay public in prod:
+`/structure` is loaded via `<img src>` (which cannot carry an auth header), and
+both renderers are cheap with hard input caps.
 
 ## Endpoints
 
