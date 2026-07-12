@@ -392,14 +392,21 @@ MAX_CHAT_MESSAGES = 50
 MAX_CONTENT_CHARS = 24_000            # total chars across chat messages
 MAX_HISTORY_LINES = 500
 
-# Rate-limit only the expensive compute/generative endpoints — not /structure
-# image tiles or /health polls.
-RATE_LIMIT_PATHS = {
+# Two rate-limit tiers per IP. HEAVY covers compute/generative endpoints.
+# LIGHT covers the cheap renderers that must stay public even in prod
+# (/structure is loaded via <img src>, which can't carry an auth header):
+# they're input-capped but shouldn't be free CPU for a scripted loop. The
+# LIGHT budget is deliberately loose — a pathway graph legitimately renders
+# well over 60 SVG tiles in a minute, so it can't share the HEAVY tier.
+# /health and /engine/* polls stay unlimited.
+RATE_LIMIT_HEAVY = {
     "/analyze", "/react-from-image", "/react", "/pathways",
     "/explain", "/chat", "/assist", "/stereo",
 }
-RATE_LIMIT_MAX    = 60      # requests per window per IP
-RATE_LIMIT_WINDOW = 60.0    # seconds
+RATE_LIMIT_HEAVY_MAX = 60       # requests per window per IP
+RATE_LIMIT_LIGHT = {"/structure", "/molfile"}
+RATE_LIMIT_LIGHT_MAX = 600
+RATE_LIMIT_WINDOW = 60.0        # seconds
 _rate_buckets: dict[str, deque] = {}
 
 _LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost"}
@@ -427,59 +434,110 @@ def _client_ip(request) -> str:
 async def _rate_limit(request, call_next):
     path = request.url.path
     # /analyze/verify/{token} holds a server connection for minutes while it
-    # waits on the vision model — it must count against the budget too.
-    if path in RATE_LIMIT_PATHS or path.startswith("/analyze/verify/"):
-        ip = _client_ip(request)
-        now = time.monotonic()
-        bucket = _rate_buckets.setdefault(ip, deque())
-        while bucket and now - bucket[0] > RATE_LIMIT_WINDOW:
-            bucket.popleft()
-        if not bucket:
-            # Opportunistically drop other empty buckets so the per-IP dict
-            # can't grow without bound across many distinct clients.
-            for stale_ip in [k for k, v in _rate_buckets.items() if not v and k != ip]:
-                _rate_buckets.pop(stale_ip, None)
-        if len(bucket) >= RATE_LIMIT_MAX:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Rate limit exceeded — please slow down and retry shortly."},
-            )
-        bucket.append(now)
+    # waits on the vision model — it must count against the heavy budget too.
+    if path in RATE_LIMIT_HEAVY or path.startswith("/analyze/verify/"):
+        limit, tier = RATE_LIMIT_HEAVY_MAX, "heavy"
+    elif path in RATE_LIMIT_LIGHT:
+        limit, tier = RATE_LIMIT_LIGHT_MAX, "light"
+    else:
+        return await call_next(request)
+
+    key = f"{tier}:{_client_ip(request)}"
+    now = time.monotonic()
+    bucket = _rate_buckets.setdefault(key, deque())
+    while bucket and now - bucket[0] > RATE_LIMIT_WINDOW:
+        bucket.popleft()
+    if not bucket:
+        # Opportunistically drop other empty buckets so the per-IP dict
+        # can't grow without bound across many distinct clients.
+        for stale_key in [k for k, v in _rate_buckets.items() if not v and k != key]:
+            _rate_buckets.pop(stale_key, None)
+    if len(bucket) >= limit:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded — please slow down and retry shortly."},
+        )
+    bucket.append(now)
     return await call_next(request)
 
 
-# Optional Supabase JWT auth. Disabled unless SUPABASE_JWT_SECRET is set, so
-# local dev and current (userless) deployments are unaffected. When enabled,
-# protected endpoints require a valid Supabase access token. NOTE: the frontend
-# must then attach `Authorization: Bearer <token>` to these requests.
+# Optional Supabase JWT auth. Enabled when either verification method is
+# configured; disabled otherwise so local dev works out of the box. When
+# enabled, protected endpoints require a valid Supabase access token (the
+# frontend attaches `Authorization: Bearer <token>` to all API calls).
+#
+#   SUPABASE_JWT_SECRET — legacy shared-secret projects (HS256).
+#   SUPABASE_URL / SUPABASE_JWKS_URL — projects on JWT signing keys, the
+#     Supabase default since May 2025: tokens are RS256/ES256/EdDSA and are
+#     verified against the project's public JWKS endpoint. SUPABASE_URL is the
+#     same value the frontend uses as NEXT_PUBLIC_SUPABASE_URL.
+#
+# A project mid-migration can set both; the token's alg header picks the path.
 SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
+SUPABASE_JWKS_URL = os.environ.get("SUPABASE_JWKS_URL") or (
+    f"{os.environ['SUPABASE_URL'].rstrip('/')}/auth/v1/.well-known/jwks.json"
+    if os.environ.get("SUPABASE_URL") else None
+)
+AUTH_ENABLED = bool(SUPABASE_JWT_SECRET or SUPABASE_JWKS_URL)
 
 # Deployment mode. "dev" (default) keeps auth optional for local use. "prod"
-# refuses to start without the JWT secret, so the API can never reach a real
-# network with auth silently disabled — the failure is at boot, not after
-# someone finds the open endpoint.
+# refuses to start without a token-verification method, so the API can never
+# reach a real network with auth silently disabled — the failure is at boot,
+# not after someone finds the open endpoint.
 ORGO_ENV = os.environ.get("ORGO_ENV", "dev").lower()
 IS_PROD = ORGO_ENV in ("prod", "production")
-if IS_PROD and not SUPABASE_JWT_SECRET:
+if IS_PROD and not AUTH_ENABLED:
     raise RuntimeError(
-        "ORGO_ENV=prod requires SUPABASE_JWT_SECRET (Supabase → Project Settings "
-        "→ API → JWT secret). Without it every endpoint would be unauthenticated. "
-        "Set the secret, or run with ORGO_ENV=dev for local development."
+        "ORGO_ENV=prod requires a way to verify Supabase tokens: set SUPABASE_URL "
+        "(project URL — tokens verified via its public JWKS; Supabase default "
+        "since May 2025) and/or SUPABASE_JWT_SECRET (legacy HS256 shared secret). "
+        "Without one, every endpoint would be unauthenticated. Set one, or run "
+        "with ORGO_ENV=dev for local development."
     )
+
+_jwks_client = None
+
+
+def _get_jwks_client():
+    global _jwks_client
+    if _jwks_client is None:
+        import jwt
+        _jwks_client = jwt.PyJWKClient(SUPABASE_JWKS_URL, cache_keys=True, lifespan=3600)
+    return _jwks_client
+
+
+def _verify_token(token: str) -> str | None:
+    """Verify a Supabase access token and return its user id (sub).
+
+    Blocking (the JWKS path can hit the network on cache miss) — call via
+    asyncio.to_thread. Raises jwt exceptions on any failure.
+    """
+    import jwt
+    alg = jwt.get_unverified_header(token).get("alg", "")
+    if alg == "HS256":
+        if not SUPABASE_JWT_SECRET:
+            raise jwt.InvalidTokenError("HS256 token but no SUPABASE_JWT_SECRET configured")
+        payload = jwt.decode(
+            token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated",
+        )
+    else:
+        if not SUPABASE_JWKS_URL:
+            raise jwt.InvalidTokenError(f"{alg or 'unknown'}-signed token but no SUPABASE_URL/SUPABASE_JWKS_URL configured")
+        signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token, signing_key.key,
+            algorithms=["RS256", "ES256", "EdDSA"], audience="authenticated",
+        )
+    return payload.get("sub")
 
 
 async def require_auth(authorization: str = Header(default="")):
-    if not SUPABASE_JWT_SECRET:
-        return None  # auth disabled
+    if not AUTH_ENABLED:
+        return None  # auth disabled (dev)
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
     try:
-        import jwt
-        payload = jwt.decode(
-            authorization[7:], SUPABASE_JWT_SECRET,
-            algorithms=["HS256"], audience="authenticated",
-        )
-        return payload.get("sub")
+        return await asyncio.to_thread(_verify_token, authorization[7:])
     except Exception as exc:
         raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 

@@ -117,22 +117,35 @@ Then open **http://localhost:3000**.
 ### Production mode
 
 Local dev runs with auth optional so the app works out of the box. **Never expose
-that configuration to a real network** — set `ORGO_ENV=prod`, which changes the
-contract:
+that configuration to a real network** — run `start-prod.bat` (or replicate what
+it does), which sets `ORGO_ENV=prod` and changes the contract:
 
-- The backend **refuses to start** unless `SUPABASE_JWT_SECRET` is set
-  (Supabase → Project Settings → API → JWT secret). With the secret set, every
-  compute and AI endpoint requires a valid Supabase login token; the frontend
-  already attaches it to all API calls.
+- The backend **refuses to start** unless it can verify Supabase login tokens.
+  Set one (or both) of:
+  - `SUPABASE_URL` — your project URL (same value as the frontend's
+    `NEXT_PUBLIC_SUPABASE_URL`). Tokens are verified against the project's
+    public JWKS endpoint. This is what you want for projects created after
+    May 2025, which sign tokens with asymmetric keys (RS256/ES256/EdDSA).
+  - `SUPABASE_JWT_SECRET` — the legacy HS256 shared secret (Supabase → Project
+    Settings → API → JWT secret), for older projects that haven't migrated.
+
+  With auth enabled, every compute and AI endpoint requires a valid Supabase
+  login token; the frontend already attaches it to all API calls.
 - Hosted engine mode (server-side LLM key) is metered per user:
   `HOSTED_DAILY_REQUESTS` requests per day (default 200), 429 beyond that.
   Local (Ollama) and BYOK modes are unmetered — they spend the user's own
   resources.
 
+```bat
+:: Windows — builds the frontend, then starts uvicorn on 127.0.0.1:8000 and
+:: `next start` on :3000. Configuration comes from the environment or .env.
+start-prod.bat
+```
+
 ```bash
-# Production backend — bind loopback and put a reverse proxy (or the Next.js
+# Manual equivalent — bind loopback and put a reverse proxy (or the Next.js
 # server) in front; the LAN-open 0.0.0.0 bind in start.bat is for dev only.
-ORGO_ENV=prod SUPABASE_JWT_SECRET=... ANTHROPIC_API_KEY=... \
+ORGO_ENV=prod SUPABASE_URL=https://<ref>.supabase.co ANTHROPIC_API_KEY=... \
   uvicorn app:app --host 127.0.0.1 --port 8000
 
 # Production frontend
@@ -144,8 +157,11 @@ quota counters, and deferred-verification tokens live in process memory, and the
 OSR models load once per process.
 
 Only `/health`, `/engine/*`, `/structure`, and `/molfile` stay public in prod:
-`/structure` is loaded via `<img src>` (which cannot carry an auth header), and
-both renderers are cheap with hard input caps.
+`/structure` is loaded via `<img src>` (which cannot carry an auth header). Both
+renderers have hard input caps and sit in a second, looser rate-limit tier
+(600/min per IP vs 60/min for compute endpoints — a pathway graph legitimately
+renders hundreds of tiles). `/health` and `/engine/*` are cheap cached probes
+and expose no user data.
 
 ## Endpoints
 
