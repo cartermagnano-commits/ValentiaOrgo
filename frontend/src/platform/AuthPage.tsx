@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { FormEvent, useEffect, useState } from 'react'
 import { ArrowRight, Beaker, Lock, Mail } from 'lucide-react'
 import { isSupabaseConfigured, supabase } from '../../lib/supabaseClient'
+import AmbientLab from './AmbientLab'
+import Reveal from './Reveal'
 
 const GoogleIcon = () => (
   <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
@@ -92,6 +94,8 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
 
   return (
     <main className="auth-page">
+      <AmbientLab />
+      <Reveal>
       <section className="auth-card">
         <div className="auth-brand">
           <span className="brand-mark">
@@ -177,6 +181,7 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
           <Link href={isLogin ? '/signup' : '/login'}>{isLogin ? 'Sign up' : 'Log in'}</Link>
         </p>
       </section>
+      </Reveal>
     </main>
   )
 }

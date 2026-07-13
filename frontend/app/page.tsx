@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '../lib/supabaseClient'
+import Splash from '../src/platform/Splash'
 
 export default function HomePage() {
   const router = useRouter()
@@ -13,5 +14,5 @@ export default function HomePage() {
     })
   }, [router])
 
-  return <div className="page-loading">Opening Orgo AI...</div>
+  return <Splash />
 }

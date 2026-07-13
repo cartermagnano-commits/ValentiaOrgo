@@ -12,6 +12,7 @@ import { isSupabaseConfigured } from '../../lib/supabaseClient'
 import type { Project } from '../types'
 import AppTopbar from './AppTopbar'
 import Modal from './Modal'
+import Reveal from './Reveal'
 import { useToast } from './Toast'
 import { statusText } from './format'
 
@@ -161,6 +162,7 @@ export default function DashboardPage() {
 
         <div className="project-grid">
           {!projects.length && !error && (
+            <Reveal>
             <div className="dashboard-empty-state">
               <FolderKanban size={34} />
               <h3>No projects yet</h3>
@@ -177,11 +179,12 @@ export default function DashboardPage() {
                 </button>
               </div>
             </div>
+            </Reveal>
           )}
 
-          {projects.map(project => (
+          {projects.map((project, index) => (
+            <Reveal key={project.id} delay={Math.min(index, 8) * 45}>
             <div
-              key={project.id}
               className="project-card"
               onClick={() => router.push(`/projects/${project.id}`)}
               role="button"
@@ -212,6 +215,7 @@ export default function DashboardPage() {
                 <Trash2 size={15} />
               </button>
             </div>
+            </Reveal>
           ))}
         </div>
       </main>

@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ArrowLeft, FlaskConical, GitBranch, LogOut, MessageSquare, Microscope, Network, NotebookText, Plus, Search, Sparkles, Trash2 } from 'lucide-react'
+import { ArrowLeft, LayoutGrid, LogOut, NotebookText, Plus, Trash2 } from 'lucide-react'
 import type { User } from '@supabase/supabase-js'
 import { supabase } from '../../lib/supabaseClient'
 import {
@@ -17,7 +17,17 @@ import AppTopbar from './AppTopbar'
 import FileEditor from './FileEditor'
 import Modal from './Modal'
 import { FILE_TYPES, fileTypeMeta } from './fileTypes'
+import Reveal from './Reveal'
+import Splash from './Splash'
 import { statusText } from './format'
+
+// The three workhorse tools get hero cards with richer copy; the rest render
+// as compact cards below. Copy lives here, everything else in FILE_TYPES.
+const FEATURED_BLURBS: Partial<Record<ChemistryFileType, string>> = {
+  synthesis: 'Enter a starting molecule and explore all reagent routes to products.',
+  direct_reaction: 'Give a substrate and reagent — get predicted products with mechanisms.',
+  predict_reaction: 'Upload a whiteboard photo or drawing and predict the reaction products.',
+}
 
 export default function ProjectPage({ projectId }: { projectId: string }) {
   const router = useRouter()
@@ -53,7 +63,8 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
         }
         setProject(projectResult)
         setFiles(fileResult)
-        setActiveFileId(fileResult[0]?.id ?? null)
+        // Land on the tool picker (not an auto-opened file) so the project's
+        // capabilities are the first thing a user sees.
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not load project.')
       } finally {
@@ -77,8 +88,8 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
     if (fromModal) setModalOpen(false)
   }
 
-  function startTool(type: ChemistryFileType, defaultTitle: string) {
-    handleCreateFile({ title: defaultTitle, type }, false).catch(err => {
+  function startTool(type: ChemistryFileType) {
+    handleCreateFile({ title: fileTypeMeta(type).defaultTitle, type }, false).catch(err => {
       setError(err instanceof Error ? err.message : 'Could not create file.')
     })
   }
@@ -113,7 +124,7 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
     return (
       <div className="platform-app">
         <AppTopbar compact />
-        <div className="page-loading">Loading project...</div>
+        <Splash message="Loading project…" />
       </div>
     )
   }
@@ -172,6 +183,22 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
             </div>
 
             <div className="file-list">
+              <div
+                className={`file-list-item tools-home${!activeFile ? ' active' : ''}`}
+                onClick={() => setActiveFileId(null)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') setActiveFileId(null)
+                }}
+              >
+                <LayoutGrid size={15} />
+                <span>
+                  <strong>All tools</strong>
+                  <small>Start a new operation</small>
+                </span>
+              </div>
+
               {!files.length && (
                 <div className="sidebar-empty-state">
                   <NotebookText size={28} />
@@ -221,19 +248,33 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
 
           <main className="file-workspace">
             {activeFile && user ? (
-              <FileEditor
-                // Keyed by file id so switching files unmounts the editor.
-                // Without this, an in-flight AI stream started on file A keeps
-                // writing into the shared draft after the user opens file B,
-                // and its completion handler saves B's draft into A's row.
-                key={activeFile.id}
-                file={activeFile}
-                files={files}
-                userId={user.id}
-                onSaved={handleSavedFile}
-              />
+              <>
+                <div className="tool-strip" role="toolbar" aria-label="Start a new tool">
+                  <span className="tool-strip-label">New</span>
+                  {FILE_TYPES.map(tool => {
+                    const Icon = tool.icon
+                    return (
+                      <button key={tool.type} className="tool-chip" title={tool.description} onClick={() => startTool(tool.type)}>
+                        <Icon size={14} />
+                        {tool.label}
+                      </button>
+                    )
+                  })}
+                </div>
+                <FileEditor
+                  // Keyed by file id so switching files unmounts the editor.
+                  // Without this, an in-flight AI stream started on file A keeps
+                  // writing into the shared draft after the user opens file B,
+                  // and its completion handler saves B's draft into A's row.
+                  key={activeFile.id}
+                  file={activeFile}
+                  files={files}
+                  userId={user.id}
+                  onSaved={handleSavedFile}
+                />
+              </>
             ) : (
-              <ToolPickerState onStart={startTool} onNewFile={() => setModalOpen(true)} />
+              <ToolPickerState onStart={startTool} />
             )}
           </main>
         </div>
@@ -249,42 +290,35 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
   )
 }
 
-function ToolPickerState({
-  onStart,
-  onNewFile,
-}: {
-  onStart: (type: ChemistryFileType, defaultTitle: string) => void
-  onNewFile: () => void
-}) {
+function ToolPickerState({ onStart }: { onStart: (type: ChemistryFileType) => void }) {
+  const featured = FILE_TYPES.filter(tool => tool.type in FEATURED_BLURBS)
+  const secondary = FILE_TYPES.filter(tool => !(tool.type in FEATURED_BLURBS))
+
   return (
     <div className="tool-picker">
+      <Reveal>
       <div className="tool-picker-heading">
-        <h3>Choose a chemistry tool</h3>
-        <p>Each tool is saved as a file inside this project so your work is always preserved.</p>
+        <div className="eyebrow">Project tools</div>
+        <h3>What do you want to work on?</h3>
+        <p>Every tool saves as a file in this project, so your work is always preserved.</p>
       </div>
+      </Reveal>
 
       <div className="tool-picker-primary">
-        <button className="tool-picker-card primary" onClick={() => onStart('synthesis', 'Synthesis Pathway')}>
-          <div className="tool-picker-card-icon"><Network size={26} /></div>
-          <div>
-            <strong>Synthesis Pathways</strong>
-            <span>Enter a starting molecule and explore all reagent routes to products.</span>
-          </div>
-        </button>
-        <button className="tool-picker-card primary" onClick={() => onStart('direct_reaction', 'Direct Reaction')}>
-          <div className="tool-picker-card-icon"><FlaskConical size={26} /></div>
-          <div>
-            <strong>Direct Reaction</strong>
-            <span>Give a substrate and reagent — get predicted products with mechanisms.</span>
-          </div>
-        </button>
-        <button className="tool-picker-card primary" onClick={() => onStart('predict_reaction', 'Reaction Prediction')}>
-          <div className="tool-picker-card-icon"><Sparkles size={26} /></div>
-          <div>
-            <strong>Predict from Image</strong>
-            <span>Upload a whiteboard photo or drawing and predict the reaction products.</span>
-          </div>
-        </button>
+        {featured.map((tool, index) => {
+          const Icon = tool.icon
+          return (
+            <Reveal key={tool.type} delay={80 + index * 70}>
+            <button className="tool-picker-card primary" onClick={() => onStart(tool.type)}>
+              <div className="tool-picker-card-icon"><Icon size={24} /></div>
+              <div>
+                <strong>{tool.defaultTitle}</strong>
+                <span>{FEATURED_BLURBS[tool.type]}</span>
+              </div>
+            </button>
+            </Reveal>
+          )
+        })}
       </div>
 
       <div className="tool-picker-divider">
@@ -292,18 +326,20 @@ function ToolPickerState({
       </div>
 
       <div className="tool-picker-secondary">
-        <button className="tool-picker-card secondary" onClick={() => onStart('mechanism', 'Mechanism')}>
-          <GitBranch size={16} /> Mechanism
-        </button>
-        <button className="tool-picker-card secondary" onClick={() => onStart('retrosynthesis', 'Retrosynthesis')}>
-          <Search size={16} /> Retrosynthesis
-        </button>
-        <button className="tool-picker-card secondary" onClick={() => onStart('molecule_note', 'Molecule Note')}>
-          <Microscope size={16} /> Molecule Note
-        </button>
-        <button className="tool-picker-card secondary" onClick={() => onStart('chat', 'Project Notes')}>
-          <MessageSquare size={16} /> Notes / Chat
-        </button>
+        {secondary.map((tool, index) => {
+          const Icon = tool.icon
+          return (
+            <Reveal key={tool.type} delay={320 + index * 50}>
+            <button className="tool-picker-card secondary" title={tool.description} onClick={() => onStart(tool.type)}>
+              <Icon size={16} />
+              <div>
+                <strong>{tool.defaultTitle}</strong>
+                <span>{tool.description}</span>
+              </div>
+            </button>
+            </Reveal>
+          )
+        })}
       </div>
     </div>
   )

@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import type { User } from '@supabase/supabase-js'
 import AppTopbar from '../../src/platform/AppTopbar'
 import EngineSettings from '../../src/platform/EngineSettings'
+import Splash from '../../src/platform/Splash'
 import { getCurrentUser } from '../../lib/database'
 
 function SettingsContent() {
@@ -33,7 +34,7 @@ function SettingsContent() {
 
 export default function SettingsRoute() {
   return (
-    <Suspense fallback={<div className="page-loading">Loading settings...</div>}>
+    <Suspense fallback={<Splash message="Loading settings…" />}>
       <SettingsContent />
     </Suspense>
   )

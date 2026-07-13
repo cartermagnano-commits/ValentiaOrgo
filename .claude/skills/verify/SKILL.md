@@ -27,7 +27,15 @@ description: How to launch and drive Orgo AI for runtime verification
 - The Next dev proxy (rewrites → :8000) returned 500 `ECONNRESET` for ALL API routes
   in the Claude Code shell environment — including with the HEAD config, so not a
   config regression. Confirm on a normal `start.bat` run before treating as a bug.
+  (Did NOT reproduce 2026-07-13: proxy passed /health and /engine/* fine from the
+  Claude Code shell — intermittent/environmental, not a code issue.)
 - Browser UI requires Supabase login ("Opening Orgo AI..." splash, no file input
   when logged out) — headless Playwright can't get past it without credentials.
 - Running uvicorn OUTSIDE the sandbox wedged its event loop (requests took 60 s+);
   the sandboxed run was fine. Prefer default (sandboxed) Bash for the backend.
+- `next dev` launched from the Claude Code shell serves pages that NEVER hydrate
+  (no React fiber on any node, zero console errors — buttons dead, effects never
+  run, HMR websocket fails ERR_INVALID_HTTP_RESPONSE). Observed 2026-07-13. For
+  any client-JS verification, `npm run build && npx next start -p 3001` instead;
+  hydration works fine on the production server. Also: `npm run build` while a
+  dev server is running corrupts the dev server's `.next` state — restart it.
