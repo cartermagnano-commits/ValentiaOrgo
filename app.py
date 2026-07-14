@@ -35,6 +35,14 @@ if not logger.handlers:
     logger.addHandler(logging.StreamHandler())
     logger.propagate = False
 
+# The arbitration module logs discarded degenerate reads — route it through
+# the same handler so those lines actually reach the console.
+_arb_logger = logging.getLogger("osr_arbitration")
+_arb_logger.setLevel(logging.INFO)
+if not _arb_logger.handlers:
+    _arb_logger.addHandler(logging.StreamHandler())
+    _arb_logger.propagate = False
+
 import cv2
 import numpy as np
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
@@ -56,6 +64,9 @@ try:
 except ImportError:
     pass
 
+from osr_arbitration import (
+    arbitrate_local, plausible_or_none, resolve_with_vision,
+)
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
 from reactivity_engine import TemplateEngine
 
@@ -64,6 +75,14 @@ OLLAMA_BASE_URL    = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL       = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
 # Explicit env override for the vision model; when unset, auto-detect below.
 OLLAMA_VISION_MODEL_ENV = os.environ.get("OLLAMA_VISION_MODEL")
+# Hard cap on any single vision read, INCLUDING a cold model load (~6 GB).
+# Past this, /analyze degrades gracefully to the best local read flagged
+# low/unverified instead of holding the request open for minutes.
+VISION_TIMEOUT = float(os.environ.get("OLLAMA_VISION_TIMEOUT", "120"))
+# VLM prefill cost scales with pixel count; a line structure is perfectly
+# legible at 768 px, and 1024→768 cuts visual tokens ~45% — directly cutting
+# the wait whenever arbitration needs the vision read.
+VISION_MAX_DIM = int(os.environ.get("VISION_MAX_DIM", "768"))
 
 # Vision-capable model families that current Ollama engines can load, best
 # first. llama3.2-vision is intentionally last: its 'mllama' architecture was
@@ -126,8 +145,8 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
                 # occasional VLM ramble from wasting tens of seconds.
                 "options": {"temperature": 0, "num_predict": 256},
             },
-            # Generous: the first call after idle has to load the model (~6 GB)
-            timeout=300.0,
+            # Covers a cold model load (~6 GB); tune via OLLAMA_VISION_TIMEOUT.
+            timeout=VISION_TIMEOUT,
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
@@ -136,13 +155,13 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
         logger.warning("Ollama vision error (%s): %s", type(exc).__name__, exc)
         return None
 
-    result = _canonical_smiles(text)
+    result = plausible_or_none(_canonical_smiles(text), "Vision")
     if result:
         logger.info("Ollama → valid SMILES (full response): %r", result)
         return result
 
     for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
-        result = _canonical_smiles(candidate)
+        result = plausible_or_none(_canonical_smiles(candidate), "Vision")
         if result:
             logger.info("Ollama → valid SMILES (extracted token): %r", result)
             return result
@@ -585,7 +604,7 @@ def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -
 
 
 _decimer_fn = None
-_executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER + MolScribe OSR only (not thread-safe)
+_executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER OSR only (not thread-safe)
 _svg_pool  = ThreadPoolExecutor(max_workers=4)   # RDKit SVG rendering (thread-safe, fast)
 _chem_pool = ThreadPoolExecutor(max_workers=4)   # template engine / pathway search — kept off
                                                  # _executor so /react and /pathways never queue
@@ -594,6 +613,10 @@ _vision_pool = ThreadPoolExecutor(max_workers=2) # Ollama vision HTTP calls — 
                                                  # share _executor or they'd serialize
                                                  # behind DECIMER instead of running
                                                  # concurrently with it
+_molscribe_pool = ThreadPoolExecutor(max_workers=1)  # MolScribe (torch) — its own
+                                                 # single worker so its reads overlap
+                                                 # DECIMER's instead of queueing
+                                                 # behind them on _executor
 
 # One TemplateEngine per chem-pool thread: RDKit's compiled reaction objects
 # aren't documented thread-safe for concurrent RunReactants, and re-loading the
@@ -698,7 +721,9 @@ def _warm_molscribe() -> None:
         )
 
 
-_executor.submit(_warm_molscribe)
+# Warms on its own pool: loads in parallel with DECIMER's warm-up, and a slow
+# MolScribe download can never delay the first DECIMER read.
+_molscribe_pool.submit(_warm_molscribe)
 
 
 # /health is polled by every open tab (ApiStatusBanner), and the Ollama probe
@@ -850,6 +875,19 @@ def _resize(img: np.ndarray) -> np.ndarray:
     return img
 
 
+def _vision_png(img: np.ndarray) -> bytes:
+    """Encode the image the vision model sees: capped at VISION_MAX_DIM.
+    VLM prefill time scales with pixel count, and structures stay legible
+    well below the OSR working resolution."""
+    h, w = img.shape[:2]
+    if max(h, w) > VISION_MAX_DIM:
+        scale = VISION_MAX_DIM / max(h, w)
+        img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
+                         interpolation=cv2.INTER_AREA)
+    _, buf = cv2.imencode(".png", img)
+    return buf.tobytes()
+
+
 def _extract_history_smiles(execution_history: list[str]) -> list[str]:
     """Pull SMILES strings out of execution_history step lines."""
     smiles_list = []
@@ -934,19 +972,19 @@ def _canonical_smiles(raw: str | None) -> str | None:
 
 
 def _decimer_read(arr: np.ndarray) -> str | None:
-    """Run DECIMER on an image array; return canonical SMILES or None."""
+    """Run DECIMER on an image array; return plausible canonical SMILES or None."""
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp_path = tmp.name
         cv2.imwrite(tmp_path, arr)
-        return _canonical_smiles(_load_decimer()(tmp_path))
+        return plausible_or_none(_canonical_smiles(_load_decimer()(tmp_path)), "DECIMER")
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 def _molscribe_read(arr: np.ndarray) -> str | None:
-    """Run MolScribe on a BGR image array; return canonical SMILES or None."""
+    """Run MolScribe on a BGR image array; return plausible canonical SMILES or None."""
     try:
         model = _load_molscribe()
     except Exception as exc:
@@ -955,7 +993,7 @@ def _molscribe_read(arr: np.ndarray) -> str | None:
     try:
         rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
         out = model.predict_image(rgb)
-        return _canonical_smiles(out.get("smiles"))
+        return plausible_or_none(_canonical_smiles(out.get("smiles")), "MolScribe")
     except Exception as exc:
         logger.warning("MolScribe read failed (%s): %s", type(exc).__name__, exc)
         return None
@@ -988,6 +1026,16 @@ def _process(raw_bytes: bytes) -> dict:
         img = cv2.bitwise_not(img)
         stages["invert"] = _stage_b64(img)
     digital = polarity is not None
+
+    # Kick off the slow independent readers FIRST, each on its own pool, so
+    # they overlap the preprocessing stages and DECIMER reads below instead
+    # of running after them:
+    #   * vision (Ollama HTTP) — sees a downscaled copy of the upload
+    #   * MolScribe (torch)    — reads the original now; the binarized
+    #     rendition is submitted as soon as preprocessing produces it
+    vision_future = _vision_pool.submit(_ollama_vision_smiles, _vision_png(img))
+    ms_orig_future = _molscribe_pool.submit(_molscribe_read, img)
+
     current = img.copy()
     photo_stages = [] if digital else [
         ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
@@ -1006,10 +1054,12 @@ def _process(raw_bytes: bytes) -> dict:
     stages["final"] = _stage_b64(current)
 
     # ── Multi-candidate OSR ───────────────────────────────────────────────
-    # DECIMER reads BOTH the original and the binarized image: binarization
-    # rescues badly-lit photos but can destroy thin bonds in clean depictions,
-    # so neither rendition wins universally. The vision model reads the
-    # original independently and serves as tiebreaker + verifier. All
+    # Up to four local reads of the same image: DECIMER and MolScribe each
+    # read the original AND the binarized rendition. Binarization rescues
+    # badly-lit photos but can destroy thin bonds in clean depictions, so
+    # neither rendition wins universally — and MolScribe, trained on clean
+    # depictions, often only succeeds on the binarized one. The vision model
+    # reads the original independently as tiebreaker + verifier. All
     # comparisons are on canonical SMILES. Small local VLMs proved unreliable
     # as *judges* ("do these two drawings match?") — they blessed wrong reads
     # and rejected correct ones — but exact canonical agreement between
@@ -1018,11 +1068,11 @@ def _process(raw_bytes: bytes) -> dict:
     bin_read: str | None = None
     orig_read: str | None = None
 
-    # Kick off the vision read FIRST, on its own pool — it's an HTTP call to
-    # Ollama, so it runs concurrently with the DECIMER reads below instead of
-    # after them. Total latency becomes max(DECIMER, vision), not the sum.
-    _, orig_buf = cv2.imencode(".png", img)
-    vision_future = _vision_pool.submit(_ollama_vision_smiles, orig_buf.tobytes())
+    # Photos get a MolScribe read of the binarized rendition too — it runs on
+    # the MolScribe pool during DECIMER's reads below, so it costs ~no wall
+    # time and doubles the chances of the instant cross-model-agreement path.
+    # For clean digital images binarized ≈ original; skip the duplicate read.
+    ms_bin_future = None if digital else _molscribe_pool.submit(_molscribe_read, current)
 
     try:
         # For clean digital images DECIMER reads the ORIGINAL first — that's
@@ -1038,56 +1088,37 @@ def _process(raw_bytes: bytes) -> dict:
     except Exception as exc:
         error = str(exc)
 
-    # Second local reader — different architecture, largely uncorrelated errors.
-    ms_read = _molscribe_read(img)
+    def _collect(future, label: str) -> str | None:
+        """MolScribe runs concurrently on its own pool; by now it has usually
+        finished. The timeout only guards against a wedged torch call — it
+        must never hold the OSR worker hostage."""
+        if future is None:
+            return None
+        try:
+            return future.result(timeout=60.0)
+        except Exception as exc:
+            logger.warning("%s read not collected (%s): %s", label, type(exc).__name__, exc)
+            return None
 
-    smiles: str | None = None
-    verified: bool | None = None
+    ms_orig = _collect(ms_orig_future, "MolScribe/original")
+    ms_bin = _collect(ms_bin_future, "MolScribe/binarized")
+
+    # Settle the verdict from local reads when possible. Whenever the verdict
+    # needs the VISION read, we do NOT wait for it here — _process runs on
+    # the single OSR worker, and parking that worker on a minutes-long HTTP
+    # call would freeze every other /analyze and /react-from-image request.
+    # The async endpoint awaits the future and settles the verdict via
+    # resolve_with_vision instead.
+    smiles, verified, pending, defer = arbitrate_local(orig_read, bin_read, ms_orig, ms_bin)
     verify_token: str | None = None
-    pending = False   # verdict needs the in-flight vision read (endpoint awaits it)
-
-    # Resolve DECIMER's two renditions into one candidate. When they disagree
-    # (photos where binarization changed the read), MolScribe breaks the tie
-    # for free. Whenever the verdict needs the VISION read, this function does
-    # NOT wait for it — it runs on the single OSR worker, and parking that
-    # worker on a minutes-long HTTP call would freeze every other /analyze and
-    # /react-from-image request. The async endpoint awaits the future and
-    # settles the verdict via _resolve_with_vision instead.
-    disagreement = bool(orig_read and bin_read and orig_read != bin_read)
-    if disagreement and ms_read in (orig_read, bin_read):
-        decimer_read = ms_read
-        logger.info("DECIMER disagreement: orig=%r bin=%r → MolScribe broke tie: %r",
-                    orig_read, bin_read, ms_read)
-    elif disagreement:
-        decimer_read = None   # vision arbitrates between the two renditions
-        pending = True
-    else:
-        decimer_read = orig_read or bin_read
-
-    if pending:
-        pass
-    elif decimer_read and ms_read == decimer_read:
-        # Two independent local readers agree — instant "verified", no wait
-        # on the vision model at all (its in-flight result is simply unused).
-        smiles = decimer_read
-        verified = True
-        logger.info("Reader agreement: decimer=%r == molscribe → verified", smiles)
-    elif decimer_read and ms_read:
-        # The local readers disagree — the structure itself is in question, so
-        # the vision model must arbitrate before anything is shown (an early
-        # return could show a structure that later flips).
-        pending = True
-    elif decimer_read or ms_read:
-        # Only one local reader succeeded — return its structure immediately;
+    if verified:
+        logger.info("Cross-model agreement: %r → verified (vision unused)", smiles)
+    elif defer and smiles:
+        # One unambiguous local candidate — return its structure immediately;
         # the in-flight vision read becomes a deferred verification the client
         # collects via GET /analyze/verify/{token}. It can only change the
         # badge, never the structure.
-        smiles = decimer_read or ms_read
         verify_token = _store_pending_verify(vision_future, smiles)
-    else:
-        # No local reader succeeded — the vision read is the structure source
-        # itself, so there is no independent confirmation (verified stays None).
-        pending = True
 
     valid = smiles is not None
     if valid:
@@ -1115,7 +1146,8 @@ def _process(raw_bytes: bytes) -> dict:
         "reads": {
             "decimer_original": orig_read,
             "decimer_binarized": bin_read,
-            "molscribe": ms_read,
+            "molscribe": ms_orig,
+            "molscribe_binarized": ms_bin,
             "vision": None,
             "clean_digital": digital,
         },
@@ -1123,49 +1155,9 @@ def _process(raw_bytes: bytes) -> dict:
     if pending:
         result["_pending"] = {
             "future": vision_future, "orig": orig_read, "bin": bin_read,
-            "ms": ms_read, "digital": digital,
+            "ms_orig": ms_orig, "ms_bin": ms_bin, "digital": digital,
         }
     return result
-
-
-def _prefer_rendition(orig_read: str, bin_read: str, digital: bool) -> str:
-    """Uncorroborated tie between DECIMER's two renditions: prefer the read
-    that looks less like recognizer garbage. Hallucinated reads on noise are
-    fragment soups ('C.CC.CC.…'), so fewer '.'-separated fragments wins. On a
-    true tie keep the historical default — original for digital renders,
-    binarized for photos (binarization repairs bad lighting)."""
-    if orig_read.count(".") != bin_read.count("."):
-        return orig_read if orig_read.count(".") < bin_read.count(".") else bin_read
-    return orig_read if digital else bin_read
-
-
-def _resolve_with_vision(orig_read: str | None, bin_read: str | None,
-                         ms_read: str | None, digital: bool,
-                         vision_read: str | None) -> tuple[str | None, bool | None]:
-    """Settle an /analyze verdict that required the vision read: arbitrate a
-    DECIMER rendition disagreement and/or a DECIMER-vs-MolScribe conflict.
-    Pure function mirroring the decision order in _process; returns
-    (smiles, verified)."""
-    if orig_read and bin_read and orig_read != bin_read:
-        if vision_read == orig_read:
-            decimer_read = orig_read
-        elif vision_read == bin_read:
-            decimer_read = bin_read
-        else:
-            decimer_read = _prefer_rendition(orig_read, bin_read, digital)
-    else:
-        decimer_read = orig_read or bin_read
-
-    if decimer_read and ms_read:
-        # Two-of-three agreement verifies; no agreement keeps DECIMER's pick,
-        # flagged low.
-        if vision_read in (decimer_read, ms_read):
-            return vision_read, True
-        return decimer_read, False
-    if decimer_read or ms_read:
-        chosen = decimer_read or ms_read
-        return chosen, (vision_read == chosen) if vision_read else None
-    return vision_read, None
 
 
 def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
@@ -1245,18 +1237,19 @@ async def analyze(file: UploadFile = File(...)):
         # vision model delays only THIS request, not every other upload.
         try:
             vision_read = await asyncio.wait_for(
-                asyncio.wrap_future(pending["future"]), timeout=310.0)
+                asyncio.wrap_future(pending["future"]), timeout=VISION_TIMEOUT + 10.0)
         except asyncio.CancelledError:
             raise  # client disconnected — nothing to salvage
         except Exception as exc:
             logger.warning("Vision read failed (%s): %s", type(exc).__name__, exc)
             vision_read = None
-        smiles, verified = _resolve_with_vision(
-            pending["orig"], pending["bin"], pending["ms"],
+        smiles, verified = resolve_with_vision(
+            pending["orig"], pending["bin"], pending["ms_orig"], pending["ms_bin"],
             pending["digital"], vision_read)
         logger.info(
-            "Vision-arbitrated read: orig=%r bin=%r molscribe=%r vision=%r → %r (verified=%s)",
-            pending["orig"], pending["bin"], pending["ms"], vision_read, smiles, verified)
+            "Vision-arbitrated read: decimer=(%r, %r) molscribe=(%r, %r) vision=%r → %r (verified=%s)",
+            pending["orig"], pending["bin"], pending["ms_orig"], pending["ms_bin"],
+            vision_read, smiles, verified)
         result["smiles"] = smiles
         result["valid"] = smiles is not None
         result["verified"] = verified
@@ -1284,7 +1277,7 @@ async def analyze_verify(token: str):
         raise HTTPException(status_code=404, detail="Unknown or expired verification token")
     try:
         vision_read = await asyncio.wait_for(
-            asyncio.wrap_future(entry["future"]), timeout=330.0
+            asyncio.wrap_future(entry["future"]), timeout=VISION_TIMEOUT + 30.0
         )
     except asyncio.CancelledError:
         # Client disconnected mid-wait (tab closed, page refreshed). Put the
@@ -2206,9 +2199,9 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         logger.warning("DECIMER failed (%s): %s — trying vision fallback", type(exc).__name__, exc)
         recognized_smiles = None
 
-    # Encode the preprocessed image once; reused by all Ollama fallback calls below
-    _, _ibuf = cv2.imencode(".png", current)
-    _img_bytes = _ibuf.tobytes()
+    # Encode the preprocessed image once (downscaled for VLM prefill speed);
+    # reused by all Ollama fallback calls below
+    _img_bytes = _vision_png(current)
 
     if not recognized_smiles:
         logger.info("DECIMER returned nothing — calling Ollama reaction parse")

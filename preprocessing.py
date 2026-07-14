@@ -153,12 +153,37 @@ def deskew(img: np.ndarray) -> np.ndarray:
 
 # ── Stage 3: Denoise ───────────────────────────────────────────────────────────
 
+# Estimated noise sigma below which NLM is skipped entirely. Phone photos in
+# decent light land well under this; grainy/low-light shots land well over.
+NOISE_SIGMA_SKIP = 2.5
+
+
+def estimate_noise_sigma(img: np.ndarray) -> float:
+    """
+    Robust additive-noise estimate: MAD of the Immerkær kernel response.
+
+    The kernel amplifies i.i.d. Gaussian noise by its L2 norm (6), so for a
+    noise-only region median(|response|) ≈ 0.6745 · 6 · sigma. Taking the
+    MEDIAN (not the mean) makes the estimate insensitive to the sparse strong
+    responses at real edges — bonds and labels cover a small fraction of a
+    document photo — so it tracks the noise floor, not the line art.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    kernel = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], dtype=np.float64)
+    resp = cv2.filter2D(gray.astype(np.float64), -1, kernel)
+    return float(np.median(np.abs(resp)) / (0.6745 * 6.0))
+
+
 def denoise(img: np.ndarray) -> np.ndarray:
     """
     Reduce photographic noise using Non-Local Means (NLM) denoising.
 
     NLM averages patches that look similar across the whole image, so it
     preserves sharp edges (bonds, labels) much better than a simple blur.
+
+    Skipped entirely (input returned as-is) when the measured noise floor is
+    below NOISE_SIGMA_SKIP: NLM is the slowest stage in the pipeline (seconds),
+    and on an already-clean photo it can only soften thin bonds.
 
     h=10 is the filter strength:
       - raise to 15-20 for very grainy phone shots
@@ -167,6 +192,9 @@ def denoise(img: np.ndarray) -> np.ndarray:
     Note: fastNlMeansDenoisingColored is slow on large images (several seconds
     for a 12MP photo). Resize to ~1500px wide first if speed is a concern.
     """
+    if estimate_noise_sigma(img) < NOISE_SIGMA_SKIP:
+        return img
+
     if len(img.shape) == 3 and img.shape[2] == 3:
         return cv2.fastNlMeansDenoisingColored(
             img, None, h=10, hColor=10, templateWindowSize=7, searchWindowSize=21

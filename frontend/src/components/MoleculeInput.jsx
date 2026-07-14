@@ -46,6 +46,7 @@ function isSmallHydrocarbon(smiles) {
 
 export default function MoleculeInput({ label, value, onChange }) {
   const [loading, setLoading] = useState(false)
+  const [slowHint, setSlowHint] = useState(false)
   const [error, setError]   = useState(null)
   const [showSmiles, setShowSmiles] = useState(false)
   const [confidence, setConfidence] = useState(null)  // 'high' | 'low' | 'unverified' | 'verifying' | null
@@ -111,10 +112,17 @@ export default function MoleculeInput({ label, value, onChange }) {
     if (!file) return
     const seq = ++verifySeq.current
     setLoading(true)
+    setSlowHint(false)
     setError(null)
     setConfidence(null)
     setStages(null)
     setShowStages(false)
+    // Most reads settle in a few seconds; past ~8s we're almost certainly
+    // waiting on the vision model to arbitrate a disputed read, so tell the
+    // user something deliberate is happening rather than leaving a stuck spinner.
+    const slowTimer = setTimeout(() => {
+      if (verifySeq.current === seq) setSlowHint(true)
+    }, 8000)
     try {
       const result = await analyzeImage(file)
       // A newer upload, clear, or manual SMILES edit superseded this read —
@@ -141,6 +149,7 @@ export default function MoleculeInput({ label, value, onChange }) {
       setError(e.message || 'Upload failed')
       setShowSmiles(true)
     } finally {
+      clearTimeout(slowTimer)
       if (verifySeq.current === seq) setLoading(false)
     }
   }
@@ -163,7 +172,9 @@ export default function MoleculeInput({ label, value, onChange }) {
         {loading ? (
           <>
             <div className="spinner" />
-            <span style={{ fontSize: 11, marginTop: 6, color: '#8b949e' }}>Recognizing…</span>
+            <span style={{ fontSize: 11, marginTop: 6, color: '#8b949e' }}>
+              {slowHint ? 'Tricky image — cross-checking with a second reader…' : 'Recognizing…'}
+            </span>
           </>
         ) : value ? (
           <>
