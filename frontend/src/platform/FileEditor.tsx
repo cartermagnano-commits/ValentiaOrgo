@@ -1,15 +1,17 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, CheckCircle2, Save } from 'lucide-react'
 import PathwayExplorer from '../components/PathwayExplorer'
 import DirectReact from '../components/DirectReact'
 import ReactPredict from '../components/ReactPredict'
 import MolDrawer from '../components/MolDrawer'
 import StructureView from '../components/StructureView'
-import type { ChemistryFile, ChemistryFileContent } from '../types'
-import { makeInitialContent, withPlaceholderAiResponse } from '../../lib/content'
+import type { ChatContent, ChemistryFile, ChemistryFileContent } from '../types'
+import { makeInitialContent } from '../../lib/content'
+import { streamAssist, streamChat } from '../api'
 import { updateChemistryFileContent } from '../../lib/database'
+import { useToast } from './Toast'
 import { fileTypeMeta } from './fileTypes'
 import { formatDate, statusText } from './format'
 
@@ -26,38 +28,84 @@ export default function FileEditor({
 }) {
   const [draft, setDraft] = useState<ChemistryFileContent>(file.content || makeInitialContent(file.type))
   const [saving, setSaving] = useState(false)
+  const [aiRunning, setAiRunning] = useState(false)
   const [error, setError] = useState('')
   const meta = fileTypeMeta(file.type)
   const Icon = meta.icon
+  const { notify } = useToast()
+  const hasAiRun = Boolean(
+    (draft as any).aiResponse || (draft as any).pathwaysData || (draft as any).result
+  )
 
+  // Reset the working draft only when switching to a DIFFERENT file. Depending
+  // on file.content here would re-apply the just-saved server copy after every
+  // save, reverting anything typed while the save round-trip was in flight.
+  const draftRef = useRef(draft)
+  draftRef.current = draft
   useEffect(() => {
     setDraft(file.content || makeInitialContent(file.type))
     setError('')
-  }, [file.id, file.content, file.type])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file.id])
 
   const related = useMemo(
     () => files.filter(other => other.type === file.type && other.id !== file.id),
     [file.id, file.type, files],
   )
 
+  // Optimistic-concurrency bookkeeping. lastSavedAtRef tracks the freshest
+  // updated_at we know about (updated the moment a save resolves, without
+  // waiting for the parent re-render), and saveChainRef serializes saves so a
+  // textarea onBlur save and a Save-button save firing back-to-back can't race
+  // each other into a false "modified elsewhere" conflict.
+  const lastSavedAtRef = useRef<string | null>(null)
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve())
+
   async function saveContent(nextContent: ChemistryFileContent = draft) {
     setSaving(true)
     setError('')
-    try {
-      const saved = await updateChemistryFileContent(file.id, file.project_id, userId, nextContent)
-      setDraft(saved.content || makeInitialContent(saved.type))
+    const run = async () => {
+      const expected = lastSavedAtRef.current ?? file.updated_at
+      const saved = await updateChemistryFileContent(file.id, file.project_id, userId, nextContent, expected)
+      lastSavedAtRef.current = saved.updated_at
+      // Deliberately do NOT reset the draft from the server response — the
+      // user may have kept typing during the round-trip; local state wins.
       onSaved(saved)
+    }
+    const attempt = saveChainRef.current.then(run, run)
+    saveChainRef.current = attempt.catch(() => {})
+    try {
+      await attempt
+      notify('Saved', 'success')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save file.')
+      const msg = err instanceof Error ? err.message : 'Could not save file.'
+      setError(msg)
+      notify(msg, 'error')
     } finally {
       setSaving(false)
     }
   }
 
-  async function runPlaceholderAi() {
-    const nextContent = withPlaceholderAiResponse(draft)
-    setDraft(nextContent)
-    await saveContent(nextContent)
+  async function runAssist() {
+    setError('')
+    setAiRunning(true)
+    let acc = ''
+    const request = { ...(draft as Record<string, unknown>) }
+    setDraft(prev => ({ ...(prev as Record<string, unknown>), aiResponse: '' }) as ChemistryFileContent)
+    try {
+      await streamAssist(file.type, request, (delta: string) => {
+        acc += delta
+        setDraft(prev => ({ ...(prev as Record<string, unknown>), aiResponse: acc }) as ChemistryFileContent)
+      })
+      if (!acc) throw new Error('The AI engine returned no response. Check Settings → Engine.')
+      // Save from the LATEST draft (via ref), not the pre-stream snapshot —
+      // fields the user edited while the AI streamed must survive the save.
+      await saveContent({ ...(draftRef.current as Record<string, unknown>), aiResponse: acc } as ChemistryFileContent)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'AI request failed.')
+    } finally {
+      setAiRunning(false)
+    }
   }
 
   return (
@@ -68,8 +116,10 @@ export default function FileEditor({
           <div>
             <div className="file-heading-meta">
               <span className="file-type-badge strong">{meta.code}</span>
-              <span className="status-pill saved">Saved</span>
-              <span className="status-pill muted">{saving ? 'Saving...' : 'AI not run yet'}</span>
+              <span className="status-pill saved">{saving ? 'Saving…' : 'Saved'}</span>
+              <span className="status-pill muted">
+                {aiRunning ? 'AI running…' : hasAiRun ? 'AI response saved' : 'AI not run yet'}
+              </span>
             </div>
             <h3>{file.title}</h3>
           </div>
@@ -93,51 +143,39 @@ export default function FileEditor({
         />
 
         {file.type === 'synthesis' && (
-          <>
-            <SavedContextPanel
-              content={draft}
-              onChange={setDraft}
-              onSave={saveContent}
-              onPlaceholder={runPlaceholderAi}
-              actionLabel="Generate Synthesis"
-              saving={saving}
-            />
-            <PathwayExplorer />
-          </>
+          <PathwayExplorer
+            key={file.id}
+            initialSubstrate={Array.isArray((draft as any).startingMaterials)
+              ? (draft as any).startingMaterials.filter(Boolean)
+              : []}
+            initialTarget={(draft as any).targetMolecule ?? ''}
+            initialPathways={(draft as any).pathwaysData ?? null}
+            onSave={(data: any) => saveContent({ ...draft, ...data })}
+          />
         )}
         {file.type === 'direct_reaction' && (
-          <>
-            <SavedContextPanel
-              content={draft}
-              onChange={setDraft}
-              onSave={saveContent}
-              onPlaceholder={runPlaceholderAi}
-              actionLabel="Predict Product"
-              saving={saving}
-            />
-            <DirectReact />
-          </>
+          <DirectReact
+            key={file.id}
+            initialSubstrate={(draft as any).reactants?.[0] ?? ''}
+            initialReagent={(draft as any).reagents ?? ''}
+            initialResult={(draft as any).result ?? null}
+            onSave={(data: any) => saveContent({ ...draft, ...data })}
+          />
         )}
         {file.type === 'predict_reaction' && (
-          <>
-            <SavedContextPanel
-              content={draft}
-              onChange={setDraft}
-              onSave={saveContent}
-              onPlaceholder={runPlaceholderAi}
-              actionLabel="Predict Product"
-              saving={saving}
-            />
-            <ReactPredict />
-          </>
+          <ReactPredict
+            key={file.id}
+            initialResult={(draft as any).result ?? null}
+            onSave={(data: any) => saveContent({ ...draft, ...data })}
+          />
         )}
         {file.type === 'mechanism' && (
           <StructuredEditor
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
-            saving={saving}
+            onPlaceholder={runAssist}
+            saving={saving || aiRunning}
             actionLabel="Explain Mechanism"
             fields={[
               ['reactionInput', 'Reaction input', 'Paste reaction SMILES, reagent context, or a plain-language reaction description.'],
@@ -152,8 +190,8 @@ export default function FileEditor({
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
-            saving={saving}
+            onPlaceholder={runAssist}
+            saving={saving || aiRunning}
             actionLabel="Generate Synthesis"
             fields={[
               ['targetMolecule', 'Target molecule', 'Target SMILES or molecule name.'],
@@ -168,8 +206,8 @@ export default function FileEditor({
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
-            saving={saving}
+            onPlaceholder={runAssist}
+            saving={saving || aiRunning}
             actionLabel="Save Observation"
             fields={[
               ['moleculeName', 'Molecule name', 'Common name, project code, or IUPAC shorthand.'],
@@ -181,16 +219,12 @@ export default function FileEditor({
           />
         )}
         {file.type === 'chat' && (
-          <StructuredEditor
+          <PersistedChat
+            key={file.id}
             content={draft}
             onChange={setDraft}
             onSave={saveContent}
-            onPlaceholder={runPlaceholderAi}
             saving={saving}
-            actionLabel="Generate Reply"
-            fields={[
-              ['notes', 'Chat notes', 'Use this file as a project-scoped chat scratchpad for now.'],
-            ]}
           />
         )}
       </div>
@@ -254,53 +288,6 @@ function MoleculeOfInterestPanel({
         onChange={smiles => updateMolecule(smiles, true)}
         buttonLabel="Draw Molecule"
       />
-    </div>
-  )
-}
-
-function SavedContextPanel({
-  content,
-  onChange,
-  onSave,
-  onPlaceholder,
-  actionLabel,
-  saving,
-}: {
-  content: ChemistryFileContent
-  onChange: (content: ChemistryFileContent) => void
-  onSave: (content?: ChemistryFileContent) => Promise<void>
-  onPlaceholder: () => Promise<void>
-  actionLabel: string
-  saving: boolean
-}) {
-  const data = content as Record<string, unknown>
-
-  return (
-    <div className="saved-context-panel">
-      <label>
-        <span>Saved notes</span>
-        <textarea
-          rows={3}
-          value={String(data.notes ?? '')}
-          onChange={event => onChange({ ...data, notes: event.target.value } as ChemistryFileContent)}
-          onBlur={() => onSave()}
-          placeholder="Project-specific context, constraints, observations, or follow-up ideas."
-        />
-      </label>
-      <div className="ai-response-box">
-        <Bot size={16} />
-        <span>{String(data.aiResponse || 'AI response has not been generated yet.')}</span>
-      </div>
-      <div className="editor-actions">
-        <button className="btn-secondary action-button" onClick={() => onSave()} disabled={saving}>
-          <Save size={15} />
-          Save
-        </button>
-        <button className="btn-primary action-button" onClick={onPlaceholder} disabled={saving}>
-          <CheckCircle2 size={15} />
-          {actionLabel}
-        </button>
-      </div>
     </div>
   )
 }
@@ -413,4 +400,126 @@ function isMoleculeField(key: string) {
     'disconnectionsText',
     'proposedPrecursorsText',
   ].includes(key)
+}
+
+type ChatMessage = ChatContent['messages'][number]
+
+// Real persisted chat for "chat" files: streams replies from /chat and saves
+// the full transcript into the file's jsonb content after each exchange.
+function PersistedChat({
+  content,
+  onChange,
+  onSave,
+  saving,
+}: {
+  content: ChemistryFileContent
+  onChange: (content: ChemistryFileContent) => void
+  onSave: (content?: ChemistryFileContent) => Promise<void>
+  saving: boolean
+}) {
+  const data = content as ChatContent
+  const messages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : []
+  const [input, setInput] = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages.length, streaming])
+
+  async function handleSend() {
+    const text = input.trim()
+    if (!text || streaming || saving) return
+    setInput('')
+
+    const userMessage: ChatMessage = {
+      id: `msg_${Date.now()}`,
+      role: 'user',
+      content: text,
+      createdAt: new Date().toISOString(),
+    }
+    const history = [...messages, userMessage]
+    const assistantId = `msg_${Date.now()}_reply`
+    const withReply = (replyText: string): ChatContent => ({
+      ...data,
+      messages: [
+        ...history,
+        { id: assistantId, role: 'assistant', content: replyText, createdAt: new Date().toISOString() },
+      ],
+    })
+
+    onChange({ ...data, messages: history })
+    setStreaming(true)
+    let acc = ''
+    try {
+      await streamChat(
+        history
+          // Failed-request bubbles are UI state, not conversation — don't
+          // replay them to the model as if it had said "Error: ..." itself.
+          .filter(message => !(message.role === 'assistant' && message.content.startsWith('Error:')))
+          .map(message => ({ role: message.role, content: message.content })),
+        null,
+        (delta: string) => {
+          acc += delta
+          onChange(withReply(acc))
+        },
+      )
+      if (!acc) throw new Error('The AI engine returned no response. Check Settings → Engine.')
+      await onSave(withReply(acc))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Chat request failed.'
+      onChange(withReply(`Error: ${message}`))
+    } finally {
+      setStreaming(false)
+    }
+  }
+
+  return (
+    <div className="panel-body" style={{ gap: 10, minHeight: 380 }}>
+      <div className="chat-messages" style={{ flex: 1 }}>
+        {!messages.length && (
+          <div className="chat-bubble assistant">
+            Hi! Ask me anything about organic chemistry. This conversation is saved with the file.
+          </div>
+        )}
+        {messages.map(message => (
+          <div key={message.id} className={`chat-bubble ${message.role}`}>
+            {message.content}
+          </div>
+        ))}
+        {streaming && messages[messages.length - 1]?.role === 'user' && (
+          <div className="chat-bubble assistant">
+            <div className="loading-row" style={{ margin: 0 }}>
+              <div className="spinner" /> Thinking…
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="chat-input-row">
+        <textarea
+          className="chat-input"
+          rows={2}
+          value={input}
+          placeholder="Ask about mechanisms, reagents, or any orgo concept…"
+          onChange={event => setInput(event.target.value)}
+          onKeyDown={event => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              handleSend()
+            }
+          }}
+        />
+        <button
+          className="btn-primary"
+          style={{ alignSelf: 'flex-end', padding: '8px 14px' }}
+          onClick={handleSend}
+          disabled={streaming || saving || !input.trim()}
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  )
 }

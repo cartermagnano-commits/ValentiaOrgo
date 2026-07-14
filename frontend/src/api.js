@@ -1,9 +1,24 @@
-const BASE = ''  // same-origin; Vite proxy handles /api calls in dev
+import { getEnginePayload } from '../lib/engine'
+import { supabase } from '../lib/supabaseClient'
+
+const BASE = ''  // same-origin; Next.js rewrites (next.config.mjs) proxy to the FastAPI backend
+
+// Attach the Supabase access token so the backend can enforce auth when
+// SUPABASE_JWT_SECRET is configured. Harmless (ignored) when auth is disabled.
+async function authHeaders() {
+  try {
+    const { data } = await supabase.auth.getSession()
+    const token = data?.session?.access_token
+    return token ? { Authorization: `Bearer ${token}` } : {}
+  } catch {
+    return {}
+  }
+}
 
 async function post(path, body) {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -16,10 +31,28 @@ async function post(path, body) {
 export async function analyzeImage(file) {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(BASE + '/analyze', { method: 'POST', body: form })
+  const res = await fetch(BASE + '/analyze', {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: form,
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Analyze failed')
+  }
+  return res.json()
+}
+
+// Collect the deferred vision verification for an /analyze response that
+// returned confidence "verifying". Blocks server-side until the vision read
+// finishes; the token is single-use.
+export async function verifyAnalysis(token) {
+  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`, {
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || 'Verification failed')
   }
   return res.json()
 }
@@ -31,7 +64,11 @@ export async function reactDirect(substrateSMILES, reagentSMILES) {
 export async function reactFromImage(file) {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(BASE + '/react-from-image', { method: 'POST', body: form })
+  const res = await fetch(BASE + '/react-from-image', {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: form,
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Prediction failed')
@@ -54,7 +91,7 @@ export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth 
 async function streamSSE(path, body, onDelta) {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -64,6 +101,16 @@ async function streamSSE(path, body, onDelta) {
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  const handleLine = (line) => {
+    if (!line.startsWith('data: ')) return false
+    const data = line.slice(6).trim()
+    if (data === '[DONE]') return true
+    let p = null
+    try { p = JSON.parse(data) } catch { return false }
+    if (p?.error) throw new Error(p.error)
+    if (p?.delta) onDelta(p.delta)
+    return false
+  }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -71,12 +118,14 @@ async function streamSSE(path, body, onDelta) {
     const lines = buffer.split('\n')
     buffer = lines.pop()
     for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      const data = line.slice(6).trim()
-      if (data === '[DONE]') return
-      try { const p = JSON.parse(data); if (p.delta) onDelta(p.delta) } catch {}
+      if (handleLine(line)) return
     }
   }
+  // A stream that ends without a trailing newline (mid-stream failure,
+  // proxy truncation) leaves its last event — often the error frame — in
+  // the buffer; deliver it instead of dropping it.
+  buffer += decoder.decode()
+  if (buffer) handleLine(buffer)
 }
 
 export async function streamExplanation(branch, substrateSMILES, onDelta) {
@@ -89,6 +138,7 @@ export async function streamExplanation(branch, substrateSMILES, onDelta) {
     reaction_name: cls?.name ?? 'Unknown',
     execution_history: branch.execution_history,
     environment_used: branch.environment,
+    engine: getEnginePayload(),
   }, onDelta)
 }
 
@@ -105,9 +155,28 @@ export async function streamNodeExplanation(nodeData, branch, substrateSMILES, o
     node_smiles: nodeData.smiles,
     node_role: nodeData.nodeType,
     node_step_text: nodeData.stepText ?? '',
+    engine: getEnginePayload(),
+  }, onDelta)
+}
+
+export async function streamStereo(branch, substrateSMILES, onDelta) {
+  const cls = branch.reaction_classification
+  return streamSSE('/stereo', {
+    substrate_smiles: substrateSMILES,
+    product_smiles: branch.product_smiles,
+    reagent_name: branch.reagent.name,
+    reagent_smiles: branch.reagent.smiles,
+    reaction_name: cls?.name ?? 'Unknown',
+    execution_history: branch.execution_history,
+    environment_used: branch.environment,
+    engine: getEnginePayload(),
   }, onDelta)
 }
 
 export async function streamChat(messages, context, onDelta) {
-  return streamSSE('/chat', { messages, context }, onDelta)
+  return streamSSE('/chat', { messages, context, engine: getEnginePayload() }, onDelta)
+}
+
+export async function streamAssist(fileType, content, onDelta) {
+  return streamSSE('/assist', { file_type: fileType, content, engine: getEnginePayload() }, onDelta)
 }

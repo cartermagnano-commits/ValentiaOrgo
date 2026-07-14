@@ -48,8 +48,13 @@ def main(image_path_str: str):
 
         print("Step 3: Predicting Reactivity...")
 
-        # Standardize separate chemical entities using RDKit/SMILES conventions
-        canonical_notation = smiles_out.replace('+', '.')
+        # Standardize separate chemical entities using RDKit/SMILES conventions.
+        # Only treat '+' as a fragment separator when the raw string doesn't
+        # parse — blindly replacing it corrupts charged atoms like [Li+].
+        from rdkit import Chem
+        canonical_notation = smiles_out
+        if Chem.MolFromSmiles(smiles_out) is None:
+            canonical_notation = smiles_out.replace('+', '.')
         mol_strings = [p.strip() for p in canonical_notation.split('.') if p.strip()]
 
         if len(mol_strings) < 2:

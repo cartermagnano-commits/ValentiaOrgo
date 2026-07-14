@@ -153,12 +153,37 @@ def deskew(img: np.ndarray) -> np.ndarray:
 
 # ── Stage 3: Denoise ───────────────────────────────────────────────────────────
 
+# Estimated noise sigma below which NLM is skipped entirely. Phone photos in
+# decent light land well under this; grainy/low-light shots land well over.
+NOISE_SIGMA_SKIP = 2.5
+
+
+def estimate_noise_sigma(img: np.ndarray) -> float:
+    """
+    Robust additive-noise estimate: MAD of the Immerkær kernel response.
+
+    The kernel amplifies i.i.d. Gaussian noise by its L2 norm (6), so for a
+    noise-only region median(|response|) ≈ 0.6745 · 6 · sigma. Taking the
+    MEDIAN (not the mean) makes the estimate insensitive to the sparse strong
+    responses at real edges — bonds and labels cover a small fraction of a
+    document photo — so it tracks the noise floor, not the line art.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    kernel = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], dtype=np.float64)
+    resp = cv2.filter2D(gray.astype(np.float64), -1, kernel)
+    return float(np.median(np.abs(resp)) / (0.6745 * 6.0))
+
+
 def denoise(img: np.ndarray) -> np.ndarray:
     """
     Reduce photographic noise using Non-Local Means (NLM) denoising.
 
     NLM averages patches that look similar across the whole image, so it
     preserves sharp edges (bonds, labels) much better than a simple blur.
+
+    Skipped entirely (input returned as-is) when the measured noise floor is
+    below NOISE_SIGMA_SKIP: NLM is the slowest stage in the pipeline (seconds),
+    and on an already-clean photo it can only soften thin bonds.
 
     h=10 is the filter strength:
       - raise to 15-20 for very grainy phone shots
@@ -167,6 +192,9 @@ def denoise(img: np.ndarray) -> np.ndarray:
     Note: fastNlMeansDenoisingColored is slow on large images (several seconds
     for a 12MP photo). Resize to ~1500px wide first if speed is a concern.
     """
+    if estimate_noise_sigma(img) < NOISE_SIGMA_SKIP:
+        return img
+
     if len(img.shape) == 3 and img.shape[2] == 3:
         return cv2.fastNlMeansDenoisingColored(
             img, None, h=10, hColor=10, templateWindowSize=7, searchWindowSize=21
@@ -214,7 +242,34 @@ def normalize_binarize(img: np.ndarray) -> np.ndarray:
     if np.mean(binary) < 127:
         binary = cv2.bitwise_not(binary)
 
+    binary = _despeckle(binary)
+
+    # White margin around the structure — OSR models are trained on depictions
+    # with breathing room; ink touching the frame edge hurts recognition.
+    pad = max(8, int(0.03 * max(binary.shape[:2])))
+    binary = cv2.copyMakeBorder(binary, pad, pad, pad, pad,
+                                cv2.BORDER_CONSTANT, value=255)
+
     return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+
+def _despeckle(binary: np.ndarray) -> np.ndarray:
+    """
+    Remove tiny isolated ink blobs (sensor noise, paper grain, JPEG artifacts
+    that survived thresholding) from a black-on-white binary image.
+
+    Ink components smaller than ~0.001% of the frame are almost never part of
+    a chemical structure — even a stereo-bond dot or the dot of an 'i' in an
+    atom label is bigger — but they routinely confuse OSR models into
+    hallucinating extra atoms.
+    """
+    ink = cv2.bitwise_not(binary)  # connected components of INK (white on black)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    min_area = max(6, binary.shape[0] * binary.shape[1] // 100_000)
+    for i in range(1, num):
+        if stats[i, cv2.CC_STAT_AREA] < min_area:
+            binary[labels == i] = 255
+    return binary
 
 
 # ── Pipeline Runner ────────────────────────────────────────────────────────────

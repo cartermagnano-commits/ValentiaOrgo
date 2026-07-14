@@ -31,11 +31,12 @@ That creates:
 
 - `projects`
 - `chemistry_files`
+- `user_settings`
 - indexes
 - timestamp triggers
 - Row Level Security policies for select, insert, update, and delete
 
-Ownership is enforced with `auth.uid() = user_id` on both tables.
+Ownership is enforced with `auth.uid() = user_id` on all three tables.
 
 ## 3. Configure Auth
 
@@ -44,6 +45,20 @@ In Supabase Auth settings:
 - Enable Email provider.
 - For immediate local testing, disable email confirmations.
 - If confirmations stay enabled, users will need to confirm their email before logging in.
+
+## 3b. Backend token verification (production)
+
+In production (`ORGO_ENV=prod`) the FastAPI backend verifies Supabase access
+tokens itself. Give it one of these (in the environment or `.env` at the repo
+root — **not** `frontend/.env.local`):
+
+- `SUPABASE_URL=https://your-project-ref.supabase.co` — the backend fetches the
+  project's public JWKS and verifies RS256/ES256/EdDSA tokens. Use this for
+  projects created after May 2025 (asymmetric JWT signing keys are the default).
+- `SUPABASE_JWT_SECRET` — the legacy HS256 shared secret (Project Settings →
+  API → JWT secret), for older projects still on the shared-secret scheme.
+
+Setting either one also turns auth on in dev mode. See README "Production mode".
 
 ## 4. Run locally
 

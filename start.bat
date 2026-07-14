@@ -12,25 +12,21 @@ if not exist "frontend\node_modules" (
     echo.
 )
 
-echo  [2/2] Building frontend...
-cd frontend
-call npm run build
-if %ERRORLEVEL% neq 0 (
-    echo  ERROR: Frontend build failed. Make sure Node.js 18+ is installed.
-    pause
-    exit /b 1
-)
-cd ..
+echo  [2/2] Starting servers...
 echo.
-
-echo  Starting server...
+echo  Backend API  : http://localhost:8000  (FastAPI / chemistry engine)
+echo  Web app      : http://localhost:3000  (Next.js — open this one)
 echo.
 echo  Your local IP addresses (for iPhone access^):
 ipconfig | findstr /C:"IPv4 Address"
 echo.
-echo  Open http://localhost:8000  on this computer
-echo  Open http://<your-IP>:8000  on your iPhone (same Wi-Fi^)
+echo  Open http://localhost:3000  on this computer
+echo  Open http://^<your-IP^>:3000  on your iPhone (same Wi-Fi^)
 echo.
-echo  Press Ctrl+C to stop.
-echo.
-python -m uvicorn app:app --host 0.0.0.0 --port 8000
+
+REM Start the FastAPI backend in its own window (chemistry API on :8000)
+start "Orgo AI - API" cmd /k python -m uvicorn app:app --host 0.0.0.0 --port 8000
+
+REM Run the Next.js web app in this window (dev server on :3000)
+cd frontend
+call npm run dev

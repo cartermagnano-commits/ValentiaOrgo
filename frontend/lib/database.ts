@@ -114,18 +114,27 @@ export async function updateChemistryFileContent(
   projectId: string,
   userId: string,
   content: ChemistryFileContent,
+  // Optimistic concurrency: when provided, the update only applies if the row's
+  // updated_at still matches — so a save from a stale tab fails loudly instead
+  // of silently overwriting work done in another tab or device.
+  expectedUpdatedAt?: string,
 ): Promise<ChemistryFile> {
   const now = new Date().toISOString()
-  const { data, error } = await supabase
+  let query = supabase
     .from('chemistry_files')
     .update({ content, updated_at: now })
     .eq('id', fileId)
     .eq('project_id', projectId)
     .eq('user_id', userId)
-    .select('*')
-    .single()
+  if (expectedUpdatedAt) query = query.eq('updated_at', expectedUpdatedAt)
+  const { data, error } = await query.select('*').maybeSingle()
 
   if (error) throw error
+  if (!data) {
+    throw new Error(
+      'This file was modified elsewhere (another tab or device). Reload the page to get the latest version before saving.',
+    )
+  }
   await touchProject(projectId, userId, now)
   return data as ChemistryFile
 }
@@ -141,6 +150,27 @@ export async function deleteChemistryFile(fileId: string, projectId: string, use
 
   if (error) throw error
   await touchProject(projectId, userId, now)
+}
+
+// Non-secret engine preferences. Best-effort cross-device sync; localStorage
+// remains the synchronous source of truth for building request payloads.
+export async function loadEngineSettings(userId: string): Promise<Record<string, unknown> | null> {
+  const { data, error } = await supabase
+    .from('user_settings')
+    .select('engine')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data?.engine as Record<string, unknown>) ?? null
+}
+
+export async function saveEngineSettings(userId: string, engine: Record<string, unknown>): Promise<void> {
+  const { error } = await supabase
+    .from('user_settings')
+    .upsert({ user_id: userId, engine, updated_at: new Date().toISOString() })
+
+  if (error) throw error
 }
 
 async function touchProject(projectId: string, userId: string, updatedAt: string): Promise<void> {

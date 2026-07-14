@@ -21,7 +21,3 @@ export function makeInitialContent(type: ChemistryFileType): ChemistryFileConten
   }
   return { moleculeOfInterest: '', notes: '', messages: [] }
 }
-
-export function withPlaceholderAiResponse(content: ChemistryFileContent): ChemistryFileContent {
-  return { ...(content as Record<string, unknown>), aiResponse: 'AI response will appear here.' } as ChemistryFileContent
-}

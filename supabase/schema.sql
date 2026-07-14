@@ -30,6 +30,14 @@ create table if not exists public.chemistry_files (
   updated_at timestamp with time zone default now()
 );
 
+-- Per-user, non-secret preferences (e.g. "Choose Your Engine" mode/provider/model/tier).
+-- BYOK API keys are NEVER stored here — they live client-side (sessionStorage) only.
+create table if not exists public.user_settings (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  engine jsonb default '{}',
+  updated_at timestamp with time zone default now()
+);
+
 create index if not exists projects_user_id_idx on public.projects(user_id);
 create index if not exists projects_updated_at_idx on public.projects(updated_at desc);
 create index if not exists chemistry_files_project_id_idx on public.chemistry_files(project_id);
@@ -38,6 +46,13 @@ create index if not exists chemistry_files_updated_at_idx on public.chemistry_fi
 
 alter table public.projects enable row level security;
 alter table public.chemistry_files enable row level security;
+alter table public.user_settings enable row level security;
+
+drop policy if exists "Users can manage own settings" on public.user_settings;
+create policy "Users can manage own settings"
+on public.user_settings for all
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
 
 drop policy if exists "Users can select own projects" on public.projects;
 drop policy if exists "Users can insert own projects" on public.projects;

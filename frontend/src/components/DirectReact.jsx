@@ -2,7 +2,8 @@ import { useState } from 'react'
 import MoleculeInput from './MoleculeInput'
 import StructureView from './StructureView'
 import { reactDirect } from '../api'
-import { ArrowDown, Check, ChevronRight, Copy, FlaskConical, Plus } from 'lucide-react'
+import { downloadMolfile, downloadSvg, copyText, buildReactionReport } from '../../lib/exports'
+import { ArrowDown, Check, ChevronRight, Copy, Download, FileText, FlaskConical, Image, Plus } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -51,7 +52,7 @@ function ProductCard({ product, index }) {
       </div>
 
       {/* SMILES prominently */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
         <code style={{
           flex: 1, fontSize: 13, fontWeight: 700,
           background: 'rgba(63,185,80,0.08)', color: 'var(--success)',
@@ -59,6 +60,16 @@ function ProductCard({ product, index }) {
           border: '1px solid rgba(63,185,80,0.25)', display: 'block', lineHeight: 1.5,
         }}>{product.smiles}</code>
         <CopyButton text={product.smiles} />
+      </div>
+
+      {/* Export */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button className="export-chip" onClick={() => downloadMolfile(product.smiles, `product_${index + 1}`)} title="Download MDL Molfile">
+          <Download size={11} /> .mol
+        </button>
+        <button className="export-chip" onClick={() => downloadSvg(product.smiles, `product_${index + 1}`)} title="Download SVG image">
+          <Image size={11} /> SVG
+        </button>
       </div>
 
       {/* Structure */}
@@ -93,10 +104,11 @@ function ProductCard({ product, index }) {
   )
 }
 
-export default function DirectReact() {
-  const [substrate, setSubstrate] = useState('')
-  const [reagent,   setReagent]   = useState('')
-  const [result,    setResult]    = useState(null)
+/** @param {{ initialSubstrate?: any, initialReagent?: any, initialResult?: any, onSave?: any }} [props] */
+export default function DirectReact({ initialSubstrate, initialReagent, initialResult, onSave } = {}) {
+  const [substrate, setSubstrate] = useState(initialSubstrate ?? '')
+  const [reagent,   setReagent]   = useState(initialReagent ?? '')
+  const [result,    setResult]    = useState(initialResult ?? null)
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState(null)
 
@@ -110,6 +122,12 @@ export default function DirectReact() {
     try {
       const data = await reactDirect(substrate.trim(), reagent.trim())
       setResult(data)
+      onSave?.({
+        reactants: [substrate.trim()],
+        reagents: reagent.trim(),
+        predictedProducts: data.products?.map(p => p.smiles) ?? [],
+        result: data,
+      })
       if (!data.products?.length) {
         setError('No reaction templates matched this substrate/reagent combination.')
       }
@@ -229,6 +247,18 @@ export default function DirectReact() {
               border: '1px solid var(--border)', borderRadius: 20, padding: '1px 8px' }}>
               {result.environment}
             </span>
+            <button
+              className="export-chip"
+              onClick={() => copyText(buildReactionReport({
+                substrate: substrate.trim(),
+                reagent: reagent.trim(),
+                environment: result.environment,
+                products: result.products,
+              }))}
+              title="Copy a Markdown reaction report"
+            >
+              <FileText size={11} /> Copy report
+            </button>
             <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
           </div>
 

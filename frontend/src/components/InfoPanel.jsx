@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import StructureView from './StructureView'
-import { streamNodeExplanation, streamExplanation } from '../api'
-import { CheckCircle2, Microscope } from 'lucide-react'
+import { streamNodeExplanation, streamExplanation, streamStereo } from '../api'
+import { CheckCircle2, Microscope, Atom } from 'lucide-react'
 
-const CONF_CLASS = { high: 'conf-high', medium: 'conf-medium', low: 'conf-low', unknown: 'conf-unknown' }
+// 'template' = product came deterministically from a reaction template — the
+// name is authoritative, so it gets the high-confidence dot.
+const CONF_CLASS = { high: 'conf-high', template: 'conf-high', medium: 'conf-medium', low: 'conf-low', unknown: 'conf-unknown' }
 
 const ROLE_LABEL = { start: 'Starting Material', intermediate: 'Intermediate', product: 'Product' }
 
@@ -14,10 +16,19 @@ function NodeInfoView({ nodeData, branch, substrateSMILES }) {
 
   useEffect(() => {
     if (!nodeData || !branch) return
+    // Stale flag: switching nodes mid-stream must silence the old stream, or
+    // its deltas interleave into the new explanation (and its completion
+    // handler can stamp a bogus error over the new stream's pending state).
+    let stale = false
     setExplanation({ text: '', loading: true, error: null })
-    streamNodeExplanation(nodeData, branch, substrateSMILES, delta =>
-      setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
-    ).catch(e => setExplanation({ text: '', loading: false, error: e.message }))
+    streamNodeExplanation(nodeData, branch, substrateSMILES, delta => {
+      if (!stale) setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
+    })
+      .then(() => { if (!stale) setExplanation(prev => prev.loading
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.' }
+        : prev) })
+      .catch(e => { if (!stale) setExplanation({ text: '', loading: false, error: e.message }) })
+    return () => { stale = true }
   }, [nodeData?.smiles, nodeData?.nodeType, branch?.id, substrateSMILES])
 
   if (!nodeData) return null
@@ -129,14 +140,40 @@ function NodeInfoView({ nodeData, branch, substrateSMILES }) {
 
 function BranchInfoView({ branch, substrateSMILES }) {
   const [explanation, setExplanation] = useState({ text: '', loading: false, error: null })
+  const [stereo, setStereo] = useState({ text: '', loading: false, error: null, requested: false })
+  // Bumped whenever the branch changes so an in-flight stereo stream from the
+  // previous branch can't write into the freshly-reset stereo state.
+  const stereoSeq = useRef(0)
 
   useEffect(() => {
     if (!branch) return
+    // Stale flag: switching branches mid-stream must silence the old stream —
+    // see NodeInfoView for the failure modes.
+    let stale = false
+    stereoSeq.current++
     setExplanation({ text: '', loading: true, error: null })
-    streamExplanation(branch, substrateSMILES, delta =>
-      setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
-    ).catch(e => setExplanation({ text: '', loading: false, error: e.message }))
+    setStereo({ text: '', loading: false, error: null, requested: false })
+    streamExplanation(branch, substrateSMILES, delta => {
+      if (!stale) setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
+    })
+      .then(() => { if (!stale) setExplanation(prev => prev.loading
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.' }
+        : prev) })
+      .catch(e => { if (!stale) setExplanation({ text: '', loading: false, error: e.message }) })
+    return () => { stale = true }
   }, [branch?.id, substrateSMILES])
+
+  function analyzeStereo() {
+    const seq = stereoSeq.current
+    setStereo({ text: '', loading: true, error: null, requested: true })
+    streamStereo(branch, substrateSMILES, delta => {
+      if (stereoSeq.current === seq) setStereo(prev => ({ ...prev, text: prev.text + delta, loading: false }))
+    })
+      .then(() => { if (stereoSeq.current === seq) setStereo(prev => prev.loading
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.', requested: true }
+        : prev) })
+      .catch(e => { if (stereoSeq.current === seq) setStereo({ text: '', loading: false, error: e.message, requested: true }) })
+  }
 
   if (!branch) {
     return (
@@ -165,7 +202,7 @@ function BranchInfoView({ branch, substrateSMILES }) {
         <div className="branch-summary">
           <div className="branch-summary-row">
             <span className="branch-summary-label">Reagent</span>
-            <span className="branch-summary-value">{branch.reagent.name}</span>
+            <span className="branch-summary-value">{branch.reagent?.name ?? '—'}</span>
           </div>
           <div className="branch-summary-row">
             <span className="branch-summary-label">Control</span>
@@ -212,6 +249,35 @@ function BranchInfoView({ branch, substrateSMILES }) {
             <span className="explanation-placeholder">Explanation will appear here.</span>
           )}
         </div>
+      </div>
+
+      {/* Stereo/regiochemistry — opt-in (extra AI call), since the SMARTS engine
+          cannot express stereochemistry on its own. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div className="panel-header" style={{ padding: '0 0 6px', border: 'none' }}>
+          Stereochemistry &amp; regiochemistry
+          <span style={{ color: 'var(--muted)', fontWeight: 400, marginLeft: 6, fontSize: 10 }}>(AI)</span>
+        </div>
+        {!stereo.requested ? (
+          <button
+            className="btn-secondary"
+            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '7px 0' }}
+            onClick={analyzeStereo}
+          >
+            <Atom size={14} />
+            Analyze stereochemistry
+          </button>
+        ) : (
+          <div className="explanation-box">
+            {stereo.loading ? (
+              <div className="loading-row"><div className="spinner" /> Analyzing stereochemistry…</div>
+            ) : stereo.error ? (
+              <span style={{ color: 'var(--danger)', fontSize: 12 }}>{stereo.error}</span>
+            ) : (
+              stereo.text
+            )}
+          </div>
+        )}
       </div>
 
     </div>

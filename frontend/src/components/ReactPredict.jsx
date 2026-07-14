@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import StructureView from './StructureView'
 import { reactFromImage } from '../api'
-import { ArrowLeft, Camera, Check, Copy, X } from 'lucide-react'
+import { imageFileFromClipboard, pasteTargetIsEditable, readImageFromClipboard } from '../../lib/clipboard'
+import { ArrowLeft, Camera, Check, ClipboardPaste, Copy, X } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -109,8 +110,9 @@ function ProductCard({ product, index }) {
   )
 }
 
-export default function ReactPredict() {
-  const [result, setResult]   = useState(null)
+/** @param {{ initialResult?: any, onSave?: any }} [props] */
+export default function ReactPredict({ initialResult, onSave } = {}) {
+  const [result, setResult]   = useState(initialResult ?? null)
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
   const [preview, setPreview] = useState(null)
@@ -122,10 +124,20 @@ export default function ReactPredict() {
     setLoading(true)
     setError(null)
     setResult(null)
-    setPreview(URL.createObjectURL(file))
+    setPreview(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return URL.createObjectURL(file)
+    })
     try {
       const data = await reactFromImage(file)
       setResult(data)
+      if (data.products?.length) {
+        onSave?.({
+          predictedMajorProduct: data.products[0]?.smiles ?? '',
+          sideProducts: data.products.slice(1).map(p => p.smiles),
+          result: data,
+        })
+      }
       if (data.error && !data.products?.length) {
         setError(data.error)
       }
@@ -139,9 +151,26 @@ export default function ReactPredict() {
   function onDrop(e) {
     e.preventDefault()
     setDragOver(false)
+    if (loading) return  // click and paste are guarded; drops must be too
     const file = e.dataTransfer.files[0]
     if (file) handleFile(file)
   }
+
+  // Ctrl+V anywhere on this view feeds a clipboard image (screen snip)
+  // straight into the pipeline — no need to click the drop zone first.
+  useEffect(() => {
+    function onPaste(e) {
+      if (e.defaultPrevented || loading || pasteTargetIsEditable(e)) return
+      const file = imageFileFromClipboard(e)
+      if (file) {
+        e.preventDefault()
+        handleFile(file)
+      }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading])
 
   function onDragOver(e) {
     e.preventDefault()
@@ -151,8 +180,26 @@ export default function ReactPredict() {
   function reset() {
     setResult(null)
     setError(null)
-    setPreview(null)
+    setPreview(prev => {
+      if (prev) URL.revokeObjectURL(prev)
+      return null
+    })
     if (fileRef.current) fileRef.current.value = ''
+  }
+
+  async function pasteFromClipboard(e) {
+    e.stopPropagation()  // don't also open the file picker
+    setError(null)
+    try {
+      const file = await readImageFromClipboard()
+      if (!file) {
+        setError('No image in the clipboard — take a screen snip first (Win+Shift+S).')
+        return
+      }
+      handleFile(file)
+    } catch (err) {
+      setError(err.message)
+    }
   }
 
   return (
@@ -222,11 +269,20 @@ export default function ReactPredict() {
           <>
             <Camera size={38} strokeWidth={1.45} style={{ opacity: 0.55 }} />
             <div style={{ fontSize: 13, color: 'var(--text)', fontWeight: 500 }}>
-              Drop an image here or click to upload
+              Drop an image, click to upload, or paste (Ctrl+V)
             </div>
             <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-              Supports structural drawings with substrate + reagent
+              Supports structural drawings with substrate + reagent — a screen snip works
             </div>
+            <button
+              className="btn-secondary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 16px', marginTop: 2 }}
+              title="Paste an image from your clipboard"
+              onClick={pasteFromClipboard}
+            >
+              <ClipboardPaste size={14} />
+              Paste from clipboard
+            </button>
           </>
         )}
       </div>
