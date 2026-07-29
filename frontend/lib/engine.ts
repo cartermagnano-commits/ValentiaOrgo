@@ -59,8 +59,11 @@ export const OLLAMA_MODEL_CHOICES = ['llama3.2:1b', 'llama3.1:8b', 'qwen2.5:7b']
 const PREFS_KEY = 'orgo.engine.prefs'
 const APIKEY_KEY = 'orgo.engine.apikey'
 
+// Default is 'hosted': explanations/chat run on the server-side key
+// (ANTHROPIC_API_KEY in the backend .env — the Parley gateway key) with no
+// setup. Users can still switch to Local or their own key under Settings.
 export const DEFAULT_PREFS: EnginePrefs = {
-  mode: 'local',
+  mode: 'hosted',
   provider: 'anthropic',
   model: 'claude-sonnet-4-6',
   ollamaModel: 'llama3.2:1b',
@@ -108,13 +111,26 @@ export function setApiKey(key: string): void {
 }
 
 // The object attached to /explain and /chat request bodies.
-export function getEnginePayload(): EnginePayload {
+// modelOverride is the chat composer's per-prompt Haiku/Sonnet/Opus choice.
+// It is authoritative: the request runs on that Anthropic model (through the
+// user's own key when one is saved, otherwise the hosted key) even if the
+// engine prefs say Local — the picker's promise is "this model answers you".
+export function getEnginePayload(modelOverride?: string | null): EnginePayload {
   const p = loadPrefs()
+  if (modelOverride) {
+    const ownKey = p.mode === 'byok' && p.provider === 'anthropic' ? getApiKey() : ''
+    if (ownKey) {
+      return { mode: 'byok', provider: 'anthropic', model: modelOverride, api_key: ownKey }
+    }
+    return { mode: 'hosted', provider: 'anthropic', model: modelOverride }
+  }
   if (p.mode === 'local') {
     return { mode: 'local', model: p.ollamaModel || null }
   }
   if (p.mode === 'byok') {
     return { mode: 'byok', provider: p.provider, model: p.model, api_key: getApiKey() || null }
   }
-  return { mode: 'hosted', provider: p.provider, model: p.model }
+  // No model in hosted mode: the server's HOSTED_ANTHROPIC_MODEL decides what
+  // runs on the server-side key; p.model is only the BYOK slider's choice.
+  return { mode: 'hosted', provider: p.provider }
 }

@@ -29,7 +29,7 @@ const FEATURED_BLURBS: Partial<Record<ChemistryFileType, string>> = {
   predict_reaction: 'Upload a whiteboard photo or drawing and predict the reaction products.',
 }
 
-export default function ProjectPage({ projectId }: { projectId: string }) {
+export default function ProjectPage({ projectId, initialFileId }: { projectId: string; initialFileId?: string | null }) {
   const router = useRouter()
   const [user, setUser] = useState<User | null>(null)
   const [project, setProject] = useState<Project | null>(null)
@@ -64,7 +64,11 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
         setProject(projectResult)
         setFiles(fileResult)
         // Land on the tool picker (not an auto-opened file) so the project's
-        // capabilities are the first thing a user sees.
+        // capabilities are the first thing a user sees — unless the URL
+        // deep-links a specific file (dashboard "New Chat").
+        if (initialFileId && fileResult.some(file => file.id === initialFileId)) {
+          setActiveFileId(initialFileId)
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not load project.')
       } finally {
@@ -76,7 +80,7 @@ export default function ProjectPage({ projectId }: { projectId: string }) {
     return () => {
       cancelled = true
     }
-  }, [projectId, router])
+  }, [projectId, initialFileId, router])
 
   const activeFile = files.find(file => file.id === activeFileId) ?? null
 

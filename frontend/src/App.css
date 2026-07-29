@@ -131,6 +131,12 @@ html, body, #root {
   white-space: nowrap;
 }
 
+.action-button.compact {
+  font-size: 11px;
+  padding: 4px 10px;
+  gap: 6px;
+}
+
 .quick-tools-section {
   margin-bottom: 32px;
 }
@@ -1727,6 +1733,19 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   display: flex;
   gap: 6px;
   margin-top: 8px;
+}
+
+.chat-model-select {
+  align-self: flex-end;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
 }
 
 .chat-input {

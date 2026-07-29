@@ -83,6 +83,10 @@ VISION_TIMEOUT = float(os.environ.get("OLLAMA_VISION_TIMEOUT", "120"))
 # legible at 768 px, and 1024→768 cuts visual tokens ~45% — directly cutting
 # the wait whenever arbitration needs the vision read.
 VISION_MAX_DIM = int(os.environ.get("VISION_MAX_DIM", "768"))
+# Structure recognition stays pinned to Sonnet regardless of the (cheaper)
+# chat model: misreading a structure poisons everything downstream, while a
+# chat reply being slightly less polished costs nothing.
+ANTHROPIC_VISION_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6")
 
 # Vision-capable model families that current Ollama engines can load, best
 # first. llama3.2-vision is intentionally last: its 'mllama' architecture was
@@ -119,13 +123,83 @@ def _ollama_vision_model() -> str | None:
     return None
 
 
+def _smiles_from_vision_text(text: str, source: str) -> str | None:
+    """Pull the first plausible canonical SMILES out of a VLM response —
+    either the whole response or an extracted SMILES-shaped token."""
+    import re
+
+    # Whole-response parse only when it IS a bare SMILES (single token) —
+    # RDKit stops parsing at whitespace, so prose like "I need to..." would
+    # otherwise "parse" as iodine with the rest as a name field.
+    if len(text.split()) == 1:
+        result = plausible_or_none(_canonical_smiles(text), "Vision")
+        if result:
+            logger.info("%s → valid SMILES (full response): %r", source, result)
+            return result
+
+    for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
+        result = plausible_or_none(_canonical_smiles(candidate), "Vision")
+        if result:
+            logger.info("%s → valid SMILES (extracted token): %r", source, result)
+            return result
+
+    logger.warning("%s: no valid SMILES found in response: %r", source, text[:200])
+    return None
+
+
+def _anthropic_vision_call(img_bytes: bytes, prompt: str) -> str | None:
+    """
+    Send an image + prompt to Claude and return the first valid canonical
+    SMILES found in the response. Returns None on any failure so Ollama can
+    still take over.
+
+    Uses the OpenAI-compatible /v1/chat/completions route rather than the
+    native Anthropic messages API: gateways like MIT Parley silently DROP
+    base64 image blocks on their /v1/messages passthrough (Claude replies
+    "I don't see any image"), while the chat-completions route delivers
+    them — and api.anthropic.com serves the same route, so this works for
+    direct keys too.
+    Runs synchronously — always call from a thread pool, never the event loop.
+    """
+    import httpx
+
+    base = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    b64 = base64.b64encode(img_bytes).decode()
+    logger.info("Claude vision call → model=%s url=%s", ANTHROPIC_VISION_MODEL, base)
+    try:
+        resp = httpx.post(
+            f"{base}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {os.environ['ANTHROPIC_API_KEY']}"},
+            json={
+                "model": ANTHROPIC_VISION_MODEL,
+                "max_tokens": 256,
+                "temperature": 0,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+            },
+            timeout=VISION_TIMEOUT,
+        )
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        logger.info("Claude vision raw response: %r", text[:300])
+    except Exception as exc:
+        logger.warning("Claude vision error (%s): %s", type(exc).__name__, exc)
+        return None
+    return _smiles_from_vision_text(text, "Claude")
+
+
 def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
     """
     Send an image + prompt to the Ollama vision model and return the first valid
     canonical SMILES found in the response. Returns None on any failure.
     Runs synchronously — always call from a thread pool, never the event loop.
     """
-    import re
     import httpx
 
     model = _ollama_vision_model()
@@ -155,27 +229,27 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
         logger.warning("Ollama vision error (%s): %s", type(exc).__name__, exc)
         return None
 
-    result = plausible_or_none(_canonical_smiles(text), "Vision")
-    if result:
-        logger.info("Ollama → valid SMILES (full response): %r", result)
-        return result
+    return _smiles_from_vision_text(text, "Ollama")
 
-    for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
-        result = plausible_or_none(_canonical_smiles(candidate), "Vision")
+
+def _vision_call(img_bytes: bytes, prompt: str) -> str | None:
+    """Route a vision read to the best available backend: Claude when an
+    ANTHROPIC_API_KEY is configured (works through ANTHROPIC_BASE_URL
+    gateways like MIT Parley), falling back to local Ollama otherwise or
+    on any Claude failure."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        result = _anthropic_vision_call(img_bytes, prompt)
         if result:
-            logger.info("Ollama → valid SMILES (extracted token): %r", result)
             return result
-
-    logger.warning("Ollama: no valid SMILES found in response: %r", text[:200])
-    return None
+    return _ollama_call(img_bytes, prompt)
 
 
-def _ollama_vision_smiles(img_bytes: bytes) -> str | None:
+def _vision_smiles(img_bytes: bytes) -> str | None:
     """
     Extract all molecule SMILES from an image, ignoring reaction notation.
     Used by the /analyze pipeline as a DECIMER fallback.
     """
-    return _ollama_call(
+    return _vision_call(
         img_bytes,
         "You are an expert chemist. The image shows chemical structures, possibly alongside "
         "reaction notation.\n\n"
@@ -189,14 +263,14 @@ def _ollama_vision_smiles(img_bytes: bytes) -> str | None:
     )
 
 
-def _ollama_reaction_smiles(img_bytes: bytes) -> str | None:
+def _vision_reaction_smiles(img_bytes: bytes) -> str | None:
     """
     Extract only the INPUT molecules (starting materials + reagents) from a reaction image.
     Understands that arrows show reaction direction and question marks indicate the unknown
     product — neither should appear in the returned SMILES.
     Used by the /react-from-image pipeline.
     """
-    return _ollama_call(
+    return _vision_call(
         img_bytes,
         "You are an expert organic chemist reading a reaction problem image.\n\n"
         "The image shows a chemical reaction: starting material(s) on the LEFT of a reaction "
@@ -216,10 +290,13 @@ def _ollama_reaction_smiles(img_bytes: bytes) -> str | None:
 
 # ── "Choose Your Engine" — generative LLM provider router ────────────────────
 # The engine picker (local / byok / hosted) ONLY powers generative explanations
-# and chat. Structure recognition and the reaction engine always run keyless.
+# and chat. Structure recognition uses the server-side ANTHROPIC_API_KEY when
+# present (see _vision_call), else runs keyless via local Ollama.
 # A BYOK api_key is request-scoped: never persisted, never logged.
 
-DEFAULT_ANTHROPIC_MODEL = os.environ.get("HOSTED_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+# Chat/explanations run on Haiku by default — ~1/3 the cost of Sonnet and
+# fine for pedagogical prose; vision stays on Sonnet (ANTHROPIC_VISION_MODEL).
+DEFAULT_ANTHROPIC_MODEL = os.environ.get("HOSTED_ANTHROPIC_MODEL", "claude-haiku-4-5")
 DEFAULT_OPENAI_MODEL    = os.environ.get("HOSTED_OPENAI_MODEL", "gpt-4o-mini")
 
 # Lightweight in-memory usage telemetry (per engine mode/provider). Resets on
@@ -275,7 +352,14 @@ async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int,
                             model: str | None = None, api_key: str | None = None):
     """Async generator: streams SSE delta chunks from Anthropic."""
     import anthropic
-    client = anthropic.AsyncAnthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
+    if api_key:
+        # BYOK: don't inherit the server's ANTHROPIC_BASE_URL (a gateway like
+        # Parley would reject a real Anthropic key). Route by key prefix.
+        base_url = ("https://parley.api.mit.edu" if api_key.startswith("sk-parley-")
+                    else "https://api.anthropic.com")
+        client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
+    else:
+        client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     async with client.messages.stream(
         model=model or DEFAULT_ANTHROPIC_MODEL,
         max_tokens=max_tokens,
@@ -1030,10 +1114,10 @@ def _process(raw_bytes: bytes) -> dict:
     # Kick off the slow independent readers FIRST, each on its own pool, so
     # they overlap the preprocessing stages and DECIMER reads below instead
     # of running after them:
-    #   * vision (Ollama HTTP) — sees a downscaled copy of the upload
+    #   * vision (Claude or Ollama HTTP) — sees a downscaled copy of the upload
     #   * MolScribe (torch)    — reads the original now; the binarized
     #     rendition is submitted as soon as preprocessing produces it
-    vision_future = _vision_pool.submit(_ollama_vision_smiles, _vision_png(img))
+    vision_future = _vision_pool.submit(_vision_smiles, _vision_png(img))
     ms_orig_future = _molscribe_pool.submit(_molscribe_read, img)
 
     current = img.copy()
@@ -2194,19 +2278,19 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         recognized_smiles = _decimer_read(first) or _decimer_read(second)
         logger.info("DECIMER output: %r", recognized_smiles)
     except Exception as exc:
-        # DECIMER missing/broken is recoverable — the Ollama vision fallback
+        # DECIMER missing/broken is recoverable — the vision fallback
         # below gets a chance, same as the /analyze pipeline.
         logger.warning("DECIMER failed (%s): %s — trying vision fallback", type(exc).__name__, exc)
         recognized_smiles = None
 
     # Encode the preprocessed image once (downscaled for VLM prefill speed);
-    # reused by all Ollama fallback calls below
+    # reused by all vision fallback calls below
     _img_bytes = _vision_png(current)
 
     if not recognized_smiles:
-        logger.info("DECIMER returned nothing — calling Ollama reaction parse")
-        recognized_smiles = _ollama_reaction_smiles(_img_bytes)
-        logger.info("Ollama (empty DECIMER fallback) returned: %r", recognized_smiles)
+        logger.info("DECIMER returned nothing — calling vision reaction parse")
+        recognized_smiles = _vision_reaction_smiles(_img_bytes)
+        logger.info("Vision (empty DECIMER fallback) returned: %r", recognized_smiles)
     if not recognized_smiles:
         return {"error": "No structure recognized in the image.", "products": []}
 
@@ -2217,9 +2301,9 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         alt = recognized_smiles.replace("+", ".")
         raw_mol = Chem.MolFromSmiles(alt)
         if raw_mol is None:
-            logger.info("DECIMER SMILES invalid — calling Ollama reaction parse")
-            fallback = _ollama_reaction_smiles(_img_bytes)
-            logger.info("Ollama (invalid SMILES fallback) returned: %r", fallback)
+            logger.info("DECIMER SMILES invalid — calling vision reaction parse")
+            fallback = _vision_reaction_smiles(_img_bytes)
+            logger.info("Vision (invalid SMILES fallback) returned: %r", fallback)
             if fallback:
                 recognized_smiles = fallback
                 raw_mol = Chem.MolFromSmiles(recognized_smiles)
@@ -2239,11 +2323,11 @@ def _react_from_image(raw_bytes: bytes) -> dict:
     _bad_atoms = _atom_syms & _NON_ORGANIC
     if len(frags) > 5 or _bad_atoms:
         logger.info(
-            "Suspicious DECIMER output (%d frags, non-organic atoms=%s, smiles=%r) — calling Ollama",
+            "Suspicious DECIMER output (%d frags, non-organic atoms=%s, smiles=%r) — calling vision",
             len(frags), _bad_atoms or "none", recognized_smiles,
         )
-        fix = _ollama_reaction_smiles(_img_bytes)
-        logger.info("Ollama (suspicious DECIMER) returned: %r", fix)
+        fix = _vision_reaction_smiles(_img_bytes)
+        logger.info("Vision (suspicious DECIMER) returned: %r", fix)
         if fix:
             fix_mol = Chem.MolFromSmiles(fix)
             if fix_mol is not None:
@@ -2275,11 +2359,11 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         substrate_smiles, reagent_smiles, conditions, len(branches),
     )
 
-    # 5. Last-resort: if engine matched nothing, ask Ollama for a cleaner re-read and retry
+    # 5. Last-resort: if engine matched nothing, ask vision for a cleaner re-read and retry
     if not branches:
-        logger.info("No templates matched — calling Ollama for last-resort re-identification")
-        retry_smiles = _ollama_reaction_smiles(_img_bytes)
-        logger.info("Ollama (no-match retry) returned: %r", retry_smiles)
+        logger.info("No templates matched — calling vision for last-resort re-identification")
+        retry_smiles = _vision_reaction_smiles(_img_bytes)
+        logger.info("Vision (no-match retry) returned: %r", retry_smiles)
         if retry_smiles and retry_smiles != recognized_smiles:
             retry_mol = Chem.MolFromSmiles(retry_smiles)
             if retry_mol is not None:
@@ -2293,7 +2377,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
                         _pick_substrate_and_react(retry_components)
                     )
                     logger.info(
-                        "Retry with Ollama SMILES: substrate=%r  reagent=%r  conditions=%s → %d branch(es)",
+                        "Retry with vision SMILES: substrate=%r  reagent=%r  conditions=%s → %d branch(es)",
                         substrate_smiles, reagent_smiles, conditions, len(branches),
                     )
 

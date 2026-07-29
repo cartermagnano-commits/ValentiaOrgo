@@ -173,8 +173,8 @@ export async function streamStereo(branch, substrateSMILES, onDelta) {
   }, onDelta)
 }
 
-export async function streamChat(messages, context, onDelta) {
-  return streamSSE('/chat', { messages, context, engine: getEnginePayload() }, onDelta)
+export async function streamChat(messages, context, onDelta, model = null) {
+  return streamSSE('/chat', { messages, context, engine: getEnginePayload(model) }, onDelta)
 }
 
 export async function streamAssist(fileType, content, onDelta) {

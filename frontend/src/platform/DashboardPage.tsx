@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Clock3, FileText, FolderKanban, Plus, Trash2, Wand2 } from 'lucide-react'
+import { Clock3, FileText, FolderKanban, MessageSquare, Plus, Trash2, Wand2 } from 'lucide-react'
 import type { User } from '@supabase/supabase-js'
 import {
   createProject, deleteProject, fetchProjects, getCurrentUser,
@@ -24,6 +24,7 @@ export default function DashboardPage() {
   const [error, setError] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const [creatingExample, setCreatingExample] = useState(false)
+  const [creatingChat, setCreatingChat] = useState(false)
   const { notify } = useToast()
 
   function openNewProject() {
@@ -93,6 +94,29 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleNewChat() {
+    if (!user || creatingChat) return
+    setCreatingChat(true)
+    try {
+      // Quick chats live in one shared "Chats" project so they don't clutter
+      // the workspace list — created on first use, reused after.
+      let chatProject = projects.find(p => p.name === 'Chats')
+      if (!chatProject) {
+        chatProject = await createProject(user.id, 'Chats', 'Quick questions for the chemistry assistant.')
+        setProjects(prev => [chatProject!, ...prev])
+      }
+      const file = await createChemistryFile(
+        chatProject.id, user.id,
+        `Chat — ${new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`,
+        'chat',
+      )
+      router.push(`/projects/${chatProject.id}?file=${file.id}`)
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not start a chat.', 'error')
+      setCreatingChat(false)
+    }
+  }
+
   async function handleCreateExample() {
     if (!user || creatingExample) return
     setCreatingExample(true)
@@ -147,10 +171,16 @@ export default function DashboardPage() {
             <div className="eyebrow">Projects</div>
             <h2>Chemistry workspaces</h2>
           </div>
-          <button className="btn-primary action-button" onClick={() => openNewProject()}>
-            <Plus size={16} />
-            New Project
-          </button>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <button className="btn-secondary action-button compact" onClick={handleNewChat} disabled={creatingChat}>
+              <MessageSquare size={14} />
+              {creatingChat ? 'Starting…' : 'New Chat'}
+            </button>
+            <button className="btn-primary action-button" onClick={() => openNewProject()}>
+              <Plus size={16} />
+              New Project
+            </button>
+          </div>
         </div>
 
         {!isSupabaseConfigured && (

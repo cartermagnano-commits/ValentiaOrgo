@@ -6,7 +6,7 @@ independent reads of the same image:
 
   DECIMER   × {original, binarized}   (TensorFlow, single-threaded worker)
   MolScribe × {original, binarized}   (Swin transformer, own worker)
-  vision    × {original}              (Ollama VLM — slow, arrives late)
+  vision    × {original}              (Claude or Ollama VLM — slow, arrives late)
 
 Everything here is deliberately free of heavy imports (no RDKit, TF, torch,
 cv2) so the decision table can be unit-tested in milliseconds without loading

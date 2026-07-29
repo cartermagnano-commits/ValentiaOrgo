@@ -9,6 +9,7 @@ import MolDrawer from '../components/MolDrawer'
 import StructureView from '../components/StructureView'
 import type { ChatContent, ChemistryFile, ChemistryFileContent } from '../types'
 import { makeInitialContent } from '../../lib/content'
+import { STRENGTH } from '../../lib/engine'
 import { streamAssist, streamChat } from '../api'
 import { updateChemistryFileContent } from '../../lib/database'
 import { useToast } from './Toast'
@@ -421,7 +422,18 @@ function PersistedChat({
   const messages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : []
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
+  const [model, setModel] = useState(STRENGTH.anthropic[0].model)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem('orgo.chat.model')
+    if (saved && STRENGTH.anthropic.some(s => s.model === saved)) setModel(saved)
+  }, [])
+
+  function selectModel(next: string) {
+    setModel(next)
+    try { window.localStorage.setItem('orgo.chat.model', next) } catch { /* ignore */ }
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -463,6 +475,7 @@ function PersistedChat({
           acc += delta
           onChange(withReply(acc))
         },
+        model,
       )
       if (!acc) throw new Error('The AI engine returned no response. Check Settings → Engine.')
       await onSave(withReply(acc))
@@ -511,6 +524,17 @@ function PersistedChat({
             }
           }}
         />
+        <select
+          className="chat-model-select"
+          aria-label="AI model"
+          value={model}
+          onChange={event => selectModel(event.target.value)}
+          title={STRENGTH.anthropic.find(s => s.model === model)?.cost}
+        >
+          {STRENGTH.anthropic.map(stop => (
+            <option key={stop.model} value={stop.model}>{stop.label}</option>
+          ))}
+        </select>
         <button
           className="btn-primary"
           style={{ alignSelf: 'flex-end', padding: '8px 14px' }}
