@@ -6,9 +6,8 @@ import {
   MessageSquare, Network, Plus, Trash2, X,
 } from 'lucide-react'
 import PathwayExplorer from '../components/PathwayExplorer'
-import DirectReact from '../components/DirectReact'
 import ChatPanel from './ChatPanel'
-import type { ChatContent, ChatMessage, SessionContent, Tool } from '../types'
+import type { ChatContent, ChatMessage, ChatToolResult, SessionContent, Tool } from '../types'
 import {
   Project,
   Session,
@@ -24,7 +23,7 @@ import {
 
 const TOOLS: Array<{ tool: Tool; label: string; icon: typeof Network; blurb: string }> = [
   { tool: 'synthesis', label: 'Synthesis', icon: Network, blurb: 'Explore reagent routes from a starting molecule' },
-  { tool: 'direct_reaction', label: 'Reaction', icon: FlaskConical, blurb: 'Substrate + reagent → predicted products' },
+  { tool: 'direct_reaction', label: 'Reaction', icon: FlaskConical, blurb: 'Type molecules or photograph a reaction — the engine predicts products' },
   { tool: 'chat', label: 'Chat', icon: MessageSquare, blurb: 'Ask anything, attach images or files' },
 ]
 
@@ -43,25 +42,6 @@ function dayLabel(iso: string): string {
   if (sameDay(date, today)) return 'Today'
   if (sameDay(date, yesterday)) return 'Yesterday'
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-// Grounding context for the Assistant drawer, derived from what the reaction
-// tool has computed so far. (Synthesis pushes richer live context itself.)
-function reactionContext(content: Record<string, unknown>): Record<string, unknown> | null {
-  const substrate = Array.isArray(content.reactants) ? String(content.reactants[0] ?? '').trim() : ''
-  const reagent = String(content.reagents ?? '').trim()
-  const result = content.result as { products?: Array<Record<string, unknown>> } | undefined
-  const top = result?.products?.[0]
-  if (!substrate && !reagent && !top) return null
-  return {
-    ...(substrate ? { substrate_smiles: substrate } : {}),
-    ...(reagent ? { reagent_name: reagent } : {}),
-    ...(top ? {
-      product_smiles: top.smiles,
-      reaction_name: top.reaction_name,
-      execution_history: top.execution_history,
-    } : {}),
-  }
 }
 
 export default function Workspace() {
@@ -119,13 +99,44 @@ export default function Workspace() {
     }
   }, [])
 
-  // Tool-save callbacks (PathwayExplorer/DirectReact call onSave with partial
-  // data on explicit saves; merge over the current content).
+  // Tool-save callback (PathwayExplorer calls onSave with partial data on
+  // explicit saves; merge over the current content).
   function mergeAndSave(data: Record<string, unknown>) {
     const current = activeRef.current
     if (!current) return
     const next = { ...current, content: { ...(current.content as Record<string, unknown>), ...data } as SessionContent }
     setActive(persistIfReal(next))
+  }
+
+  // PathwayExplorer owns its state after mount, so chat-driven changes to the
+  // stockroom/pathways need a remount to take effect — bump this to force one.
+  const [synthesisRevision, setSynthesisRevision] = useState(0)
+
+  // Chat tool events that change the app outside the conversation.
+  function handleUiEvent(event: ChatToolResult) {
+    const current = activeRef.current
+    if (!current || current.tool !== 'synthesis') return
+    const currentContent = current.content as Record<string, unknown>
+    if (event.type === 'set_stockroom') {
+      const data = event.data as { smiles?: string[]; mode?: string }
+      const incoming = data.smiles ?? []
+      const existing = Array.isArray(currentContent.startingMaterials)
+        ? (currentContent.startingMaterials as string[]).filter(s => s.trim()) : []
+      const merged = data.mode === 'add'
+        ? [...existing, ...incoming.filter(s => !existing.includes(s))]
+        : incoming
+      mergeAndSave({ startingMaterials: merged.slice(0, 4) })
+      setSynthesisRevision(r => r + 1)
+    }
+    if (event.type === 'pathways_result') {
+      const data = event.data as { start_smiles?: string[]; target_smiles?: string; pathways?: unknown }
+      mergeAndSave({
+        startingMaterials: data.start_smiles ?? [],
+        targetMolecule: data.target_smiles ?? '',
+        pathwaysData: data.pathways ?? null,
+      })
+      setSynthesisRevision(r => r + 1)
+    }
   }
 
   function startTool(tool: Tool) {
@@ -196,8 +207,8 @@ export default function Workspace() {
 
   const content = active.content as Record<string, unknown>
   const activeProject = projects.find(p => p.id === activeProjectId) ?? null
-  const showDrawerButton = view === 'tool' && (active.tool === 'synthesis' || active.tool === 'direct_reaction')
-  const drawerContext = active.tool === 'synthesis' ? synthesisContext : reactionContext(content)
+  // Reaction is now itself a chat surface — the drawer only exists on Synthesis.
+  const showDrawerButton = view === 'tool' && active.tool === 'synthesis'
   const assistantMessages: ChatMessage[] = Array.isArray(content.assistantMessages)
     ? (content.assistantMessages as ChatMessage[]) : []
 
@@ -344,10 +355,10 @@ export default function Workspace() {
             </div>
           </main>
         ) : (
-          <main className={`workspace-main${active.tool === 'chat' ? ' chat-main' : ''}`}>
+          <main className={`workspace-main${active.tool !== 'synthesis' ? ' chat-main' : ''}`}>
             {active.tool === 'synthesis' && (
               <PathwayExplorer
-                key={active.id}
+                key={`${active.id}_${synthesisRevision}`}
                 initialSubstrate={Array.isArray(content.startingMaterials)
                   ? (content.startingMaterials as string[]).filter(Boolean)
                   : []}
@@ -358,12 +369,17 @@ export default function Workspace() {
               />
             )}
             {active.tool === 'direct_reaction' && (
-              <DirectReact
+              <ChatPanel
                 key={active.id}
-                initialSubstrate={(content.reactants as string[])?.[0] ?? ''}
-                initialReagent={(content.reagents as string) ?? ''}
-                initialResult={content.result ?? null}
-                onSave={(data: Record<string, unknown>) => mergeAndSave(data)}
+                content={{ messages: Array.isArray(content.messages) ? content.messages as ChatMessage[] : [] }}
+                onChange={next => updateContent(next)}
+                onSave={async next => { if (next) updateContent(next) }}
+                saving={false}
+                surface="reaction"
+                enableReactionPhoto
+                placeholder="Name your molecules, or photograph the reaction…"
+                emptyTitle="What are we reacting?"
+                emptyBlurb="Type the molecules ('react t-BuBr with NaOH'), or use the camera button to photograph a reaction like a textbook problem. The verified engine predicts the products; I explain them."
               />
             )}
             {active.tool === 'chat' && (
@@ -373,6 +389,7 @@ export default function Workspace() {
                 onChange={next => updateContent(next)}
                 onSave={async next => { if (next) updateContent(next) }}
                 saving={false}
+                surface="chat"
               />
             )}
 
@@ -389,7 +406,7 @@ export default function Workspace() {
                   <Bot size={15} />
                   <strong>Assistant</strong>
                   <span className="assistant-drawer-hint">
-                    {drawerContext ? 'Grounded in the reaction on screen' : 'Ask anything — attach an image for context'}
+                    {synthesisContext ? 'Grounded in the pathway on screen' : 'Can set your stockroom and run pathways'}
                   </span>
                   <button className="chat-chip-remove" aria-label="Close assistant" onClick={() => setDrawerOpen(false)}>
                     <X size={15} />
@@ -403,10 +420,12 @@ export default function Workspace() {
                     if (next) updateContent({ ...(activeRef.current?.content as Record<string, unknown>), assistantMessages: next.messages } as SessionContent)
                   }}
                   saving={false}
-                  context={drawerContext}
-                  placeholder="Explain this reaction, or ask for context…"
+                  context={synthesisContext}
+                  surface="synthesis"
+                  onUiEvent={handleUiEvent}
+                  placeholder="Set my stockroom to…, run pathways, explain this route…"
                   emptyTitle="Ask about this work"
-                  emptyBlurb="Explain the reaction, ask why a reagent works, or upload an image of a problem for context. Answers stay grounded in what's on screen."
+                  emptyBlurb="I can set your stockroom, run pathway analysis, run reactions, and explain the routes on screen — just ask."
                 />
               </div>
             )}

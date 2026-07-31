@@ -3881,3 +3881,243 @@ header h1 {
 .assistant-drawer .chat-bubble { font-size: 13px; }
 .assistant-drawer .chat-empty-state h2 { font-size: 17px; }
 .assistant-drawer .chat-empty-state p { font-size: 12.5px; }
+
+/* ── Molecule input & analyze CTA polish ───────────────────────
+   Appended last so it wins over both the base rules and the
+   light-theme reskin section above. */
+
+.mol-input-card {
+  border-radius: 12px;
+}
+
+.mol-input-card .card-title {
+  padding: 12px 14px 0;
+}
+
+/* Empty dropzone: inset rounded target instead of full-bleed slab */
+.mol-structure-area.empty {
+  margin: 10px 10px 0;
+  border-radius: 10px;
+  border: 1.5px dashed var(--border-strong);
+  background: var(--surface);
+  gap: 3px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.mol-structure-area.empty:hover,
+.mol-structure-area.empty:focus-visible {
+  border-color: var(--accent);
+  background: #f1f7f9;
+  outline: none;
+}
+
+.upload-icon-ring {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(37, 111, 143, 0.08);
+  margin-bottom: 5px;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.mol-structure-area.empty:hover .upload-icon-ring {
+  background: rgba(37, 111, 143, 0.14);
+  transform: translateY(-1px);
+}
+
+.mol-structure-area.empty .upload-icon {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.upload-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.upload-hint {
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+/* Action row: uniform height, no wrapping, calmer chrome */
+.mol-actions {
+  gap: 6px;
+  padding: 10px;
+  align-items: stretch;
+  border-top: none;
+}
+
+.mol-actions .btn-secondary,
+.mol-actions .btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.mol-actions .btn-icon { color: var(--muted); }
+.mol-actions .btn-icon:hover:not(:disabled) { color: var(--text); }
+.mol-actions .btn-icon.active { color: var(--accent); border-color: var(--accent); }
+
+.mol-actions label { display: flex; }
+
+.mol-action-fill {
+  width: 100%;
+  height: 100%;
+}
+
+/* Analyze Pathways: brand-accent CTA with a real disabled state */
+.analyze-btn {
+  padding: 12px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  letter-spacing: 0.01em;
+  background: linear-gradient(180deg, #2c81a4, #226884);
+  border: 1px solid #1d5c78;
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(24, 32, 42, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.analyze-btn:hover:not(:disabled) {
+  background: linear-gradient(180deg, #3189ad, #256f8f);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(37, 111, 143, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.analyze-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(24, 32, 42, 0.15);
+}
+
+.analyze-btn:disabled {
+  opacity: 1;
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--subtle);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* Keep a hairline between a rendered structure and the action row;
+   the inset empty dropzone doesn't need one. */
+.mol-structure-area:not(.empty) + .mol-actions {
+  border-top: 1px solid var(--border);
+}
+
+/* ── Chat tool cards (engine results inside the conversation) ──── */
+
+.chat-tool-card {
+  margin: 6px 0 10px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.chat-bubble.user .chat-tool-card { color: var(--text); }
+
+.chat-tool-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.chat-tool-card-head svg { color: var(--accent2, var(--muted)); flex-shrink: 0; }
+
+.chat-tool-card-head code {
+  font-size: 11px;
+  padding: 1px 6px;
+  background: #f7f6f1;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  word-break: break-all;
+}
+
+.chat-tool-tag {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.chat-tool-products {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.chat-tool-product {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  max-width: 200px;
+  background: #fdfdfb;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.chat-tool-product-name {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.chat-tool-product-smiles {
+  font-size: 10.5px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.chat-tool-miss {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--warning);
+}
+
+/* ── Stockroom preset chips ────────────────────────────────────── */
+
+.stockroom-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.stockroom-preset-chip {
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.stockroom-preset-chip:hover {
+  color: #1e6074;
+  background: #eef7f8;
+  border-color: #cfe4e9;
+}

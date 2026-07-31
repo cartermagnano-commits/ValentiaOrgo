@@ -71,7 +71,7 @@ export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth 
   })
 }
 
-async function streamSSE(path, body, onDelta) {
+async function streamSSE(path, body, onDelta, onToolEvent = null) {
   const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -92,6 +92,7 @@ async function streamSSE(path, body, onDelta) {
     try { p = JSON.parse(data) } catch { return false }
     if (p?.error) throw new Error(p.error)
     if (p?.delta) onDelta(p.delta)
+    if (p?.tool_event && onToolEvent) onToolEvent(p.tool_event)
     return false
   }
   while (true) {
@@ -156,6 +157,12 @@ export async function streamStereo(branch, substrateSMILES, onDelta) {
   }, onDelta)
 }
 
-export async function streamChat(messages, context, onDelta, model = null) {
-  return streamSSE('/chat', { messages, context, engine: getEnginePayload(model) }, onDelta)
+export async function streamChat(messages, context, onDelta, model = null,
+                                 surface = null, onToolEvent = null) {
+  return streamSSE(
+    '/chat',
+    { messages, context, engine: getEnginePayload(model), surface },
+    onDelta,
+    onToolEvent,
+  )
 }

@@ -203,9 +203,11 @@ export default function MoleculeInput({ label, value, onChange }) {
           </>
         ) : (
           <>
-            <UploadCloud className="upload-icon" size={30} strokeWidth={1.6} />
-            <span>Upload, capture, or paste image</span>
-            <span style={{ fontSize: 10, color: 'var(--subtle)' }}>Ctrl+V a screen snip works</span>
+            <span className="upload-icon-ring">
+              <UploadCloud className="upload-icon" size={22} strokeWidth={1.8} />
+            </span>
+            <span className="upload-title">Upload, capture, or paste image</span>
+            <span className="upload-hint">Ctrl+V a screen snip works</span>
           </>
         )}
       </div>
@@ -221,17 +223,13 @@ export default function MoleculeInput({ label, value, onChange }) {
             style={{ display: 'none' }}
             onChange={e => handleFile(e.target.files[0])}
           />
-          <span
-            className="btn-secondary"
-            style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '6px 0' }}
-          >
+          <span className="btn-secondary mol-action-fill" style={{ cursor: 'pointer' }}>
             <Camera size={14} />
             Camera / File
           </span>
         </label>
         <button
           className="btn-secondary"
-          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
           title="Paste an image from your clipboard"
           onClick={pasteFromClipboard}
           disabled={loading}

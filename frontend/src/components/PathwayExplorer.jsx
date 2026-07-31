@@ -82,6 +82,24 @@ function LoadingOverlay({ stage }) {
 
 const MAX_STARTS = 4
 
+// Common stockroom picks — mirrors the backend's reagents.py catalog so the
+// names and SMILES stay in the forms the template engine expects.
+const STOCKROOM_PRESETS = [
+  { name: 'NaOH',   smiles: '[OH-].[Na+]' },
+  { name: 'NaOEt',  smiles: 'CC[O-].[Na+]' },
+  { name: 't-BuOK', smiles: '[O-]C(C)(C)C.[K+]' },
+  { name: 'LDA',    smiles: 'CC(C)[N-]C(C)C.[Li+]' },
+  { name: 'NaBH4',  smiles: '[BH4-].[Na+]' },
+  { name: 'LiAlH4', smiles: '[AlH4-].[Li+]' },
+  { name: 'HBr',    smiles: 'Br' },
+  { name: 'HCl',    smiles: 'Cl' },
+  { name: 'Br2',    smiles: 'BrBr' },
+  { name: 'NH3',    smiles: 'N' },
+  { name: 'NaI',    smiles: '[Na+].[I-]' },
+  { name: 'H2SO4',  smiles: 'OS(=O)(=O)O' },
+  { name: 'Water',  smiles: 'O' },
+]
+
 /** @param {{ initialSubstrate?: any, initialTarget?: any, initialPathways?: any, onSave?: any, onContextChange?: any }} [props] */
 export default function PathwayExplorer({ initialSubstrate, initialTarget, initialPathways, onSave, onContextChange } = {}) {
   const [startSmilesList,  setStartSmilesList]  = useState(() => initialSubstrate?.length ? initialSubstrate : [''])
@@ -149,6 +167,16 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   function addStart() {
     if (startSmilesList.length < MAX_STARTS)
       setStartSmilesList(prev => [...prev, ''])
+  }
+  // Preset chip click: fill the first empty slot, else append if room.
+  function addPreset(smiles) {
+    setStartSmilesList(prev => {
+      if (prev.includes(smiles)) return prev
+      const emptyIdx = prev.findIndex(s => !s.trim())
+      if (emptyIdx >= 0) return prev.map((s, i) => i === emptyIdx ? smiles : s)
+      if (prev.length < MAX_STARTS) return [...prev, smiles]
+      return prev
+    })
   }
   function removeStart(idx) {
     setStartSmilesList(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev)
@@ -240,6 +268,20 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
                     Add
                   </button>
                 )}
+              </div>
+
+              {/* Common reagent presets — one click adds to the stockroom */}
+              <div className="stockroom-presets">
+                {STOCKROOM_PRESETS.map(preset => (
+                  <button
+                    key={preset.name}
+                    className="stockroom-preset-chip"
+                    title={preset.smiles}
+                    onClick={() => addPreset(preset.smiles)}
+                  >
+                    {preset.name}
+                  </button>
+                ))}
               </div>
               {startSmilesList.map((smi, idx) => (
                 <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>

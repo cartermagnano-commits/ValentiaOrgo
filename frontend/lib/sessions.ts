@@ -25,7 +25,8 @@ const PROJECTS_KEY = 'orgo.projects.v1'
 
 export function makeInitialContent(tool: Tool): SessionContent {
   if (tool === 'synthesis') return { targetMolecule: '', startingMaterials: [], pathwaysData: null }
-  if (tool === 'direct_reaction') return { reactants: [], reagents: '', result: null }
+  // Reaction sessions are chat-shaped: the conversation IS the workspace
+  // (typed molecules or a photo, engine results as cards in the thread).
   return { messages: [] }
 }
 
@@ -33,7 +34,6 @@ export function makeInitialContent(tool: Tool): SessionContent {
 // every accidental tab click would leave an empty row behind.
 export function hasRealContent(session: Session): boolean {
   const c = session.content as Record<string, unknown>
-  if (session.tool === 'chat') return Array.isArray(c.messages) && c.messages.length > 0
   // Drawer-assistant conversations count as work even before molecules go in.
   if (Array.isArray(c.assistantMessages) && c.assistantMessages.length > 0) return true
   if (session.tool === 'synthesis') {
@@ -41,20 +41,14 @@ export function hasRealContent(session: Session): boolean {
       || Boolean((c.targetMolecule as string || '').trim())
       || (Array.isArray(c.startingMaterials) && c.startingMaterials.some(s => String(s).trim()))
   }
-  return Boolean(c.result)
-    || (Array.isArray(c.reactants) && c.reactants.some(r => String(r).trim()))
-    || Boolean((c.reagents as string || '').trim())
+  // chat and direct_reaction are both conversation-shaped
+  return Array.isArray(c.messages) && c.messages.length > 0
 }
 
 // Derive the sidebar title from the work itself, so users never name anything.
 export function autoTitle(session: Session): string {
   const c = session.content as Record<string, unknown>
   const clip = (s: string, n = 42) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
-  if (session.tool === 'chat') {
-    const first = (c.messages as Array<{ role: string; content: string }> | undefined)
-      ?.find(m => m.role === 'user' && m.content.trim())
-    return first ? clip(first.content.trim()) : 'New chat'
-  }
   if (session.tool === 'synthesis') {
     const target = String(c.targetMolecule ?? '').trim()
     const starts = Array.isArray(c.startingMaterials)
@@ -62,15 +56,13 @@ export function autoTitle(session: Session): string {
     if (target && starts.length) return clip(`${starts[0]} → ${target}`)
     if (target) return clip(`→ ${target}`)
     if (starts.length) return clip(starts[0])
+    if (Array.isArray(c.assistantMessages) && c.assistantMessages.length) return 'Synthesis chat'
     return 'New synthesis'
   }
-  const reactants = Array.isArray(c.reactants)
-    ? c.reactants.map(r => String(r).trim()).filter(Boolean) : []
-  const reagents = String(c.reagents ?? '').trim()
-  if (reactants.length && reagents) return clip(`${reactants[0]} + ${reagents}`)
-  if (reactants.length) return clip(reactants[0])
-  if (reagents) return clip(reagents)
-  return 'New reaction'
+  const first = (c.messages as Array<{ role: string; content: string }> | undefined)
+    ?.find(m => m.role === 'user' && m.content.trim())
+  if (first) return clip(first.content.trim())
+  return session.tool === 'direct_reaction' ? 'New reaction' : 'New chat'
 }
 
 export function loadSessions(): Session[] {

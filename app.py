@@ -1007,6 +1007,228 @@ async def _maybe_sanity_check(substrate: str, reagent: str, products: list[dict]
         return None
 
 
+# ── Chat tools: the assistant can drive parts of the app ─────────────────────
+# Tool calls run server-side (pure engine work — no nested LLM calls) and are
+# surfaced to the browser as SSE `tool_event` frames so the UI can render
+# product cards in the conversation and update the Synthesis panel. Which
+# tools a chat gets depends on where it's embedded ("surface").
+
+_CHAT_TOOL_DEFS: dict[str, dict] = {
+    "run_reaction": {
+        "name": "run_reaction",
+        "description": (
+            "Run Orgo AI's verified deterministic reaction engine on one "
+            "substrate + one reagent (SMILES). Use this BEFORE answering any "
+            "question about what two specific molecules form. Convert names "
+            "to SMILES yourself, writing ionic reagents in their reactive "
+            "ionic form — sodium ethoxide as CC[O-].[Na+], NaOH as "
+            "[OH-].[Na+], t-BuOK as CC(C)(C)[O-].[K+], LDA as "
+            "CC(C)[N-]C(C)C.[Li+] — never as neutral aggregates like "
+            "CCO.[Na]. Results render as cards in the UI."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "substrate_smiles": {"type": "string", "description": "Substrate SMILES"},
+                "reagent_smiles": {"type": "string", "description": "Reagent SMILES (multi-fragment with '.' allowed)"},
+            },
+            "required": ["substrate_smiles", "reagent_smiles"],
+        },
+    },
+    "set_stockroom": {
+        "name": "set_stockroom",
+        "description": (
+            "Set or extend the user's Synthesis stockroom (starting "
+            "materials). Use when the user asks to add, set, or replace "
+            "materials. The panel updates live."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "smiles": {"type": "array", "items": {"type": "string"},
+                           "description": "Starting-material SMILES"},
+                "mode": {"type": "string", "enum": ["replace", "add"],
+                         "description": "replace the stockroom or add to it (default replace)"},
+            },
+            "required": ["smiles"],
+        },
+    },
+    "run_pathways": {
+        "name": "run_pathways",
+        "description": (
+            "Run pathway exploration: fan the starting material(s) out across "
+            "the reagent catalog (optionally searching toward a target "
+            "product). The graph renders in the Synthesis panel."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_smiles": {"type": "array", "items": {"type": "string"},
+                                 "description": "Starting-material SMILES (1-4)"},
+                "target_smiles": {"type": "string", "description": "Optional target product SMILES"},
+            },
+            "required": ["start_smiles"],
+        },
+    },
+}
+
+# Which tools each chat surface exposes. Stockroom/pathways manipulation only
+# makes sense where the Synthesis panel is on screen (its Assistant drawer).
+_SURFACE_TOOLS: dict[str, list[str]] = {
+    "synthesis": ["run_reaction", "set_stockroom", "run_pathways"],
+    "reaction": ["run_reaction"],
+    "chat": ["run_reaction"],
+}
+
+_CHAT_TOOL_ROUNDS = 4   # bound on tool-call iterations per /chat request
+
+_CHAT_TOOLS_SYSTEM = (
+    "\n\nTOOLS:\n"
+    "- run_reaction: ALWAYS call this before answering what two specific "
+    "molecules form. Its output is verified ground truth — never contradict "
+    "it. If it returns zero products, say the verified engine has no rule "
+    "for that pair, then you may give your own prediction clearly labeled "
+    "as an unverified AI guess.\n"
+    "- set_stockroom (when available): use when the user asks to set or add "
+    "starting materials; confirm what you set.\n"
+    "- run_pathways (when available): use when the user asks to explore "
+    "routes from their materials; the graph appears in the Synthesis panel.\n"
+    "- Tool results render as cards in the UI automatically — explain the "
+    "chemistry concisely instead of restating raw SMILES or JSON."
+)
+
+
+async def _execute_chat_tool(name: str, args: dict) -> tuple[dict, dict | None]:
+    """Run one chat tool. Returns (model_view, ui_event): what the model reads
+    back, and the tool_event frame for the browser (None to skip). Never
+    raises — errors become a message the model can relay."""
+    try:
+        if name == "run_reaction":
+            core = await _react_core(str(args.get("substrate_smiles", "")),
+                                     str(args.get("reagent_smiles", "")))
+            if not core["products"]:
+                _record_template_gap("chat", core["substrate_smiles"],
+                                     core["reagent_smiles"], core["conditions"])
+            model_view = {
+                "substrate_smiles": core["substrate_smiles"],
+                "reagent_smiles": core["reagent_smiles"],
+                "environment": core["environment"],
+                "products": [
+                    {"smiles": p["smiles"], "reaction_name": p["reaction_name"],
+                     "steps_taken": p["steps_taken"],
+                     "execution_history": p["execution_history"]}
+                    for p in core["products"]
+                ],
+            }
+            if not core["products"]:
+                model_view["note"] = (
+                    "No reaction template matched. Tell the user the verified "
+                    "engine has no rule for this pair; you may offer a clearly "
+                    "labeled unverified guess."
+                )
+            return model_view, {"type": "reaction_result", "data": core}
+
+        if name == "set_stockroom":
+            loop = asyncio.get_event_loop()
+            valid: list[str] = []
+            invalid: list[str] = []
+            for smi in list(args.get("smiles") or [])[:8]:
+                canon = await loop.run_in_executor(
+                    _chem_pool, _validate_and_canonicalize_smiles, str(smi))
+                (valid if canon else invalid).append(canon or str(smi))
+            mode = args.get("mode") if args.get("mode") in ("replace", "add") else "replace"
+            if not valid:
+                return {"applied": False, "invalid": invalid,
+                        "note": "No valid SMILES — nothing changed."}, None
+            return ({"applied": True, "smiles": valid, "mode": mode, "invalid": invalid},
+                    {"type": "set_stockroom", "data": {"smiles": valid, "mode": mode}})
+
+        if name == "run_pathways":
+            req = PathwaysRequest(
+                start_smiles=[str(s) for s in (args.get("start_smiles") or [])][:4],
+                target_smiles=(str(args.get("target_smiles")) if args.get("target_smiles") else None),
+            )
+            result = await pathways(req)
+            branches = result.get("branches") or []
+            routes = result.get("routes") or []
+            model_view = {
+                "search_mode": result.get("search_mode"),
+                "result_status": result.get("result_status"),
+                "shortest_route_depth": result.get("shortest_route_depth"),
+                "no_match_message": result.get("no_match_message"),
+                "route_count": len(routes),
+                "branches": [
+                    {"reagent": (b.get("reagent") or {}).get("name"),
+                     "reaction": (b.get("reaction_classification") or {}).get("name"),
+                     "product": b.get("product_smiles")}
+                    for b in branches[:12]
+                ],
+            }
+            ui_event = {"type": "pathways_result", "data": {
+                "start_smiles": req.start_smiles,
+                "target_smiles": req.target_smiles or "",
+                "pathways": result,
+            }}
+            return model_view, ui_event
+
+        return {"error": f"Unknown tool: {name}"}, None
+    except HTTPException as exc:
+        return {"error": str(exc.detail)}, None
+    except Exception as exc:
+        logger.warning("chat tool %s failed (%s): %s", name, type(exc).__name__, exc)
+        return {"error": f"Tool failed: {type(exc).__name__}"}, None
+
+
+async def _stream_anthropic_tools(system: str, messages: list[dict], max_tokens: int,
+                                  surface: str, model: str | None = None):
+    """Streaming Anthropic chat with a bounded server-side tool loop. Text
+    deltas stream as normal SSE frames; each executed tool additionally emits
+    a `tool_event` frame for the UI."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    tool_names = _SURFACE_TOOLS.get(surface) or ["run_reaction"]
+    tools = [_CHAT_TOOL_DEFS[n] for n in tool_names if n in _CHAT_TOOL_DEFS]
+    convo: list[dict] = [dict(m) for m in messages]
+
+    for round_index in range(_CHAT_TOOL_ROUNDS):
+        # tools must be sent on EVERY request once the history contains
+        # toolUse/toolResult blocks — Bedrock-backed gateways (Parley) reject
+        # the request otherwise. Termination comes from the round cap below,
+        # not from withdrawing the tools.
+        async with client.messages.stream(
+            model=model or DEFAULT_ANTHROPIC_MODEL,
+            max_tokens=max_tokens,
+            system=system,
+            messages=convo,
+            tools=tools,
+        ) as stream:
+            async for text in stream.text_stream:
+                yield f"data: {json.dumps({'delta': text})}\n\n"
+            final = await stream.get_final_message()
+
+        tool_uses = [b for b in final.content if getattr(b, "type", None) == "tool_use"]
+        # Round cap reached: stop executing tools; the text streamed so far
+        # stands as the answer.
+        if not tool_uses or round_index == _CHAT_TOOL_ROUNDS - 1:
+            break
+
+        convo.append({"role": "assistant", "content": final.content})
+        results = []
+        for block in tool_uses:
+            model_view, ui_event = await _execute_chat_tool(
+                block.name, dict(block.input or {}))
+            if ui_event:
+                yield f"data: {json.dumps({'tool_event': ui_event})}\n\n"
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": json.dumps(model_view),
+            })
+        convo.append({"role": "user", "content": results})
+
+    yield "data: [DONE]\n\n"
+
+
 _decimer_fn = None
 _executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER OSR only (not thread-safe)
 _svg_pool  = ThreadPoolExecutor(max_workers=4)   # RDKit SVG rendering (thread-safe, fast)
@@ -2352,6 +2574,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     context: Optional[dict] = None
     engine: Optional[EngineConfig] = None  # generative engine selection (Choose Your Engine)
+    surface: Optional[str] = None          # "synthesis" | "reaction" | "chat" — enables app tools
 
 
 @app.post("/chat")
@@ -2394,8 +2617,25 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
             entry["images"] = images
         messages.append(entry)
 
+    # App tools (run_reaction / set_stockroom / run_pathways) run on the
+    # native Anthropic tool-use path. Image-bearing chats stay on the
+    # chat-completions route (Parley drops image blocks on /v1/messages),
+    # which doesn't carry our tools — so a chat turn gets tools OR images,
+    # never both.
+    has_images = any(m.get("images") for m in messages)
+    mode = (req.engine.mode if req.engine else "hosted") or "hosted"
+    if (req.surface and not has_images and mode == "hosted"
+            and os.environ.get("ANTHROPIC_API_KEY")):
+        _record_usage("hosted", "anthropic")
+        stream = _with_error_frames(_stream_anthropic_tools(
+            system_prompt + _CHAT_TOOLS_SYSTEM, messages, 800,
+            req.surface, model=req.engine.model if req.engine else None,
+        ))
+    else:
+        stream = _sse_stream(system_prompt, messages, 800, req.engine)
+
     return StreamingResponse(
-        _sse_stream(system_prompt, messages, 800, req.engine),
+        stream,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -2756,15 +2996,16 @@ class ReactRequest(BaseModel):
     reagent_smiles: str
 
 
-@app.post("/react")
-async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
-    """Return all predicted products for a given substrate + reagent SMILES pair."""
+async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
+    """Deterministic-engine reaction run shared by /react and the chat
+    run_reaction tool: canonicalize, infer conditions, run templates.
+    Raises HTTPException(422) on invalid SMILES; no LLM involvement."""
     from rdkit import Chem
 
-    sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
+    sub_mol = Chem.MolFromSmiles(substrate_smiles.strip())
     if sub_mol is None:
         raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
-    rea_mol = Chem.MolFromSmiles(req.reagent_smiles.strip())
+    rea_mol = Chem.MolFromSmiles(reagent_smiles.strip())
     if rea_mol is None:
         raise HTTPException(status_code=422, detail="Invalid reagent SMILES")
 
@@ -2785,23 +3026,35 @@ async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
     loop = asyncio.get_event_loop()
     branches = await loop.run_in_executor(_chem_pool, _run)
 
-    environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
+    return {
+        "substrate_smiles": substrate,
+        "reagent_smiles":   reagent,
+        "environment":      "Kinetic" if "kinetic_base" in conditions else "Thermodynamic",
+        "conditions":       conditions,
+        "products": [
+            {
+                "smiles":            b["final_product"],
+                "reaction_name":     b["reaction_name"],
+                "template_id":       b["template_id"],
+                "steps_taken":       b["steps_taken"],
+                "execution_history": b["execution_history"],
+            }
+            for b in branches
+        ],
+    }
 
-    products = [
-        {
-            "smiles":            b["final_product"],
-            "reaction_name":     b["reaction_name"],
-            "template_id":       b["template_id"],
-            "steps_taken":       b["steps_taken"],
-            "execution_history": b["execution_history"],
-        }
-        for b in branches
-    ]
+
+@app.post("/react")
+async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
+    """Return all predicted products for a given substrate + reagent SMILES pair."""
+    core = await _react_core(req.substrate_smiles, req.reagent_smiles)
+    substrate, reagent = core["substrate_smiles"], core["reagent_smiles"]
+    products = core["products"]
 
     ai_guess = None
     sanity_check = None
     if not products:
-        _record_template_gap("react", substrate, reagent, conditions)
+        _record_template_gap("react", substrate, reagent, core["conditions"])
         ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
     else:
         sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id)
@@ -2809,7 +3062,7 @@ async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
     return {
         "substrate_smiles": substrate,
         "reagent_smiles":   reagent,
-        "environment":      environment,
+        "environment":      core["environment"],
         "products":         products,
         "ai_guess":         ai_guess,
         "sanity_check":     sanity_check,

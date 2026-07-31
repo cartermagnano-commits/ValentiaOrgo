@@ -1,10 +1,11 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { FileText, Paperclip, X } from 'lucide-react'
-import type { ChatAttachment, ChatContent, ChatMessage } from '../types'
+import { Camera, FileText, FlaskConical, Network, Paperclip, X } from 'lucide-react'
+import type { ChatAttachment, ChatContent, ChatMessage, ChatToolResult } from '../types'
 import { STRENGTH } from '../../lib/engine'
-import { streamChat } from '../api'
+import { reactFromImage, streamChat } from '../api'
+import StructureView from '../components/StructureView'
 import { useToast } from './Toast'
 
 const MAX_TEXT_FILE_CHARS = 8_000        // per attached text file, keeps the
@@ -97,15 +98,97 @@ function toApiMessages(history: ChatMessage[]) {
   return live.slice().reverse().map(message => toApiMessage(message, budget)).reverse()
 }
 
+// Cards for tools the assistant ran mid-reply: engine reaction results,
+// stockroom updates, pathway analyses.
+function ToolResultCards({ results }: { results: ChatToolResult[] }) {
+  return (
+    <>
+      {results.map((result, index) => {
+        if (result.type === 'reaction_result') {
+          const data = result.data as {
+            substrate_smiles?: string; reagent_smiles?: string; environment?: string
+            products?: Array<{ smiles: string; reaction_name: string; steps_taken?: number }>
+          }
+          const products = data.products ?? []
+          return (
+            <div key={index} className="chat-tool-card">
+              <div className="chat-tool-card-head">
+                <FlaskConical size={13} />
+                Engine reaction: <code>{data.substrate_smiles}</code> + <code>{data.reagent_smiles}</code>
+                {data.environment && <span className="chat-tool-tag">{data.environment}</span>}
+              </div>
+              {products.length ? (
+                <div className="chat-tool-products">
+                  {products.slice(0, 3).map((product, i) => (
+                    <div key={i} className="chat-tool-product">
+                      <StructureView smiles={product.smiles} width={170} height={104} />
+                      <div className="chat-tool-product-name">{product.reaction_name}</div>
+                      <code className="chat-tool-product-smiles">{product.smiles}</code>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="chat-tool-miss">
+                  No verified template matched this pair — any product below is an unverified AI guess.
+                </div>
+              )}
+            </div>
+          )
+        }
+        if (result.type === 'set_stockroom') {
+          const data = result.data as { smiles?: string[]; mode?: string }
+          return (
+            <div key={index} className="chat-tool-card">
+              <div className="chat-tool-card-head">
+                <Network size={13} />
+                Stockroom {data.mode === 'add' ? 'extended' : 'updated'}
+              </div>
+              <div className="chat-tool-products">
+                {(data.smiles ?? []).map((smi, i) => (
+                  <div key={i} className="chat-tool-product">
+                    <StructureView smiles={smi} width={130} height={84} />
+                    <code className="chat-tool-product-smiles">{smi}</code>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )
+        }
+        if (result.type === 'pathways_result') {
+          const data = result.data as { pathways?: { branches?: unknown[]; routes?: unknown[] } }
+          const branchCount = data.pathways?.branches?.length ?? 0
+          const routeCount = data.pathways?.routes?.length ?? 0
+          return (
+            <div key={index} className="chat-tool-card">
+              <div className="chat-tool-card-head">
+                <Network size={13} />
+                Pathway analysis complete — {routeCount
+                  ? `${routeCount} route${routeCount !== 1 ? 's' : ''} to target`
+                  : `${branchCount} pathway${branchCount !== 1 ? 's' : ''}`} · shown in the Synthesis panel
+              </div>
+            </div>
+          )
+        }
+        return null
+      })}
+    </>
+  )
+}
+
 // Claude-style chat: a full-height conversation with drag-and-drop / paste /
 // picker file attachments, streaming replies from /chat, autosaved by the
-// workspace after each exchange.
+// workspace after each exchange. With a `surface`, the assistant can also
+// drive the app: run engine reactions, set the stockroom, run pathways —
+// results stream back as cards and as onUiEvent callbacks.
 export default function ChatPanel({
   content,
   onChange,
   onSave,
   saving,
   context = null,
+  surface = null,
+  onUiEvent,
+  enableReactionPhoto = false,
   placeholder,
   emptyTitle = 'How can I help?',
   emptyBlurb = 'Ask anything about organic chemistry, or drop in an image or file to discuss. Conversations save automatically.',
@@ -117,6 +200,13 @@ export default function ChatPanel({
   // Engine-computed reaction context (substrate/reagent/product) forwarded to
   // /chat so answers stay grounded in what's on screen.
   context?: Record<string, unknown> | null
+  // Where this chat is embedded — unlocks the matching app tools server-side.
+  surface?: 'synthesis' | 'reaction' | 'chat' | null
+  // Called for tool events that change the app outside the chat
+  // (set_stockroom, pathways_result).
+  onUiEvent?: (event: ChatToolResult) => void
+  // Adds a camera button that OSR-reads a photo of a whole reaction.
+  enableReactionPhoto?: boolean
   placeholder?: string
   emptyTitle?: string
   emptyBlurb?: string
@@ -126,10 +216,15 @@ export default function ChatPanel({
   const [input, setInput] = useState('')
   const [pending, setPending] = useState<ChatAttachment[]>([])
   const [streaming, setStreaming] = useState(false)
+  const [photoReading, setPhotoReading] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
   const [model, setModel] = useState(STRENGTH.anthropic[0].model)
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const photoInputRef = useRef<HTMLInputElement>(null)
+  // Most recent engine reaction seen in this conversation (tool call or photo
+  // read) — sent as grounding context on follow-up questions.
+  const lastReactionRef = useRef<Record<string, unknown> | null>(null)
   const { notify } = useToast()
 
   useEffect(() => {
@@ -171,6 +266,79 @@ export default function ChatPanel({
     }
   }
 
+  // Grounding context extracted from an engine reaction result.
+  function reactionContextFrom(result: Record<string, unknown>): Record<string, unknown> {
+    const products = result?.products as Array<Record<string, unknown>> | undefined
+    const top = products?.[0]
+    return {
+      substrate_smiles: result?.substrate_smiles,
+      reagent_smiles: result?.reagent_smiles,
+      ...(top ? {
+        product_smiles: top.smiles,
+        reaction_name: top.reaction_name,
+        execution_history: top.execution_history,
+      } : {}),
+    }
+  }
+
+  // Stream one assistant reply for `history`, collecting tool events into the
+  // reply's cards and forwarding app-level events (stockroom, pathways) up.
+  async function streamReply(
+    history: ChatMessage[],
+    seedToolResults: ChatToolResult[] = [],
+    contextOverride?: Record<string, unknown> | null,
+  ) {
+    const assistantId = `msg_${Date.now()}_reply`
+    const toolResults: ChatToolResult[] = [...seedToolResults]
+    const withReply = (replyText: string): ChatContent => ({
+      ...data,
+      messages: [
+        ...history,
+        {
+          id: assistantId,
+          role: 'assistant',
+          content: replyText,
+          createdAt: new Date().toISOString(),
+          ...(toolResults.length ? { toolResults: [...toolResults] } : {}),
+        },
+      ],
+    })
+
+    setStreaming(true)
+    let acc = ''
+    try {
+      await streamChat(
+        toApiMessages(history),
+        contextOverride !== undefined ? contextOverride : (context ?? lastReactionRef.current),
+        (delta: string) => {
+          acc += delta
+          onChange(withReply(acc))
+        },
+        model,
+        surface,
+        (event: ChatToolResult) => {
+          toolResults.push(event)
+          if (event.type === 'reaction_result') {
+            lastReactionRef.current = reactionContextFrom(event.data)
+          }
+          if (onUiEvent && (event.type === 'set_stockroom' || event.type === 'pathways_result')) {
+            onUiEvent(event)
+          }
+          onChange(withReply(acc))
+        },
+      )
+      if (!acc && !toolResults.length) {
+        throw new Error('The AI engine returned no response. Try again in a moment.')
+      }
+      await onSave(withReply(acc))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Chat request failed.'
+      onChange(withReply(acc ? `${acc}\n\nError: ${message}` : `Error: ${message}`))
+    } finally {
+      setStreaming(false)
+    }
+  }
+
   async function handleSend() {
     const text = input.trim()
     if ((!text && !pending.length) || streaming || saving) return
@@ -186,34 +354,50 @@ export default function ChatPanel({
       ...(attachments.length ? { attachments } : {}),
     }
     const history = [...messages, userMessage]
-    const assistantId = `msg_${Date.now()}_reply`
-    const withReply = (replyText: string): ChatContent => ({
-      ...data,
-      messages: [
-        ...history,
-        { id: assistantId, role: 'assistant', content: replyText, createdAt: new Date().toISOString() },
-      ],
-    })
-
     onChange({ ...data, messages: history })
-    setStreaming(true)
-    let acc = ''
+    await streamReply(history)
+  }
+
+  // Camera flow: OSR-read a photo of a whole reaction, drop the engine result
+  // into the thread as a card, then have the assistant explain it.
+  async function handleReactionPhoto(file: File | null | undefined) {
+    if (!file || streaming || saving) return
+    let imageAttachment: ChatAttachment | null = null
     try {
-      await streamChat(
-        toApiMessages(history),
-        context,
-        (delta: string) => {
-          acc += delta
-          onChange(withReply(acc))
-        },
-        model,
-      )
-      if (!acc) throw new Error('The AI engine returned no response. Try again in a moment.')
-      await onSave(withReply(acc))
+      imageAttachment = await readImageAttachment(file)
+    } catch { /* thumbnail is display-only — proceed without it */ }
+
+    const userMessage: ChatMessage = {
+      id: `msg_${Date.now()}`,
+      role: 'user',
+      content: 'What happens in this reaction?',
+      createdAt: new Date().toISOString(),
+      ...(imageAttachment ? { attachments: [imageAttachment] } : {}),
+    }
+    const history = [...messages, userMessage]
+    onChange({ ...data, messages: history })
+    setPhotoReading(true)
+    setStreaming(true)
+    try {
+      const result = await reactFromImage(file)
+      if (result.error) throw new Error(result.error)
+      const reactionContext = reactionContextFrom(result)
+      lastReactionRef.current = reactionContext
+      setPhotoReading(false)
+      await streamReply(history, [{ type: 'reaction_result', data: result }], reactionContext)
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Chat request failed.'
-      onChange(withReply(`Error: ${message}`))
+      const message = err instanceof Error ? err.message : 'Could not read the reaction image.'
+      onChange({
+        ...data,
+        messages: [...history, {
+          id: `msg_${Date.now()}_reply`,
+          role: 'assistant',
+          content: `Error: ${message}`,
+          createdAt: new Date().toISOString(),
+        }],
+      })
     } finally {
+      setPhotoReading(false)
       setStreaming(false)
     }
   }
@@ -261,13 +445,14 @@ export default function ChatPanel({
                 <FileText size={12} /> {att.name}
               </span>
             ))}
+            {message.toolResults?.length ? <ToolResultCards results={message.toolResults} /> : null}
             {message.content}
           </div>
         ))}
         {streaming && messages[messages.length - 1]?.role === 'user' && (
           <div className="chat-bubble assistant">
             <div className="loading-row" style={{ margin: 0 }}>
-              <div className="spinner" /> Thinking…
+              <div className="spinner" /> {photoReading ? 'Reading the reaction… this can take ~30 seconds' : 'Thinking…'}
             </div>
           </div>
         )}
@@ -307,6 +492,17 @@ export default function ChatPanel({
           >
             <Paperclip size={16} />
           </button>
+          {enableReactionPhoto && (
+            <button
+              type="button"
+              className="chat-attach-button"
+              title="Photograph a reaction — structures are recognized and run through the engine"
+              aria-label="Upload reaction photo"
+              onClick={() => photoInputRef.current?.click()}
+            >
+              <Camera size={16} />
+            </button>
+          )}
           <textarea
             className="chat-input"
             rows={2}
@@ -352,6 +548,19 @@ export default function ChatPanel({
             event.target.value = ''
           }}
         />
+        {enableReactionPhoto && (
+          <input
+            ref={photoInputRef}
+            type="file"
+            hidden
+            accept="image/*"
+            capture="environment"
+            onChange={event => {
+              void handleReactionPhoto(event.target.files?.[0])
+              event.target.value = ''
+            }}
+          />
+        )}
       </div>
     </div>
   )
