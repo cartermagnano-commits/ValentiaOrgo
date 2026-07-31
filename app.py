@@ -21,6 +21,7 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -310,6 +311,21 @@ def _record_usage(mode: str, provider: str | None) -> None:
     _ENGINE_USAGE[key] = _ENGINE_USAGE.get(key, 0) + 1
 
 
+# "No template matched" tracking, so new SMARTS templates get prioritized by
+# real usage instead of guesswork. The log line is the durable signal
+# (greppable TEMPLATE_GAP prefix); the counter is a dev convenience view with
+# the same resets-on-restart tradeoff as _ENGINE_USAGE.
+_TEMPLATE_GAPS: dict[str, int] = {}   # "substrate|reagent" (canonical) → miss count
+
+
+def _record_template_gap(endpoint: str, substrate: str, reagent: str,
+                         conditions: list[str]) -> None:
+    logger.info("TEMPLATE_GAP endpoint=%s substrate=%s reagent=%s conditions=%s",
+                endpoint, substrate, reagent, ",".join(conditions))
+    key = f"{substrate}|{reagent}"
+    _TEMPLATE_GAPS[key] = _TEMPLATE_GAPS.get(key, 0) + 1
+
+
 class EngineConfig(BaseModel):
     """Per-request generative-AI engine selection. Never persisted server-side."""
     mode: str = "hosted"            # "local" | "byok" | "hosted"
@@ -369,6 +385,49 @@ async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int,
         async for text in stream.text_stream:
             yield f"data: {json.dumps({'delta': text})}\n\n"
     yield "data: [DONE]\n\n"
+
+
+async def _anthropic_complete(system: str, user: str, max_tokens: int,
+                              model: str | None = None) -> str:
+    """One-shot, non-streaming hosted Anthropic completion. Used only for the
+    short structured JSON answers (blind product guess, sanity check) — these
+    don't need SSE since the frontend consumes them as a single JSON field,
+    not incremental prose. Hosted-only: always the server key."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    resp = await client.messages.create(
+        model=model or DEFAULT_ANTHROPIC_MODEL,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    return resp.content[0].text if resp.content else ""
+
+
+def _parse_json_object(text: str) -> dict | None:
+    """Best-effort parse of a single JSON object out of an LLM response.
+    Strips code fences, then falls back to the first {...} span. Returns
+    None (never raises) on anything unparseable — callers must treat that
+    as 'feature unavailable', not an error."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\n?|```$", "", stripped).strip()
+    try:
+        obj = json.loads(stripped)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", stripped, re.S)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
 
 
 async def _stream_openai(system: str, messages: list[dict], max_tokens: int,
@@ -803,6 +862,151 @@ def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -
     _hosted_usage[key] = _hosted_usage.get(key, 0) + 1
 
 
+# ── Direct Reaction: AI-guess fallback + advisory sanity check ────────────────
+# Both are single-shot, fail-open extras layered on the deterministic engine:
+# the blind guess runs ONLY when zero templates matched (clearly labeled
+# unverified in the UI), the sanity check ONLY when a template did match
+# (purely advisory — it can flag, never override). Any failure — quota,
+# network, unparseable output, invalid SMILES — degrades to None, never into
+# the response. No retries by design: a retry-until-agreement loop would let
+# a stochastic LLM veto a deterministic computation.
+
+
+def _validate_and_canonicalize_smiles(smiles: str) -> str | None:
+    """RDKit validity + canonicalization for LLM-produced SMILES. Returns
+    None for anything that doesn't parse — a hallucinated non-SMILES answer
+    must degrade to 'no guess available', never reach the frontend."""
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles((smiles or "").strip())
+    return Chem.MolToSmiles(mol) if mol is not None else None
+
+
+def _blind_guess_prompts(substrate_smiles: str, reagent_smiles: str) -> tuple[str, str]:
+    system = (
+        "You are an organic chemistry prediction assistant for Orgo AI. "
+        "Orgo AI's deterministic template engine found NO matching reaction "
+        "template for the substrate/reagent pair below — this reflects a gap "
+        "in curated template coverage, not proof the reaction is impossible.\n\n"
+        "Give your own single best-guess prediction of the major organic "
+        "product, the way a careful organic chemistry student would attempt "
+        "it by hand.\n\n"
+        "HARD RULES:\n"
+        "- You are shown NO verified ground truth here. This is a genuine, "
+        "unverified guess and must be labeled as such.\n"
+        "- Respond with ONLY a single JSON object — no markdown fences, no "
+        "prose outside the JSON.\n"
+        "- JSON shape exactly: "
+        '{"product_smiles": "<valid SMILES of the major product, or "" if '
+        'you cannot determine one>", "reaction_name": "<short mechanism name '
+        'or null>", "confidence": "low" | "medium", "reasoning": "<1-2 '
+        'sentence rationale, under 240 characters>"}\n'
+        '- Never use confidence "high" — this path only runs when there is '
+        "no verified answer.\n"
+        '- If you are not reasonably confident of any product, set '
+        'product_smiles to "" and explain why in reasoning.'
+    )
+    user = (
+        "Predict the major organic product for this reaction.\n\n"
+        f"Substrate (SMILES): {substrate_smiles}\n"
+        f"Reagent(s) (SMILES): {reagent_smiles}\n\n"
+        "Respond with the JSON object only."
+    )
+    return system, user
+
+
+def _sanity_check_prompts(substrate_smiles: str, reagent_smiles: str,
+                          products: list[dict]) -> tuple[str, str]:
+    system = (
+        "You are a chemistry sanity-check reviewer for Orgo AI. A "
+        "deterministic, verified SMARTS-template engine has already computed "
+        "the product(s) below — this connectivity is confirmed correct by "
+        "the template match and MUST NOT be second-guessed, relabeled, or "
+        "revised.\n\n"
+        "Your ONLY job is to skim for something that would look genuinely "
+        "surprising or worth a caveat to an organic chemistry instructor "
+        "(e.g. an unusual reagent/substrate pairing for the matched reaction "
+        "class, a stereochemistry/regiochemistry caveat worth noting, a "
+        "safety or side-reaction note). This is a purely advisory pass.\n\n"
+        "HARD RULES:\n"
+        "- Do not propose an alternative product. Do not contradict the "
+        "given product.\n"
+        "- Respond with ONLY a single JSON object — no markdown fences, no "
+        "prose outside the JSON.\n"
+        "- JSON shape exactly: "
+        '{"flagged": true | false, "note": "<one short sentence, under 160 '
+        'characters, only when flagged is true, else empty string>"}\n'
+        "- Default to flagged: false. Only set true for a specific, genuine "
+        "concern — not generic commentary or praise."
+    )
+    product_lines = "\n".join(
+        f"  - {p['smiles']}  (reaction: {p['reaction_name']})" for p in products[:3]
+    )
+    user = (
+        f"Substrate: {substrate_smiles}\n"
+        f"Reagent(s): {reagent_smiles}\n"
+        f"Engine product(s):\n{product_lines}\n\n"
+        "Is anything here worth flagging to a student? Respond with the "
+        "JSON object only."
+    )
+    return system, user
+
+
+async def _maybe_blind_guess(substrate: str, reagent: str, user_id: str | None) -> dict | None:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        _enforce_hosted_quota(None, user_id)
+    except HTTPException:
+        logger.info("ai_guess skipped: hosted quota reached (user=%s)", user_id or "anon")
+        return None
+    try:
+        system, user = _blind_guess_prompts(substrate, reagent)
+        raw = await _anthropic_complete(system, user, max_tokens=300)
+        data = _parse_json_object(raw)
+        if not data or not data.get("product_smiles"):
+            return None
+        loop = asyncio.get_event_loop()
+        canon = await loop.run_in_executor(
+            _chem_pool, _validate_and_canonicalize_smiles, data["product_smiles"])
+        if canon is None:
+            logger.info("ai_guess discarded: RDKit rejected %r", data.get("product_smiles"))
+            return None
+        confidence = data.get("confidence") if data.get("confidence") in ("low", "medium") else "low"
+        return {
+            "smiles": canon,
+            "reaction_name": data.get("reaction_name") or None,
+            "confidence": confidence,
+            "reasoning": (data.get("reasoning") or "")[:280],
+            "unverified": True,
+        }
+    except Exception as exc:
+        logger.warning("ai_guess failed (%s): %s", type(exc).__name__, exc)
+        return None
+
+
+async def _maybe_sanity_check(substrate: str, reagent: str, products: list[dict],
+                              user_id: str | None) -> dict | None:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        _enforce_hosted_quota(None, user_id)
+    except HTTPException:
+        return None
+    try:
+        system, user = _sanity_check_prompts(substrate, reagent, products)
+        raw = await _anthropic_complete(system, user, max_tokens=150)
+        data = _parse_json_object(raw)
+        if not data:
+            return None
+        return {
+            "flagged": bool(data.get("flagged")),
+            "note": (data.get("note") or "")[:200] if data.get("flagged") else "",
+        }
+    except Exception as exc:
+        logger.warning("sanity_check failed (%s): %s", type(exc).__name__, exc)
+        return None
+
+
 _decimer_fn = None
 _executor  = ThreadPoolExecutor(max_workers=1)   # DECIMER OSR only (not thread-safe)
 _svg_pool  = ThreadPoolExecutor(max_workers=4)   # RDKit SVG rendering (thread-safe, fast)
@@ -1030,6 +1234,15 @@ async def health():
 async def engine_usage():
     """In-memory generative-call counts per engine mode/provider (since restart)."""
     return {"usage": dict(_ENGINE_USAGE), "total": sum(_ENGINE_USAGE.values())}
+
+
+@app.get("/engine/template-gaps")
+async def template_gaps():
+    """In-memory 'no template matched' counts per (substrate, reagent) pair
+    since restart — use to prioritize which SMARTS templates to add next."""
+    top = sorted(_TEMPLATE_GAPS.items(), key=lambda kv: kv[1], reverse=True)[:100]
+    return {"gaps": [{"pair": k, "count": v} for k, v in top],
+            "total_misses": sum(_TEMPLATE_GAPS.values())}
 
 
 def _is_valid_smiles(smiles: str) -> bool:
@@ -2530,7 +2743,11 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         "substrate_smiles":  substrate_smiles,
         "reagent_smiles":    reagent_smiles,
         "products":          products,
-        "error":             None if products else "No matching reaction templates for this substrate/reagent pair.",
+        # Empty products is NOT an error here: the endpoint layers an AI-guess
+        # fallback on that case, and an error string would make the frontend
+        # bail before rendering it. Genuine OSR failures return earlier with
+        # their own error strings.
+        "error":             None,
     }
 
 
@@ -2539,8 +2756,8 @@ class ReactRequest(BaseModel):
     reagent_smiles: str
 
 
-@app.post("/react", dependencies=[Depends(require_auth)])
-async def react(req: ReactRequest):
+@app.post("/react")
+async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
     """Return all predicted products for a given substrate + reagent SMILES pair."""
     from rdkit import Chem
 
@@ -2581,16 +2798,27 @@ async def react(req: ReactRequest):
         for b in branches
     ]
 
+    ai_guess = None
+    sanity_check = None
+    if not products:
+        _record_template_gap("react", substrate, reagent, conditions)
+        ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
+    else:
+        sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id)
+
     return {
         "substrate_smiles": substrate,
         "reagent_smiles":   reagent,
         "environment":      environment,
         "products":         products,
+        "ai_guess":         ai_guess,
+        "sanity_check":     sanity_check,
     }
 
 
-@app.post("/react-from-image", dependencies=[Depends(require_auth)])
-async def react_from_image(file: UploadFile = File(...)):
+@app.post("/react-from-image")
+async def react_from_image(file: UploadFile = File(...),
+                           user_id: str | None = Depends(require_auth)):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -2602,6 +2830,19 @@ async def react_from_image(file: UploadFile = File(...)):
     except Exception as exc:
         logger.exception("react-from-image pipeline failed")
         raise HTTPException(status_code=500, detail="Reaction image processing failed.") from exc
+
+    result["ai_guess"] = None
+    result["sanity_check"] = None
+    if result.get("substrate_smiles") and result.get("reagent_smiles") and not result.get("error"):
+        if not result.get("products"):
+            _record_template_gap("react_from_image",
+                                 result["substrate_smiles"], result["reagent_smiles"], [])
+            result["ai_guess"] = await _maybe_blind_guess(
+                result["substrate_smiles"], result["reagent_smiles"], user_id)
+        else:
+            result["sanity_check"] = await _maybe_sanity_check(
+                result["substrate_smiles"], result["reagent_smiles"],
+                result["products"], user_id)
     return result
 
 

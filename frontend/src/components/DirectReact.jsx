@@ -4,7 +4,7 @@ import StructureView from './StructureView'
 import { reactDirect, reactFromImage } from '../api'
 import { imageFileFromClipboard } from '../../lib/clipboard'
 import { downloadMolfile, downloadSvg, copyText, buildReactionReport } from '../../lib/exports'
-import { ArrowDown, Camera, Check, ChevronRight, Copy, Download, FileText, FlaskConical, Image, Plus, UploadCloud } from 'lucide-react'
+import { AlertTriangle, ArrowDown, Camera, Check, ChevronRight, Copy, Download, FileText, FlaskConical, Image, Plus, UploadCloud } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -105,6 +105,76 @@ function ProductCard({ product, index }) {
   )
 }
 
+// Rendered when zero templates matched and the backend's single-shot AI
+// fallback produced a guess. Deliberately distinct from ProductCard: dashed
+// warning styling, "unverified" language, no .mol/SVG export (copy only) —
+// nothing here should imply engine-verified data.
+function AIGuessCard({ guess }) {
+  return (
+    <div style={{
+      background: 'var(--card)', border: '1px dashed var(--warning)',
+      borderRadius: 10, padding: '14px 16px',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <span style={{
+          background: 'rgba(154,106,24,0.15)', color: 'var(--warning)',
+          border: '1px solid rgba(154,106,24,0.3)', borderRadius: 20,
+          fontSize: 10, fontWeight: 700, padding: '2px 10px',
+        }}>
+          AI guess — unverified
+        </span>
+        {guess.reaction_name && (
+          <span style={{ fontSize: 12, color: 'var(--muted)', flex: 1 }}>{guess.reaction_name}</span>
+        )}
+        <span style={{ fontSize: 10, color: 'var(--muted)' }}>
+          confidence: {guess.confidence}
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <code style={{
+          flex: 1, fontSize: 13, fontWeight: 700,
+          background: 'rgba(154,106,24,0.08)', color: 'var(--warning)',
+          padding: '8px 12px', borderRadius: 6, wordBreak: 'break-all',
+          border: '1px dashed rgba(154,106,24,0.35)', display: 'block', lineHeight: 1.5,
+        }}>{guess.smiles}</code>
+        <CopyButton text={guess.smiles} />
+      </div>
+
+      <div style={{
+        background: '#fff', border: '1px solid #d1d5db', borderRadius: 8, padding: 8,
+        display: 'flex', justifyContent: 'center',
+      }}>
+        <StructureView smiles={guess.smiles} width={280} height={160} />
+      </div>
+
+      {guess.reasoning && (
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 10, fontStyle: 'italic', lineHeight: 1.5 }}>
+          {guess.reasoning}
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: 'var(--warning)', marginTop: 8 }}>
+        No deterministic template matched this pair — this is a single, unverified AI prediction, not a checked result.
+      </div>
+    </div>
+  )
+}
+
+// Advisory-only note from the AI sanity check on an engine-verified result.
+// Renders above the product list, never replaces or reorders it.
+function SanityBanner({ note }) {
+  return (
+    <div style={{
+      background: 'rgba(154,106,24,0.1)', border: '1px solid rgba(154,106,24,0.3)',
+      borderRadius: 8, padding: '10px 14px', fontSize: 12, color: 'var(--warning)',
+      marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8,
+    }}>
+      <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+      <span>AI sanity check: {note}</span>
+    </div>
+  )
+}
+
 /** @param {{ initialSubstrate?: any, initialReagent?: any, initialResult?: any, onSave?: any }} [props] */
 export default function DirectReact({ initialSubstrate, initialReagent, initialResult, onSave } = {}) {
   const [mode,      setMode]      = useState('molecules')   // 'molecules' | 'photo'
@@ -141,7 +211,7 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
         predictedProducts: data.products?.map(p => p.smiles) ?? [],
         result: data,
       })
-      if (!data.products?.length) {
+      if (!data.products?.length && !data.ai_guess) {
         setError('The reaction was recognized, but no reaction templates matched it. Check the structures below and re-run.')
       }
     } catch (e) {
@@ -173,7 +243,7 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
         predictedProducts: data.products?.map(p => p.smiles) ?? [],
         result: data,
       })
-      if (!data.products?.length) {
+      if (!data.products?.length && !data.ai_guess) {
         setError('No reaction templates matched this substrate/reagent combination.')
       }
     } catch (e) {
@@ -332,6 +402,11 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
         </div>
       )}
 
+      {/* AI-guess fallback — only when zero templates matched */}
+      {result && !loading && !result.products?.length && result.ai_guess && (
+        <AIGuessCard guess={result.ai_guess} />
+      )}
+
       {/* Results */}
       {result && !loading && result.products?.length > 0 && (
         <div>
@@ -368,6 +443,8 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
             </button>
             <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
           </div>
+
+          {result.sanity_check?.flagged && <SanityBanner note={result.sanity_check.note} />}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {result.products.map((p, i) => (
