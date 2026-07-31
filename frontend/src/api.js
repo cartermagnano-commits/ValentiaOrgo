@@ -1,24 +1,11 @@
 import { getEnginePayload } from '../lib/engine'
-import { supabase } from '../lib/supabaseClient'
 
 const BASE = ''  // same-origin; Next.js rewrites (next.config.mjs) proxy to the FastAPI backend
-
-// Attach the Supabase access token so the backend can enforce auth when
-// SUPABASE_JWT_SECRET is configured. Harmless (ignored) when auth is disabled.
-async function authHeaders() {
-  try {
-    const { data } = await supabase.auth.getSession()
-    const token = data?.session?.access_token
-    return token ? { Authorization: `Bearer ${token}` } : {}
-  } catch {
-    return {}
-  }
-}
 
 async function post(path, body) {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -33,7 +20,6 @@ export async function analyzeImage(file) {
   form.append('file', file)
   const res = await fetch(BASE + '/analyze', {
     method: 'POST',
-    headers: await authHeaders(),
     body: form,
   })
   if (!res.ok) {
@@ -47,9 +33,7 @@ export async function analyzeImage(file) {
 // returned confidence "verifying". Blocks server-side until the vision read
 // finishes; the token is single-use.
 export async function verifyAnalysis(token) {
-  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`, {
-    headers: await authHeaders(),
-  })
+  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Verification failed')
@@ -66,7 +50,6 @@ export async function reactFromImage(file) {
   form.append('file', file)
   const res = await fetch(BASE + '/react-from-image', {
     method: 'POST',
-    headers: await authHeaders(),
     body: form,
   })
   if (!res.ok) {
@@ -91,7 +74,7 @@ export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth 
 async function streamSSE(path, body, onDelta) {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -175,8 +158,4 @@ export async function streamStereo(branch, substrateSMILES, onDelta) {
 
 export async function streamChat(messages, context, onDelta, model = null) {
   return streamSSE('/chat', { messages, context, engine: getEnginePayload(model) }, onDelta)
-}
-
-export async function streamAssist(fileType, content, onDelta) {
-  return streamSSE('/assist', { file_type: fileType, content, engine: getEnginePayload() }, onDelta)
 }
