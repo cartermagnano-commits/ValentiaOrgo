@@ -105,11 +105,21 @@ export default function ChatPanel({
   onChange,
   onSave,
   saving,
+  context = null,
+  placeholder,
+  emptyTitle = 'How can I help?',
+  emptyBlurb = 'Ask anything about organic chemistry, or drop in an image or file to discuss. Conversations save automatically.',
 }: {
   content: ChatContent
   onChange: (content: ChatContent) => void
   onSave: (content?: ChatContent) => Promise<void>
   saving: boolean
+  // Engine-computed reaction context (substrate/reagent/product) forwarded to
+  // /chat so answers stay grounded in what's on screen.
+  context?: Record<string, unknown> | null
+  placeholder?: string
+  emptyTitle?: string
+  emptyBlurb?: string
 }) {
   const data = content
   const messages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : []
@@ -191,7 +201,7 @@ export default function ChatPanel({
     try {
       await streamChat(
         toApiMessages(history),
-        null,
+        context,
         (delta: string) => {
           acc += delta
           onChange(withReply(acc))
@@ -226,8 +236,8 @@ export default function ChatPanel({
       <div className="chat-messages chat-messages-full">
         {!messages.length && (
           <div className="chat-empty-state">
-            <h2>How can I help?</h2>
-            <p>Ask anything about organic chemistry, or drop in an image or file to discuss. Conversations save automatically.</p>
+            <h2>{emptyTitle}</h2>
+            <p>{emptyBlurb}</p>
           </div>
         )}
         {messages.map(message => (
@@ -301,7 +311,7 @@ export default function ChatPanel({
             className="chat-input"
             rows={2}
             value={input}
-            placeholder="Ask a question, or attach an image or file…"
+            placeholder={placeholder ?? 'Ask a question, or attach an image or file…'}
             onChange={event => setInput(event.target.value)}
             onPaste={handlePaste}
             onKeyDown={event => {

@@ -1,16 +1,23 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Beaker, FlaskConical, MessageSquare, Network, Trash2 } from 'lucide-react'
+import {
+  Beaker, Bot, FlaskConical, FolderKanban, FolderOpen,
+  MessageSquare, Network, Plus, Trash2, X,
+} from 'lucide-react'
 import PathwayExplorer from '../components/PathwayExplorer'
 import DirectReact from '../components/DirectReact'
 import ChatPanel from './ChatPanel'
-import type { ChatContent, SessionContent, Tool } from '../types'
+import type { ChatContent, ChatMessage, SessionContent, Tool } from '../types'
 import {
+  Project,
   Session,
+  createProject,
   createSession,
+  deleteProject,
   deleteSession,
   hasRealContent,
+  loadProjects,
   loadSessions,
   saveSession,
 } from '../../lib/sessions'
@@ -38,22 +45,46 @@ function dayLabel(iso: string): string {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+// Grounding context for the Assistant drawer, derived from what the reaction
+// tool has computed so far. (Synthesis pushes richer live context itself.)
+function reactionContext(content: Record<string, unknown>): Record<string, unknown> | null {
+  const substrate = Array.isArray(content.reactants) ? String(content.reactants[0] ?? '').trim() : ''
+  const reagent = String(content.reagents ?? '').trim()
+  const result = content.result as { products?: Array<Record<string, unknown>> } | undefined
+  const top = result?.products?.[0]
+  if (!substrate && !reagent && !top) return null
+  return {
+    ...(substrate ? { substrate_smiles: substrate } : {}),
+    ...(reagent ? { reagent_name: reagent } : {}),
+    ...(top ? {
+      product_smiles: top.smiles,
+      reaction_name: top.reaction_name,
+      execution_history: top.execution_history,
+    } : {}),
+  }
+}
+
 export default function Workspace() {
   const [sessions, setSessions] = useState<Session[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [view, setView] = useState<'tool' | 'projects'>('tool')
   const [active, setActive] = useState<Session | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [newProjectName, setNewProjectName] = useState('')
+  // Live selection context pushed up by PathwayExplorer for the drawer.
+  const [synthesisContext, setSynthesisContext] = useState<Record<string, unknown> | null>(null)
 
   // localStorage isn't available during SSR — load once on mount, then start
   // a fresh chat session so the app opens ready to use.
   useEffect(() => {
-    const stored = loadSessions()
-    setSessions(stored)
+    setSessions(loadSessions())
+    setProjects(loadProjects())
     setActive(createSession('chat'))
     setHydrated(true)
   }, [])
 
-  // Autosave: any content change on a session with real work persists it and
-  // refreshes its sidebar row. Empty sessions are never written.
   const activeRef = useRef(active)
   activeRef.current = active
 
@@ -98,10 +129,16 @@ export default function Workspace() {
   }
 
   function startTool(tool: Tool) {
-    setActive(createSession(tool))
+    setView('tool')
+    setDrawerOpen(false)
+    setSynthesisContext(null)
+    setActive(createSession(tool, activeProjectId))
   }
 
   function openSession(session: Session) {
+    setView('tool')
+    setDrawerOpen(false)
+    setSynthesisContext(null)
     setActive(session)
   }
 
@@ -109,24 +146,60 @@ export default function Workspace() {
     if (!window.confirm(`Delete "${session.title || 'this session'}"?`)) return
     deleteSession(session.id)
     setSessions(prev => prev.filter(s => s.id !== session.id))
-    if (active?.id === session.id) setActive(createSession(session.tool))
+    if (active?.id === session.id) setActive(createSession(session.tool, activeProjectId))
   }
+
+  function handleCreateProject() {
+    const name = newProjectName.trim()
+    if (!name) return
+    const project = createProject(name)
+    setProjects(prev => [project, ...prev])
+    setNewProjectName('')
+    setActiveProjectId(project.id)
+    setView('tool')
+    setActive(createSession('chat', project.id))
+  }
+
+  function handleDeleteProject(project: Project) {
+    if (!window.confirm(`Delete project "${project.name}"? Its sessions are kept in History.`)) return
+    deleteProject(project.id)
+    setProjects(prev => prev.filter(p => p.id !== project.id))
+    setSessions(loadSessions())
+    if (activeProjectId === project.id) setActiveProjectId(null)
+  }
+
+  function openProject(project: Project) {
+    setActiveProjectId(project.id)
+    setView('tool')
+    const recent = sessions.find(s => s.projectId === project.id)
+    if (recent) openSession(recent)
+    else setActive(createSession('chat', project.id))
+  }
+
+  const visibleSessions = useMemo(
+    () => (activeProjectId ? sessions.filter(s => s.projectId === activeProjectId) : sessions),
+    [sessions, activeProjectId],
+  )
 
   const grouped = useMemo(() => {
     const groups: Array<{ label: string; items: Session[] }> = []
-    for (const session of sessions) {
+    for (const session of visibleSessions) {
       const label = dayLabel(session.updatedAt)
       const group = groups.find(g => g.label === label)
       if (group) group.items.push(session)
       else groups.push({ label, items: [session] })
     }
     return groups
-  }, [sessions])
+  }, [visibleSessions])
 
   if (!hydrated || !active) return null
 
-  const activeMeta = toolMeta(active.tool)
   const content = active.content as Record<string, unknown>
+  const activeProject = projects.find(p => p.id === activeProjectId) ?? null
+  const showDrawerButton = view === 'tool' && (active.tool === 'synthesis' || active.tool === 'direct_reaction')
+  const drawerContext = active.tool === 'synthesis' ? synthesisContext : reactionContext(content)
+  const assistantMessages: ChatMessage[] = Array.isArray(content.assistantMessages)
+    ? (content.assistantMessages as ChatMessage[]) : []
 
   return (
     <div className="workspace-app">
@@ -139,7 +212,7 @@ export default function Workspace() {
           {TOOLS.map(({ tool, label, icon: Icon, blurb }) => (
             <button
               key={tool}
-              className={`workspace-tab${active.tool === tool ? ' active' : ''}`}
+              className={`workspace-tab${view === 'tool' && active.tool === tool ? ' active' : ''}`}
               title={blurb}
               onClick={() => startTool(tool)}
             >
@@ -147,15 +220,41 @@ export default function Workspace() {
               {label}
             </button>
           ))}
+          <span className="workspace-tab-divider" aria-hidden="true" />
+          <button
+            className={`workspace-tab${view === 'projects' ? ' active' : ''}`}
+            title="Group your work into projects"
+            onClick={() => setView('projects')}
+          >
+            <FolderKanban size={15} />
+            Projects
+          </button>
         </nav>
       </header>
 
       <div className="workspace-columns">
         <aside className="history-sidebar">
-          <div className="history-heading">History</div>
-          {!sessions.length && (
+          {activeProject ? (
+            <div className="project-pill">
+              <FolderOpen size={13} />
+              <span className="history-title">{activeProject.name}</span>
+              <button
+                className="chat-chip-remove"
+                title="Show all work"
+                aria-label="Leave project view"
+                onClick={() => setActiveProjectId(null)}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ) : (
+            <div className="history-heading">History</div>
+          )}
+          {!visibleSessions.length && (
             <div className="history-empty">
-              Your work saves here automatically — no accounts, no files to manage.
+              {activeProject
+                ? 'Nothing in this project yet — start a tool above and your work lands here.'
+                : 'Your work saves here automatically — no accounts, no files to manage.'}
             </div>
           )}
           {grouped.map(group => (
@@ -167,7 +266,7 @@ export default function Workspace() {
                 return (
                   <div
                     key={session.id}
-                    className={`history-item${active.id === session.id ? ' active' : ''}`}
+                    className={`history-item${view === 'tool' && active.id === session.id ? ' active' : ''}`}
                     role="button"
                     tabIndex={0}
                     onClick={() => openSession(session)}
@@ -192,37 +291,127 @@ export default function Workspace() {
           ))}
         </aside>
 
-        <main className={`workspace-main${active.tool === 'chat' ? ' chat-main' : ''}`}>
-          {active.tool === 'synthesis' && (
-            <PathwayExplorer
-              key={active.id}
-              initialSubstrate={Array.isArray(content.startingMaterials)
-                ? (content.startingMaterials as string[]).filter(Boolean)
-                : []}
-              initialTarget={(content.targetMolecule as string) ?? ''}
-              initialPathways={content.pathwaysData ?? null}
-              onSave={(data: Record<string, unknown>) => mergeAndSave(data)}
-            />
-          )}
-          {active.tool === 'direct_reaction' && (
-            <DirectReact
-              key={active.id}
-              initialSubstrate={(content.reactants as string[])?.[0] ?? ''}
-              initialReagent={(content.reagents as string) ?? ''}
-              initialResult={content.result ?? null}
-              onSave={(data: Record<string, unknown>) => mergeAndSave(data)}
-            />
-          )}
-          {active.tool === 'chat' && (
-            <ChatPanel
-              key={active.id}
-              content={active.content as ChatContent}
-              onChange={next => updateContent(next)}
-              onSave={async next => { if (next) updateContent(next) }}
-              saving={false}
-            />
-          )}
-        </main>
+        {view === 'projects' ? (
+          <main className="workspace-main projects-main">
+            <div className="projects-view">
+              <h2>Projects</h2>
+              <p className="projects-blurb">
+                Group related work — a problem set, a lab, an exam topic. Opening a project
+                filters your history to it, and new work is filed there automatically.
+              </p>
+              <div className="project-create-row">
+                <input
+                  type="text"
+                  value={newProjectName}
+                  placeholder="New project name…"
+                  onChange={event => setNewProjectName(event.target.value)}
+                  onKeyDown={event => { if (event.key === 'Enter') handleCreateProject() }}
+                />
+                <button className="btn-primary action-button" onClick={handleCreateProject} disabled={!newProjectName.trim()}>
+                  <Plus size={15} />
+                  Create
+                </button>
+              </div>
+              {!projects.length && (
+                <div className="history-empty" style={{ padding: '14px 2px' }}>
+                  No projects yet. Everything still saves to History — projects are just folders on top.
+                </div>
+              )}
+              <div className="project-grid">
+                {projects.map(project => {
+                  const count = sessions.filter(s => s.projectId === project.id).length
+                  return (
+                    <div key={project.id} className="project-card" role="button" tabIndex={0}
+                      onClick={() => openProject(project)}
+                      onKeyDown={event => { if (event.key === 'Enter') openProject(project) }}
+                    >
+                      <div className="project-card-head">
+                        <FolderOpen size={17} />
+                        <button
+                          className="history-delete project-delete"
+                          aria-label={`Delete project ${project.name}`}
+                          onClick={event => { event.stopPropagation(); handleDeleteProject(project) }}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                      <strong>{project.name}</strong>
+                      <small>{count} session{count !== 1 ? 's' : ''}</small>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </main>
+        ) : (
+          <main className={`workspace-main${active.tool === 'chat' ? ' chat-main' : ''}`}>
+            {active.tool === 'synthesis' && (
+              <PathwayExplorer
+                key={active.id}
+                initialSubstrate={Array.isArray(content.startingMaterials)
+                  ? (content.startingMaterials as string[]).filter(Boolean)
+                  : []}
+                initialTarget={(content.targetMolecule as string) ?? ''}
+                initialPathways={content.pathwaysData ?? null}
+                onSave={(data: Record<string, unknown>) => mergeAndSave(data)}
+                onContextChange={(ctx: Record<string, unknown> | null) => setSynthesisContext(ctx)}
+              />
+            )}
+            {active.tool === 'direct_reaction' && (
+              <DirectReact
+                key={active.id}
+                initialSubstrate={(content.reactants as string[])?.[0] ?? ''}
+                initialReagent={(content.reagents as string) ?? ''}
+                initialResult={content.result ?? null}
+                onSave={(data: Record<string, unknown>) => mergeAndSave(data)}
+              />
+            )}
+            {active.tool === 'chat' && (
+              <ChatPanel
+                key={active.id}
+                content={active.content as ChatContent}
+                onChange={next => updateContent(next)}
+                onSave={async next => { if (next) updateContent(next) }}
+                saving={false}
+              />
+            )}
+
+            {showDrawerButton && !drawerOpen && (
+              <button className="assistant-fab" onClick={() => setDrawerOpen(true)} title="Ask the assistant about this work">
+                <Bot size={17} />
+                Assistant
+              </button>
+            )}
+
+            {showDrawerButton && drawerOpen && (
+              <div className="assistant-drawer">
+                <div className="assistant-drawer-header">
+                  <Bot size={15} />
+                  <strong>Assistant</strong>
+                  <span className="assistant-drawer-hint">
+                    {drawerContext ? 'Grounded in the reaction on screen' : 'Ask anything — attach an image for context'}
+                  </span>
+                  <button className="chat-chip-remove" aria-label="Close assistant" onClick={() => setDrawerOpen(false)}>
+                    <X size={15} />
+                  </button>
+                </div>
+                <ChatPanel
+                  key={`${active.id}_assistant`}
+                  content={{ messages: assistantMessages }}
+                  onChange={next => updateContent({ ...(activeRef.current?.content as Record<string, unknown>), assistantMessages: next.messages } as SessionContent)}
+                  onSave={async next => {
+                    if (next) updateContent({ ...(activeRef.current?.content as Record<string, unknown>), assistantMessages: next.messages } as SessionContent)
+                  }}
+                  saving={false}
+                  context={drawerContext}
+                  placeholder="Explain this reaction, or ask for context…"
+                  emptyTitle="Ask about this work"
+                  emptyBlurb="Explain the reaction, ask why a reagent works, or upload an image of a problem for context. Answers stay grounded in what's on screen."
+                />
+              </div>
+            )}
+          </main>
+        )}
       </div>
     </div>
   )

@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import MoleculeInput from './MoleculeInput'
 import StructureView from './StructureView'
-import { reactDirect } from '../api'
+import { reactDirect, reactFromImage } from '../api'
+import { imageFileFromClipboard } from '../../lib/clipboard'
 import { downloadMolfile, downloadSvg, copyText, buildReactionReport } from '../../lib/exports'
-import { ArrowDown, Check, ChevronRight, Copy, Download, FileText, FlaskConical, Image, Plus } from 'lucide-react'
+import { ArrowDown, Camera, Check, ChevronRight, Copy, Download, FileText, FlaskConical, Image, Plus, UploadCloud } from 'lucide-react'
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
@@ -106,13 +107,57 @@ function ProductCard({ product, index }) {
 
 /** @param {{ initialSubstrate?: any, initialReagent?: any, initialResult?: any, onSave?: any }} [props] */
 export default function DirectReact({ initialSubstrate, initialReagent, initialResult, onSave } = {}) {
+  const [mode,      setMode]      = useState('molecules')   // 'molecules' | 'photo'
   const [substrate, setSubstrate] = useState(initialSubstrate ?? '')
   const [reagent,   setReagent]   = useState(initialReagent ?? '')
   const [result,    setResult]    = useState(initialResult ?? null)
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState(null)
+  const photoInputRef = useRef(null)
 
   const canRun = substrate.trim() && reagent.trim() && !loading
+
+  // Photo mode: one image of the whole reaction (substrate + reagent) →
+  // /react-from-image recognizes and splits it, then runs the same engine.
+  async function handlePhoto(file) {
+    if (!file || loading) return
+    setLoading(true)
+    setError(null)
+    setResult(null)
+    try {
+      const data = await reactFromImage(file)
+      if (data.error) {
+        setError(data.error)
+        return
+      }
+      // Show what was recognized in the molecule cards so it can be corrected.
+      setSubstrate(data.substrate_smiles ?? '')
+      setReagent(data.reagent_smiles ?? '')
+      setResult(data)
+      setMode('molecules')
+      onSave?.({
+        reactants: [data.substrate_smiles ?? ''],
+        reagents: data.reagent_smiles ?? '',
+        predictedProducts: data.products?.map(p => p.smiles) ?? [],
+        result: data,
+      })
+      if (!data.products?.length) {
+        setError('The reaction was recognized, but no reaction templates matched it. Check the structures below and re-run.')
+      }
+    } catch (e) {
+      setError(e.message || 'Could not read the reaction image')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function onPhotoPaste(e) {
+    const file = imageFileFromClipboard(e)
+    if (file) {
+      e.preventDefault()
+      handlePhoto(file)
+    }
+  }
 
   async function handleRun() {
     if (!canRun) return
@@ -155,67 +200,127 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
           Direct Reaction
         </div>
         <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.6 }}>
-          Enter or upload each molecule separately, then click Run Reaction to predict products.
+          {mode === 'photo'
+            ? 'Upload one photo of the whole reaction — starting material and reagent are recognized automatically.'
+            : 'Enter or upload each molecule separately, then click Run Reaction to predict products.'}
         </div>
       </div>
 
-      {/* Molecule inputs */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 12, alignItems: 'start' }}>
-        <MoleculeInput
-          label="Substrate"
-          value={substrate}
-          onChange={setSubstrate}
-        />
-
-        {/* Arrow */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          paddingTop: 60, color: 'var(--muted)', fontSize: 22, userSelect: 'none',
-        }}>
-          <Plus size={20} strokeWidth={1.8} />
-        </div>
-
-        <MoleculeInput
-          label="Reagent"
-          value={reagent}
-          onChange={setReagent}
-        />
+      {/* Input mode toggle */}
+      <div className="input-mode-toggle">
+        <button
+          className={`input-mode-tab${mode === 'molecules' ? ' active' : ''}`}
+          onClick={() => setMode('molecules')}
+        >
+          <FlaskConical size={13} /> Enter molecules
+        </button>
+        <button
+          className={`input-mode-tab${mode === 'photo' ? ' active' : ''}`}
+          onClick={() => setMode('photo')}
+        >
+          <Camera size={13} /> Upload reaction photo
+        </button>
       </div>
+
+      {mode === 'photo' ? (
+        <div
+          className="card mol-input-card"
+          onPaste={onPhotoPaste}
+          style={{ padding: 0 }}
+        >
+          <div
+            className="mol-structure-area empty"
+            style={{ height: 180, margin: 10 }}
+            tabIndex={0}
+            onClick={() => !loading && photoInputRef.current?.click()}
+            title="Click to upload, or paste an image (Ctrl+V / Cmd+V)"
+          >
+            {loading ? (
+              <>
+                <div className="spinner" />
+                <span style={{ fontSize: 11, marginTop: 6, color: 'var(--muted)' }}>
+                  Reading the reaction… this can take ~30 seconds
+                </span>
+              </>
+            ) : (
+              <>
+                <UploadCloud className="upload-icon" size={34} strokeWidth={1.6} />
+                <span>Upload or paste a photo of the reaction</span>
+                <span style={{ fontSize: 10, color: 'var(--subtle)' }}>
+                  Starting material on the left, reagent over the arrow — like a textbook problem
+                </span>
+              </>
+            )}
+          </div>
+          <input
+            ref={photoInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: 'none' }}
+            onChange={e => { handlePhoto(e.target.files[0]); e.target.value = '' }}
+          />
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 12, alignItems: 'start' }}>
+          <MoleculeInput
+            label="Substrate"
+            value={substrate}
+            onChange={setSubstrate}
+          />
+
+          {/* Arrow */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            paddingTop: 60, color: 'var(--muted)', fontSize: 22, userSelect: 'none',
+          }}>
+            <Plus size={20} strokeWidth={1.8} />
+          </div>
+
+          <MoleculeInput
+            label="Reagent"
+            value={reagent}
+            onChange={setReagent}
+          />
+        </div>
+      )}
 
       {/* Run button */}
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-        <button
-          onClick={handleRun}
-          disabled={!canRun}
-          style={{
-            background: canRun ? 'var(--accent)' : 'var(--card)',
-            color: canRun ? '#fff' : 'var(--muted)',
-            border: `1px solid ${canRun ? 'var(--accent)' : 'var(--border)'}`,
-            borderRadius: 8, fontSize: 14, fontWeight: 700,
-            padding: '10px 28px', cursor: canRun ? 'pointer' : 'default',
-            transition: 'all 0.15s',
-            display: 'flex', alignItems: 'center', gap: 8,
-          }}
-        >
-          {loading ? (
-            <><span className="spinner" style={{ borderTopColor: '#fff' }} /> Running…</>
-          ) : (
-            <><FlaskConical size={16} /> Run Reaction</>
-          )}
-        </button>
-
-        {(substrate || reagent || result) && (
+      {mode === 'molecules' && (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button
-            onClick={handleClear}
+            onClick={handleRun}
+            disabled={!canRun}
             style={{
-              background: 'none', border: '1px solid var(--border)', borderRadius: 8,
-              color: 'var(--muted)', fontSize: 12, padding: '10px 16px', cursor: 'pointer',
+              background: canRun ? 'var(--accent)' : 'var(--card)',
+              color: canRun ? '#fff' : 'var(--muted)',
+              border: `1px solid ${canRun ? 'var(--accent)' : 'var(--border)'}`,
+              borderRadius: 8, fontSize: 14, fontWeight: 700,
+              padding: '10px 28px', cursor: canRun ? 'pointer' : 'default',
+              transition: 'all 0.15s',
+              display: 'flex', alignItems: 'center', gap: 8,
             }}
           >
-            Clear
+            {loading ? (
+              <><span className="spinner" style={{ borderTopColor: '#fff' }} /> Running…</>
+            ) : (
+              <><FlaskConical size={16} /> Run Reaction</>
+            )}
           </button>
-        )}
-      </div>
+
+          {(substrate || reagent || result) && (
+            <button
+              onClick={handleClear}
+              style={{
+                background: 'none', border: '1px solid var(--border)', borderRadius: 8,
+                color: 'var(--muted)', fontSize: 12, padding: '10px 16px', cursor: 'pointer',
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Error */}
       {error && (
@@ -243,10 +348,12 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
             }}>
               {result.products.length} predicted product{result.products.length !== 1 ? 's' : ''}
             </span>
-            <span style={{ fontSize: 10, color: 'var(--muted)', background: 'var(--card)',
-              border: '1px solid var(--border)', borderRadius: 20, padding: '1px 8px' }}>
-              {result.environment}
-            </span>
+            {result.environment && (
+              <span style={{ fontSize: 10, color: 'var(--muted)', background: 'var(--card)',
+                border: '1px solid var(--border)', borderRadius: 20, padding: '1px 8px' }}>
+                {result.environment}
+              </span>
+            )}
             <button
               className="export-chip"
               onClick={() => copyText(buildReactionReport({

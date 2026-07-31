@@ -2,12 +2,9 @@ import { useState, useEffect } from 'react'
 import MoleculeInput from './MoleculeInput'
 import PathwayGraph from './PathwayGraph'
 import InfoPanel from './InfoPanel'
-import Chatbot from './Chatbot'
 import { fetchPathways } from '../api'
 import {
-  Bot,
   CheckCircle2,
-  Info,
   Plus,
   Route,
   X,
@@ -85,8 +82,8 @@ function LoadingOverlay({ stage }) {
 
 const MAX_STARTS = 4
 
-/** @param {{ initialSubstrate?: any, initialTarget?: any, initialPathways?: any, onSave?: any }} [props] */
-export default function PathwayExplorer({ initialSubstrate, initialTarget, initialPathways, onSave } = {}) {
+/** @param {{ initialSubstrate?: any, initialTarget?: any, initialPathways?: any, onSave?: any, onContextChange?: any }} [props] */
+export default function PathwayExplorer({ initialSubstrate, initialTarget, initialPathways, onSave, onContextChange } = {}) {
   const [startSmilesList,  setStartSmilesList]  = useState(() => initialSubstrate?.length ? initialSubstrate : [''])
   const [targetSmiles,     setTargetSmiles]     = useState(initialTarget ?? '')
   const [desiredDepth,     setDesiredDepth]     = useState(5)
@@ -99,7 +96,6 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   const [loading,   setLoading]   = useState(false)
   const [loadStage, setLoadStage] = useState('pathways')
   const [error,     setError]     = useState(null)
-  const [activeTab, setActiveTab] = useState('info')
 
   // Helpers to find selected items
   const selectedRoute  = pathwaysData?.routes?.find(r => r.id === selectedRouteId) ?? null
@@ -109,8 +105,29 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
     ? (pathwaysData?.branches?.find(b => b.id === selectedNodeData.branchId) ?? selectedBranch)
     : selectedBranch
 
-  // Primary substrate for InfoPanel/chatbot context
+  // Primary substrate for InfoPanel/assistant context
   const primaryStart = startSmilesList.find(s => s.trim()) ?? ''
+
+  // Surface the current selection to the workspace's Assistant drawer so its
+  // answers stay grounded in the branch the user is looking at.
+  useEffect(() => {
+    if (!onContextChange) return
+    if (!primaryStart && !selectedBranch) {
+      onContextChange(null)
+      return
+    }
+    onContextChange({
+      ...(primaryStart ? { substrate_smiles: primaryStart } : {}),
+      ...(selectedBranch ? {
+        reagent_name: selectedBranch.reagent?.name,
+        reagent_smiles: selectedBranch.reagent?.smiles,
+        reaction_name: selectedBranch.reaction_classification?.name,
+        product_smiles: selectedBranch.product_smiles,
+        execution_history: selectedBranch.execution_history,
+      } : {}),
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [primaryStart, selectedBranchId, pathwaysData])
 
   // Restore a default selection when reopening a saved pathway result.
   useEffect(() => {
@@ -211,7 +228,7 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                  Starting Material{startSmilesList.length > 1 ? 's' : ''}
+                  Stockroom
                 </span>
                 {startSmilesList.length < MAX_STARTS && (
                   <button
@@ -228,7 +245,7 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
                 <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
                   <div style={{ flex: 1 }}>
                     <MoleculeInput
-                      label={startSmilesList.length > 1 ? `Material ${idx + 1}` : 'SMILES / image'}
+                      label={startSmilesList.length > 1 ? `Material ${idx + 1}` : 'Enter SMILES or upload an image'}
                       value={smi}
                       onChange={val => updateStart(idx, val)}
                     />
@@ -466,32 +483,16 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
           </div>
         </div>
 
-        {/* ── Right: info + chatbot ─────────────────────────────────── */}
+        {/* ── Right: reaction info (chat lives in the Assistant drawer) ── */}
         <div className="panel">
-          <div className="panel-header" style={{ display: 'flex', gap: 0, padding: 0 }}>
-            {['info', 'chat'].map(tab => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`inspector-tab${activeTab === tab ? ' active' : ''}`}
-              >
-                {tab === 'info' ? <Info size={14} /> : <Bot size={14} />}
-                {tab === 'info' ? 'Reaction Info' : 'Assistant'}
-              </button>
-            ))}
-          </div>
-
-          {activeTab === 'info' ? (
-            <InfoPanel
-              branch={nodeBranch}
-              route={selectedRoute}
-              substrateSMILES={primaryStart}
-              selectedNode={selectedNodeId}
-              selectedNodeData={selectedNodeData}
-            />
-          ) : (
-            <Chatbot branch={selectedBranch} substrateSMILES={primaryStart} />
-          )}
+          <div className="panel-header">Reaction Info</div>
+          <InfoPanel
+            branch={nodeBranch}
+            route={selectedRoute}
+            substrateSMILES={primaryStart}
+            selectedNode={selectedNodeId}
+            selectedNodeData={selectedNodeData}
+          />
         </div>
 
       </div>

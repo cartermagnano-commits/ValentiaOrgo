@@ -20,12 +20,14 @@ export type SynthesisContent = {
   targetMolecule?: string
   startingMaterials: string[]
   pathwaysData?: unknown
+  assistantMessages?: ChatMessage[]   // the tool's side-drawer chat
 }
 
 export type DirectReactionContent = {
   reactants: string[]
   reagents?: string
   result?: unknown
+  assistantMessages?: ChatMessage[]   // the tool's side-drawer chat
 }
 
 export type SessionContent = SynthesisContent | DirectReactionContent | ChatContent

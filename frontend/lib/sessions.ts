@@ -11,9 +11,17 @@ export type Session = {
   createdAt: string
   updatedAt: string
   content: SessionContent
+  projectId?: string | null
+}
+
+export type Project = {
+  id: string
+  name: string
+  createdAt: string
 }
 
 const STORE_KEY = 'orgo.sessions.v1'
+const PROJECTS_KEY = 'orgo.projects.v1'
 
 export function makeInitialContent(tool: Tool): SessionContent {
   if (tool === 'synthesis') return { targetMolecule: '', startingMaterials: [], pathwaysData: null }
@@ -26,6 +34,8 @@ export function makeInitialContent(tool: Tool): SessionContent {
 export function hasRealContent(session: Session): boolean {
   const c = session.content as Record<string, unknown>
   if (session.tool === 'chat') return Array.isArray(c.messages) && c.messages.length > 0
+  // Drawer-assistant conversations count as work even before molecules go in.
+  if (Array.isArray(c.assistantMessages) && c.assistantMessages.length > 0) return true
   if (session.tool === 'synthesis') {
     return Boolean(c.pathwaysData)
       || Boolean((c.targetMolecule as string || '').trim())
@@ -104,16 +114,61 @@ export function deleteSession(id: string): void {
   persist(loadSessions().filter(s => s.id !== id))
 }
 
-export function createSession(tool: Tool): Session {
+function makeId(prefix: string): string {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+export function createSession(tool: Tool, projectId?: string | null): Session {
   const now = new Date().toISOString()
   return {
-    id: typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: makeId('s'),
     tool,
     title: '',
     createdAt: now,
     updatedAt: now,
     content: makeInitialContent(tool),
+    ...(projectId ? { projectId } : {}),
   }
+}
+
+// ── Projects: lightweight local grouping for sessions ────────────────────────
+
+export function loadProjects(): Project[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(PROJECTS_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function persistProjects(projects: Project[]): void {
+  try {
+    window.localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects))
+  } catch { /* projects are tiny; a failed write just loses the grouping */ }
+}
+
+export function createProject(name: string): Project {
+  const project: Project = { id: makeId('p'), name: name.trim(), createdAt: new Date().toISOString() }
+  persistProjects([project, ...loadProjects()])
+  return project
+}
+
+// Deleting a project keeps its sessions — they just return to the ungrouped
+// history rather than losing work.
+export function deleteProject(id: string): void {
+  persistProjects(loadProjects().filter(p => p.id !== id))
+  const sessions = loadSessions()
+  let changed = false
+  for (const session of sessions) {
+    if (session.projectId === id) {
+      delete session.projectId
+      changed = true
+    }
+  }
+  if (changed) persist(sessions)
 }
