@@ -389,6 +389,60 @@ async def _stream_openai(system: str, messages: list[dict], max_tokens: int,
     yield "data: [DONE]\n\n"
 
 
+async def _stream_chat_completions(base_url: str, api_key: str | None, model: str,
+                                   system: str, messages: list[dict], max_tokens: int):
+    """Async generator: streams SSE deltas from an OpenAI-compatible
+    /v1/chat/completions endpoint, with multimodal (image) message support.
+
+    Used whenever a chat request carries image attachments: gateways like MIT
+    Parley silently DROP base64 image blocks on their native /v1/messages
+    passthrough, but deliver them on the chat-completions route — which
+    api.anthropic.com, api.openai.com, and Ollama all serve too (see
+    _anthropic_vision_call).
+    """
+    import httpx
+
+    def to_openai(m: dict):
+        images = m.get("images") or []
+        if not images:
+            return {"role": m["role"], "content": m["content"]}
+        blocks = [
+            {"type": "image_url",
+             "image_url": {"url": f"data:{img['media_type']};base64,{img['data']}"}}
+            for img in images
+        ]
+        if m.get("content"):
+            blocks.append({"type": "text", "text": m["content"]})
+        return {"role": m["role"], "content": blocks}
+
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "messages": [{"role": "system", "content": system}] + [to_openai(m) for m in messages],
+    }
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "POST", f"{base_url.rstrip('/')}/v1/chat/completions",
+            json=payload, headers=headers, timeout=120.0,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    chunk = line[6:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(chunk)
+                        delta = data["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            yield f"data: {json.dumps({'delta': delta})}\n\n"
+                    except Exception:
+                        pass
+    yield "data: [DONE]\n\n"
+
+
 def _friendly_stream_error(exc: Exception) -> str:
     """Map a provider/transport exception to a message a user can act on.
 
@@ -442,8 +496,60 @@ def _sse_stream(system: str, messages: list[dict], max_tokens: int,
         _select_stream(system, messages, max_tokens, engine))
 
 
+def _anthropic_base_for_key(api_key: str | None) -> str:
+    """Base URL for an Anthropic-family key. BYOK keys route by prefix (a real
+    Anthropic key must not inherit a Parley ANTHROPIC_BASE_URL and vice versa);
+    the server key uses the configured gateway."""
+    if api_key:
+        return ("https://parley.api.mit.edu" if api_key.startswith("sk-parley-")
+                else "https://api.anthropic.com")
+    return os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+
+
+def _select_multimodal_stream(system: str, messages: list[dict], max_tokens: int,
+                              engine: Optional[EngineConfig]):
+    """Engine routing for chat requests that carry image attachments. All
+    providers (Anthropic/Parley, OpenAI, Ollama) speak the OpenAI-compatible
+    chat-completions route, which — unlike Parley's /v1/messages — actually
+    delivers image blocks."""
+    mode = (engine.mode or "hosted").lower() if engine else "hosted"
+    provider = ((engine.provider if engine else None) or "anthropic").lower()
+    model = engine.model if engine else None
+
+    if mode == "local":
+        return _stream_chat_completions(OLLAMA_BASE_URL, None, model or OLLAMA_MODEL,
+                                        system, messages, max_tokens)
+    if mode == "byok":
+        if not engine or not engine.api_key:
+            raise HTTPException(400, "BYOK mode requires an API key.")
+        if provider == "openai":
+            return _stream_chat_completions("https://api.openai.com", engine.api_key,
+                                            model or DEFAULT_OPENAI_MODEL,
+                                            system, messages, max_tokens)
+        return _stream_chat_completions(_anthropic_base_for_key(engine.api_key),
+                                        engine.api_key, model or DEFAULT_ANTHROPIC_MODEL,
+                                        system, messages, max_tokens)
+    # hosted
+    if provider == "openai" and os.environ.get("OPENAI_API_KEY"):
+        return _stream_chat_completions("https://api.openai.com",
+                                        os.environ["OPENAI_API_KEY"],
+                                        model or DEFAULT_OPENAI_MODEL,
+                                        system, messages, max_tokens)
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return _stream_chat_completions(_anthropic_base_for_key(None),
+                                        os.environ["ANTHROPIC_API_KEY"],
+                                        model or DEFAULT_ANTHROPIC_MODEL,
+                                        system, messages, max_tokens)
+    return _stream_chat_completions(OLLAMA_BASE_URL, None, model or OLLAMA_MODEL,
+                                    system, messages, max_tokens)
+
+
 def _select_stream(system: str, messages: list[dict], max_tokens: int,
                    engine: Optional[EngineConfig] = None):
+    if any(m.get("images") for m in messages):
+        _record_usage((engine.mode if engine else "hosted") or "hosted",
+                      engine.provider if engine else None)
+        return _select_multimodal_stream(system, messages, max_tokens, engine)
     if engine is None:
         _record_usage("env", None)
         if os.environ.get("ANTHROPIC_API_KEY"):
@@ -645,11 +751,21 @@ async def require_auth(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 
 
+MAX_CHAT_IMAGES = 6                       # image attachments per request
+MAX_CHAT_IMAGE_B64 = 6 * 1024 * 1024      # base64 chars per image (~4.5 MB raw)
+
+
 def _guard_messages(messages) -> None:
     if len(messages) > MAX_CHAT_MESSAGES:
         raise HTTPException(status_code=413, detail="Too many messages in one request.")
     if sum(len(m.content) for m in messages) > MAX_CONTENT_CHARS:
         raise HTTPException(status_code=413, detail="Message payload too large.")
+    images = [a for m in messages for a in getattr(m, "attachments", [])
+              if a.kind == "image"]
+    if len(images) > MAX_CHAT_IMAGES:
+        raise HTTPException(status_code=413, detail="Too many image attachments in one request.")
+    if any(len(a.data) > MAX_CHAT_IMAGE_B64 for a in images):
+        raise HTTPException(status_code=413, detail="An attached image is too large.")
 
 
 # ── Hosted-mode quota ─────────────────────────────────────────────────────────
@@ -2005,9 +2121,18 @@ async def stereo(req: StereoRequest, user_id: str | None = Depends(require_auth)
     )
 
 
+class ChatAttachment(BaseModel):
+    kind: str = "image"          # only images reach the backend; text files are
+                                 # inlined into message content client-side
+    media_type: str = "image/png"
+    data: str = ""               # raw base64, no data: URI prefix
+    name: str = ""
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
+    attachments: list[ChatAttachment] = []
 
 
 class ChatRequest(BaseModel):
@@ -2047,10 +2172,17 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
         "- Keep responses concise and student-friendly."
     )
 
-    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    messages = []
+    for m in req.messages:
+        entry: dict = {"role": m.role, "content": m.content}
+        images = [{"media_type": a.media_type, "data": a.data}
+                  for a in m.attachments if a.kind == "image" and a.data]
+        if images:
+            entry["images"] = images
+        messages.append(entry)
 
     return StreamingResponse(
-        _sse_stream(system_prompt, messages, 250, req.engine),
+        _sse_stream(system_prompt, messages, 800, req.engine),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

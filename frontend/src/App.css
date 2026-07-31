@@ -3288,3 +3288,240 @@ header h1 {
 .file-list-item.tools-home svg {
   color: var(--accent2);
 }
+
+/* ── General chat: a plain chatbot surface ─────────────────────── */
+
+.file-editor-shell.chat-shell {
+  height: 100%;
+  background: var(--bg);
+}
+
+.chat-header {
+  background: transparent;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-shell .file-editor-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+}
+
+.claude-chat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 0 20px 20px;
+}
+
+/* Transcript: no card frame — messages sit on the page like a chatbot. */
+.claude-chat .chat-messages {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  gap: 22px;
+  padding: 26px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow-y: auto;
+}
+
+.claude-chat .chat-bubble {
+  max-width: 100%;
+  font-size: 14.5px;
+  line-height: 1.65;
+  padding: 0;
+  border-radius: 0;
+}
+
+/* Assistant text is unadorned; only the user's turn gets a bubble. */
+.claude-chat .chat-bubble.assistant {
+  align-self: stretch;
+  color: var(--text);
+  background: transparent;
+  border: none;
+}
+
+.claude-chat .chat-bubble.user {
+  align-self: flex-end;
+  max-width: 78%;
+  padding: 11px 15px;
+  color: #fff;
+  background: var(--primary);
+  border-radius: 16px 16px 4px 16px;
+}
+
+.chat-empty-state {
+  margin: auto;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.chat-empty-state h2 {
+  color: var(--text);
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.chat-empty-state p {
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.chat-drop-overlay {
+  position: absolute;
+  inset: 8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(246, 244, 239, 0.92);
+  border: 2px dashed var(--border-strong);
+  border-radius: 18px;
+  pointer-events: none;
+}
+
+/* Composer: one rounded box holding attach + input + model + send. */
+.chat-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-sm);
+}
+
+.chat-composer:focus-within {
+  border-color: #8eb9c5;
+  box-shadow: 0 0 0 3px rgba(37, 111, 143, 0.1);
+}
+
+.claude-chat .chat-input-row {
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 0;
+}
+
+.claude-chat .chat-input {
+  font-size: 14.5px;
+  line-height: 1.55;
+  padding: 8px 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.claude-chat .chat-input:focus {
+  outline: none;
+  border: none;
+  box-shadow: none;
+}
+
+.chat-attach-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text);
+  background: #f7f6f1;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chat-file-chip.in-bubble {
+  display: inline-flex;
+  margin: 0 6px 8px 0;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text);
+}
+
+.chat-chip-thumb {
+  width: 20px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
+.chat-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.chat-chip-remove:hover { color: var(--text); }
+
+.chat-bubble-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chat-bubble-image {
+  display: block;
+  max-width: 240px;
+  max-height: 200px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+
+.chat-attach-button {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.chat-attach-button:hover {
+  color: var(--text);
+  background: #f4f2ec;
+}
+
+.claude-chat .chat-model-select {
+  font-size: 12px;
+  padding: 7px 9px;
+  background: #f7f6f1;
+  border-radius: 9px;
+}

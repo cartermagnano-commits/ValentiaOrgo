@@ -253,18 +253,22 @@ export default function ProjectPage({ projectId, initialFileId }: { projectId: s
           <main className="file-workspace">
             {activeFile && user ? (
               <>
-                <div className="tool-strip" role="toolbar" aria-label="Start a new tool">
-                  <span className="tool-strip-label">New</span>
-                  {FILE_TYPES.map(tool => {
-                    const Icon = tool.icon
-                    return (
-                      <button key={tool.type} className="tool-chip" title={tool.description} onClick={() => startTool(tool.type)}>
-                        <Icon size={14} />
-                        {tool.label}
-                      </button>
-                    )
-                  })}
-                </div>
+                {/* General chat is a plain chatbot surface — the tool strip
+                    would put chemistry-file chrome above a conversation. */}
+                {activeFile.type !== 'chat' && (
+                  <div className="tool-strip" role="toolbar" aria-label="Start a new tool">
+                    <span className="tool-strip-label">New</span>
+                    {FILE_TYPES.map(tool => {
+                      const Icon = tool.icon
+                      return (
+                        <button key={tool.type} className="tool-chip" title={tool.description} onClick={() => startTool(tool.type)}>
+                          <Icon size={14} />
+                          {tool.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
                 <FileEditor
                   // Keyed by file id so switching files unmounts the editor.
                   // Without this, an in-flight AI stream started on file A keeps
