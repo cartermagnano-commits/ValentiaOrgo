@@ -98,5 +98,44 @@ finally:
     else:
         os.environ["ANTHROPIC_API_KEY"] = orig_anthropic
 
+# ── multi-reader recognition used by /react-from-image ───────────────────────
+import numpy as np  # noqa: E402
+
+blank = np.full((80, 120, 3), 255, dtype=np.uint8)
+
+orig_dec, orig_ms, orig_vis = app._decimer_read, app._molscribe_read, app._ollama_vision_smiles
+try:
+    # Cross-model agreement → verified without consulting vision at all.
+    # (The vision future is submitted early for latency overlap and only
+    # cancelled after local agreement — with a fake lambda it may already have
+    # run by cancel() time, so we assert non-consultation via reads["vision"]
+    # being unrecorded, not via a call-count list.)
+    app._decimer_read = lambda arr: "CCO"
+    app._molscribe_read = lambda arr: "CCO"
+    app._ollama_vision_smiles = lambda b, e=None: "CCC"
+    smiles, verified, reads = app._multi_reader_smiles(blank, blank, True, None)
+    check("multi-reader: agreement → smiles", smiles, "CCO")
+    check("multi-reader: agreement → verified", verified, True)
+    check("multi-reader: agreement → vision not consulted", reads["vision"], None)
+
+    # Cross-model conflict → vision arbitrates and its read is recorded.
+    app._decimer_read = lambda arr: "CCO"
+    app._molscribe_read = lambda arr: "CC=O"
+    app._ollama_vision_smiles = lambda b, e=None: "CC=O"
+    smiles, verified, reads = app._multi_reader_smiles(blank, blank, True, None)
+    check("multi-reader: conflict → vision arbitrates", smiles, "CC=O")
+    check("multi-reader: conflict → verified true on vision agreement", verified, True)
+    check("multi-reader: vision read recorded", reads["vision"], "CC=O")
+
+    # Every reader fails → no structure, no crash.
+    app._decimer_read = lambda arr: None
+    app._molscribe_read = lambda arr: None
+    app._ollama_vision_smiles = lambda b, e=None: None
+    smiles, verified, reads = app._multi_reader_smiles(blank, blank, True, None)
+    check("multi-reader: total failure → None", smiles, None)
+    check("multi-reader: total failure → unverified", verified, None)
+finally:
+    app._decimer_read, app._molscribe_read, app._ollama_vision_smiles = orig_dec, orig_ms, orig_vis
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

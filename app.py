@@ -1278,6 +1278,66 @@ def _molscribe_read(arr: np.ndarray) -> str | None:
         return None
 
 
+def _multi_reader_smiles(img: np.ndarray, current: np.ndarray, digital: bool,
+                         engine=None) -> tuple[str | None, bool | None, dict]:
+    """Read a structure with every available reader and arbitrate.
+
+    Same multi-candidate scheme /analyze uses — DECIMER and MolScribe each read
+    the original and the binarized rendition, and the vision model arbitrates
+    only when the local readers conflict. Unlike /analyze this blocks on the
+    vision read rather than deferring it: /react-from-image has no badge to
+    settle later, and its caller needs one settled structure to feed the
+    template engine.
+
+    Returns (smiles, verified, reads).
+    """
+    vision_future = _vision_pool.submit(_ollama_vision_smiles, _vision_png(img), engine)
+    ms_orig_future = _molscribe_pool.submit(_molscribe_read, img)
+    ms_bin_future = None if digital else _molscribe_pool.submit(_molscribe_read, current)
+
+    orig_read = bin_read = None
+    try:
+        if digital:
+            orig_read = _decimer_read(img)
+            if not orig_read:
+                bin_read = _decimer_read(current)
+        else:
+            bin_read = _decimer_read(current)
+            orig_read = _decimer_read(img)
+    except Exception as exc:
+        logger.warning("DECIMER read failed (%s): %s", type(exc).__name__, exc)
+
+    def _collect(future, label):
+        if future is None:
+            return None
+        try:
+            return future.result(timeout=60.0)
+        except Exception as exc:
+            logger.warning("%s read not collected (%s): %s", label, type(exc).__name__, exc)
+            return None
+
+    ms_orig = _collect(ms_orig_future, "MolScribe/original")
+    ms_bin = _collect(ms_bin_future, "MolScribe/binarized")
+
+    smiles, verified, pending, defer = arbitrate_local(orig_read, bin_read, ms_orig, ms_bin)
+    vision_read = None
+    if pending or defer:
+        # defer would mean "settle in the background" on /analyze; here there is
+        # no later round-trip, so collect the verdict now.
+        vision_read = _collect(vision_future, "Vision")
+        smiles, verified = resolve_with_vision(
+            orig_read, bin_read, ms_orig, ms_bin, digital, vision_read)
+    else:
+        vision_future.cancel()
+
+    reads = {
+        "decimer_original": orig_read, "decimer_binarized": bin_read,
+        "molscribe": ms_orig, "molscribe_binarized": ms_bin,
+        "vision": vision_read, "clean_digital": digital,
+    }
+    return smiles, verified, reads
+
+
 def _process(raw_bytes: bytes, engine=None) -> dict:
     img = _decode_upload(raw_bytes)
     stages: dict[str, str | None] = {"original": _stage_b64(img)}
@@ -2437,30 +2497,21 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
     img, digital, _inverted = _normalize_polarity(img)
     current = _repair_and_binarize(img, digital)
 
-    # 2. OSR via DECIMER — digital images read the original first (closest to
-    # DECIMER's training distribution), binarized only as fallback; photos the
-    # reverse, matching the /analyze pipeline.
-    recognized_smiles: str | None = None
-    try:
-        first, second = (img, current) if digital else (current, img)
-        recognized_smiles = _decimer_read(first) or _decimer_read(second)
-        logger.info("DECIMER output: %r", recognized_smiles)
-    except Exception as exc:
-        # DECIMER missing/broken is recoverable — the Ollama vision fallback
-        # below gets a chance, same as the /analyze pipeline.
-        logger.warning("DECIMER failed (%s): %s — trying vision fallback", type(exc).__name__, exc)
-        recognized_smiles = None
+    # 2. OSR — multi-reader recognition with arbitration, same as /analyze.
+    recognized_smiles, recognition_verified, reads = _multi_reader_smiles(
+        img, current, digital, engine)
+    logger.info("Recognition: %r (verified=%s)", recognized_smiles, recognition_verified)
 
-    # Encode the preprocessed image once (downscaled for VLM prefill speed);
-    # reused by all Ollama fallback calls below
+    # Encode once for the reaction-specific vision fallbacks below.
     _img_bytes = _vision_png(current)
 
     if not recognized_smiles:
-        logger.info("DECIMER returned nothing — calling Ollama reaction parse")
+        logger.info("No reader produced a structure — calling reaction-aware vision parse")
         recognized_smiles = _ollama_reaction_smiles(_img_bytes, engine)
-        logger.info("Ollama (empty DECIMER fallback) returned: %r", recognized_smiles)
+        logger.info("Vision (empty-read fallback) returned: %r", recognized_smiles)
     if not recognized_smiles:
-        return {"error": "No structure recognized in the image.", "products": []}
+        return {"error": "No structure recognized in the image.", "products": [],
+                "recognition_confidence": "unverified"}
 
     # 3. Parse all components — split on '.' but re-validate each fragment
     raw_mol = _mol_from_smiles_loose(recognized_smiles)
@@ -2476,6 +2527,8 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
                 "recognized_smiles": recognized_smiles,
                 "error": "Recognized SMILES is invalid; try a clearer image.",
                 "products": [],
+                "recognition_confidence": _confidence_label(recognition_verified),
+                "recognition_verified": recognition_verified,
             }
 
     frags = Chem.GetMolFrags(raw_mol, asMols=True)
@@ -2513,6 +2566,8 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
             "reagent_smiles": "",
             "error": "Only one molecule was recognized. Upload an image containing both substrate and reagent.",
             "products": [],
+            "recognition_confidence": _confidence_label(recognition_verified),
+            "recognition_verified": recognition_verified,
         }
 
     # 4. Assign substrate/reagent and run the engine — every fragment gets a
@@ -2554,6 +2609,8 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
         "reagent_smiles":    reagent_smiles,
         "products":          products,
         "error":             None if products else "No matching reaction templates for this substrate/reagent pair.",
+        "recognition_confidence": _confidence_label(recognition_verified),
+        "recognition_verified":   recognition_verified,
     }
 
 
