@@ -364,17 +364,21 @@ def _select_stream(system: str, messages: list[dict], max_tokens: int,
         _record_usage("env", None)
         if os.environ.get("ANTHROPIC_API_KEY"):
             return _stream_anthropic(system, messages, max_tokens)
+        if os.environ.get("OPENAI_API_KEY"):
+            return _stream_openai(system, messages, max_tokens)
         return _stream_ollama(system, messages, max_tokens)
 
     mode = (engine.mode or "hosted").lower()
+    if mode == "byok" and not engine.api_key:
+        # Validate BEFORE recording usage — a rejected request never reached a
+        # provider and shouldn't inflate the telemetry.
+        raise HTTPException(400, "BYOK mode requires an API key.")
     _record_usage(mode, engine.provider)
 
     if mode == "local":
         return _stream_ollama(system, messages, max_tokens, model=engine.model)
 
     if mode == "byok":
-        if not engine.api_key:
-            raise HTTPException(400, "BYOK mode requires an API key.")
         provider = (engine.provider or "anthropic").lower()
         if provider == "openai":
             return _stream_openai(system, messages, max_tokens,
@@ -382,14 +386,27 @@ def _select_stream(system: str, messages: list[dict], max_tokens: int,
         return _stream_anthropic(system, messages, max_tokens,
                                  model=engine.model, api_key=engine.api_key)
 
-    # hosted — server-side key; billing/enforcement deferred (no users yet)
+    # hosted — server-side key; billing/enforcement deferred (no users yet).
+    # Honor the requested provider when its key is configured; otherwise fall
+    # back to the OTHER configured hosted provider (symmetrically — this is
+    # what _enforce_hosted_quota assumes when it meters on "either key set"),
+    # and only then degrade to local so the app still works. engine.model is a
+    # model id for the REQUESTED provider — it must not follow the request
+    # across a fallback (Anthropic ids 404 on OpenAI, and both 404 on Ollama).
     provider = (engine.provider or "anthropic").lower()
-    if provider == "openai" and os.environ.get("OPENAI_API_KEY"):
-        return _stream_openai(system, messages, max_tokens, model=engine.model)
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return _stream_anthropic(system, messages, max_tokens, model=engine.model)
-    # No hosted key configured → degrade to local so the app still works.
-    return _stream_ollama(system, messages, max_tokens, model=engine.model)
+    have_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    have_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if provider == "openai":
+        if have_openai:
+            return _stream_openai(system, messages, max_tokens, model=engine.model)
+        if have_anthropic:
+            return _stream_anthropic(system, messages, max_tokens)
+    else:
+        if have_anthropic:
+            return _stream_anthropic(system, messages, max_tokens, model=engine.model)
+        if have_openai:
+            return _stream_openai(system, messages, max_tokens)
+    return _stream_ollama(system, messages, max_tokens)
 
 app = FastAPI(title="Orgo AI")
 
@@ -832,16 +849,6 @@ async def engine_usage():
     return {"usage": dict(_ENGINE_USAGE), "total": sum(_ENGINE_USAGE.values())}
 
 
-def _is_valid_smiles(smiles: str) -> bool:
-    if not smiles:
-        return False
-    try:
-        from rdkit import Chem
-        return Chem.MolFromSmiles(smiles) is not None
-    except Exception:
-        return False
-
-
 def _to_b64(img: np.ndarray) -> str | None:
     if img is None:
         return None
@@ -875,6 +882,63 @@ def _resize(img: np.ndarray) -> np.ndarray:
     return img
 
 
+def _decode_upload(raw_bytes: bytes) -> np.ndarray:
+    """Decode an uploaded image into a working-size BGR array (EXIF-rotated).
+    Raises ValueError when the bytes aren't a readable image."""
+    try:
+        pil = Image.open(io.BytesIO(raw_bytes))
+        try:
+            from PIL import ImageOps
+            pil = ImageOps.exif_transpose(pil)
+        except Exception:
+            pass
+        pil = pil.convert("RGB")
+        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+    except Exception as exc:
+        raise ValueError(f"Could not decode image: {exc}") from exc
+    return _resize(img)
+
+
+def _normalize_polarity(img: np.ndarray) -> tuple[np.ndarray, bool, bool]:
+    """Flip dark-mode digital renders to the dark-ink-on-white polarity the OSR
+    models and binarization expect. Returns (img, digital, inverted)."""
+    polarity = _digital_polarity(img)
+    if polarity == "dark":
+        return cv2.bitwise_not(img), True, True
+    return img, polarity is not None, False
+
+
+def _repair_and_binarize(img: np.ndarray, digital: bool, record=None) -> np.ndarray:
+    """Photo-repair stages + binarization, shared by /analyze and
+    /react-from-image. Clean digital depictions skip the repair stages — slow,
+    and able to warp or blur an already-perfect render. A failed stage is
+    non-fatal: keep the last good image and continue. record(name, arr), when
+    given, captures each stage for the UI stage strip."""
+    current = img.copy()
+    photo_stages = [] if digital else [
+        ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
+    ]
+    for name, fn in photo_stages + [("binarize", normalize_binarize)]:
+        try:
+            result = fn(current)
+            if result is not None and isinstance(result, np.ndarray):
+                current = result
+        except Exception as exc:
+            logger.warning("Preprocessing stage %r failed (%s): %s", name, type(exc).__name__, exc)
+        if record:
+            record(name, current)
+    return current
+
+
+def _confidence_label(verified: bool | None) -> str:
+    """UI badge for a verification verdict: True→high, False→low, None→unverified."""
+    if verified is True:
+        return "high"
+    if verified is False:
+        return "low"
+    return "unverified"
+
+
 def _vision_png(img: np.ndarray) -> bytes:
     """Encode the image the vision model sees: capped at VISION_MAX_DIM.
     VLM prefill time scales with pixel count, and structures stay legible
@@ -886,15 +950,6 @@ def _vision_png(img: np.ndarray) -> bytes:
                          interpolation=cv2.INTER_AREA)
     _, buf = cv2.imencode(".png", img)
     return buf.tobytes()
-
-
-def _extract_history_smiles(execution_history: list[str]) -> list[str]:
-    """Pull SMILES strings out of execution_history step lines."""
-    smiles_list = []
-    for entry in execution_history:
-        if "): " in entry:
-            smiles_list.append(entry.split("): ", 1)[1].strip())
-    return smiles_list
 
 
 def _mol_svg(smiles: str, width: int, height: int) -> str:
@@ -949,6 +1004,18 @@ def _digital_polarity(img: np.ndarray) -> str | None:
     return None
 
 
+def _mol_from_smiles_loose(text: str):
+    """Parse SMILES, falling back to treating '+' as a fragment separator (some
+    reader outputs use it). The fallback only runs when the literal text doesn't
+    parse — blind replacement would corrupt charged atoms like [NH3+] or [Li+].
+    Returns an RDKit Mol or None."""
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles(text)
+    if mol is None:
+        mol = Chem.MolFromSmiles(text.replace("+", "."))
+    return mol
+
+
 def _canonical_smiles(raw: str | None) -> str | None:
     """
     Validate + canonicalize reader output; None if unparseable.
@@ -1000,32 +1067,15 @@ def _molscribe_read(arr: np.ndarray) -> str | None:
 
 
 def _process(raw_bytes: bytes) -> dict:
-    try:
-        pil = Image.open(io.BytesIO(raw_bytes))
-        try:
-            from PIL import ImageOps
-            pil = ImageOps.exif_transpose(pil)
-        except Exception:
-            pass
-        pil = pil.convert("RGB")
-        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-    except Exception as exc:
-        raise ValueError(f"Could not decode image: {exc}") from exc
-
-    img = _resize(img)
+    img = _decode_upload(raw_bytes)
     stages: dict[str, str | None] = {"original": _stage_b64(img)}
 
     # Clean digital depictions (screenshots, PDF renders) skip the photo-repair
-    # stages — they're slow and can only degrade an already-flat, noise-free
-    # image. Photos get the full pipeline. Dark-mode renders are flipped to
-    # dark-ink-on-white first: that's the polarity the OSR models and
-    # binarization expect. (The vision model still sees the raw upload — VLMs
-    # read dark mode natively.)
-    polarity = _digital_polarity(img)
-    if polarity == "dark":
-        img = cv2.bitwise_not(img)
+    # stages; dark-mode renders are flipped first. (The vision model still sees
+    # the raw upload — VLMs read dark mode natively.)
+    img, digital, inverted = _normalize_polarity(img)
+    if inverted:
         stages["invert"] = _stage_b64(img)
-    digital = polarity is not None
 
     # Kick off the slow independent readers FIRST, each on its own pool, so
     # they overlap the preprocessing stages and DECIMER reads below instead
@@ -1036,21 +1086,8 @@ def _process(raw_bytes: bytes) -> dict:
     vision_future = _vision_pool.submit(_ollama_vision_smiles, _vision_png(img))
     ms_orig_future = _molscribe_pool.submit(_molscribe_read, img)
 
-    current = img.copy()
-    photo_stages = [] if digital else [
-        ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
-    ]
-    for name, fn in photo_stages + [("binarize", normalize_binarize)]:
-        try:
-            result = fn(current)
-            if result is not None and isinstance(result, np.ndarray):
-                current = result
-        except Exception as exc:
-            # A failed stage is non-fatal — keep the last good image and continue,
-            # but surface the cause instead of hiding it.
-            logger.warning("Preprocessing stage %r failed (%s): %s", name, type(exc).__name__, exc)
-        stages[name] = _stage_b64(current)
-
+    current = _repair_and_binarize(
+        img, digital, record=lambda name, arr: stages.__setitem__(name, _stage_b64(arr)))
     stages["final"] = _stage_b64(current)
 
     # ── Multi-candidate OSR ───────────────────────────────────────────────
@@ -1128,12 +1165,8 @@ def _process(raw_bytes: bytes) -> dict:
         confidence = "unverified"   # placeholder; endpoint overwrites after vision
     elif verify_token:
         confidence = "verifying"
-    elif verified is True:
-        confidence = "high"
-    elif verified is False:
-        confidence = "low"
     else:
-        confidence = "unverified"
+        confidence = _confidence_label(verified)
 
     result = {
         "smiles": smiles,
@@ -1184,24 +1217,16 @@ def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
         if prod_mol is None:
             continue
 
-        # Build the step list the frontend expects
-        steps = b["steps"]
-
-        # Kept for the frontend's reaction_classification shape; the name comes
-        # straight from the template that fired.
-        classification = {
-            "name": b["reaction_name"],
-            "confidence": "template",
-        }
-
         results.append({
             "reagent": {k: v for k, v in reagent.items() if k != "conditions"},
             "environment": environment,
             "steps_taken": b["steps_taken"],
             "execution_history": b["execution_history"],
             "product_smiles": product_smiles,
-            "steps": steps,
-            "reaction_classification": classification,
+            "steps": b["steps"],
+            # Kept for the frontend's reaction_classification shape; the name
+            # comes straight from the template that fired.
+            "reaction_classification": {"name": b["reaction_name"], "confidence": "template"},
             "template_id": b["template_id"],
             "reaction_name": b["reaction_name"],
             "matches_target": False,  # filled in after
@@ -1253,12 +1278,7 @@ async def analyze(file: UploadFile = File(...)):
         result["smiles"] = smiles
         result["valid"] = smiles is not None
         result["verified"] = verified
-        if verified is True:
-            result["confidence"] = "high"
-        elif verified is False:
-            result["confidence"] = "low"
-        else:
-            result["confidence"] = "unverified"
+        result["confidence"] = _confidence_label(verified)
         if result["valid"]:
             result["error"] = None
         result["reads"]["vision"] = vision_read
@@ -1291,12 +1311,7 @@ async def analyze_verify(token: str):
 
     smiles = entry["smiles"]
     verified: bool | None = (vision_read == smiles) if vision_read else None
-    if verified is True:
-        confidence = "high"
-    elif verified is False:
-        confidence = "low"
-    else:
-        confidence = "unverified"
+    confidence = _confidence_label(verified)
     logger.info("Deferred verification: chosen=%r vision=%r → %s", smiles, vision_read, confidence)
     return {"smiles": smiles, "verified": verified, "confidence": confidence, "vision": vision_read}
 
@@ -1988,12 +2003,7 @@ def _engine_ground_from_text(text: str) -> str:
         from rdkit import Chem
         from rdkit import RDLogger
         RDLogger.DisableLog("rdApp.*")
-        # Parse as-is first: blindly replacing '+' corrupts charged SMILES
-        # like [NH3+] or [Li+]. Only fall back to treating '+' as a fragment
-        # separator when the literal text doesn't parse.
-        mol = Chem.MolFromSmiles(text)
-        if mol is None:
-            mol = Chem.MolFromSmiles(text.replace("+", "."))
+        mol = _mol_from_smiles_loose(text)
         if mol is None:
             return ""
         frags = Chem.GetMolFrags(mol, asMols=True)
@@ -2021,6 +2031,35 @@ def _engine_ground_from_text(text: str) -> str:
         return "\n".join(lines)
     except Exception as exc:
         logger.warning("assist grounding failed (%s): %s", type(exc).__name__, exc)
+        return ""
+
+
+def _smiles_ground(text: str) -> str:
+    """RDKit ground truth for a single SMILES (molecule_note / retrosynthesis
+    grounding): canonical form + molecular formula the LLM must not contradict,
+    or an explicit invalid-SMILES flag it must relay instead of inventing a
+    structure. Returns '' when there is nothing to check."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem.rdMolDescriptors import CalcMolFormula
+        mol = Chem.MolFromSmiles(text)
+        if mol is None:
+            return (
+                "ENGINE GROUND TRUTH (deterministic — never contradict):\n"
+                f"  RDKit could NOT parse {text!r} as a valid SMILES. Tell the "
+                "student the SMILES is invalid; do not invent a structure for it."
+            )
+        return (
+            "ENGINE GROUND TRUTH (deterministic — never contradict):\n"
+            f"  SMILES as given: {text}\n"
+            f"  Canonical SMILES (RDKit): {Chem.MolToSmiles(mol)}\n"
+            f"  Molecular formula: {CalcMolFormula(mol)}"
+        )
+    except Exception as exc:
+        logger.warning("assist SMILES grounding failed (%s): %s", type(exc).__name__, exc)
         return ""
 
 
@@ -2091,11 +2130,20 @@ async def assist(req: AssistRequest, user_id: str | None = Depends(require_auth)
     _enforce_hosted_quota(req.engine, user_id)
     content = req.content or {}
     ground = ""
+    loop = asyncio.get_event_loop()
+    # Every file type that carries a structure gets deterministic (RDKit /
+    # template-engine) ground truth injected, so the LLM annotates verified
+    # facts instead of free-running.
     if req.file_type == "mechanism":
         text = str(content.get("reactionInput", "")).strip()
         if text:
-            loop = asyncio.get_event_loop()
             ground = await loop.run_in_executor(_chem_pool, _engine_ground_from_text, text)
+    elif req.file_type == "molecule_note":
+        ground = await loop.run_in_executor(
+            _chem_pool, _smiles_ground, str(content.get("smiles", "")))
+    elif req.file_type == "retrosynthesis":
+        ground = await loop.run_in_executor(
+            _chem_pool, _smiles_ground, str(content.get("targetMolecule", "")))
 
     system, user = _assist_prompts(req.file_type, content, ground)
     return StreamingResponse(
@@ -2106,6 +2154,21 @@ async def assist(req: AssistRequest, user_id: str | None = Depends(require_auth)
 
 
 # ── /react-from-image ─────────────────────────────────────────────────────────
+
+def _branch_products(branches: list[dict]) -> list[dict]:
+    """Shape engine branches into the products list served by /react and
+    /react-from-image."""
+    return [
+        {
+            "smiles":            b["final_product"],
+            "reaction_name":     b["reaction_name"],
+            "template_id":       b["template_id"],
+            "steps_taken":       b["steps_taken"],
+            "execution_history": b["execution_history"],
+        }
+        for b in branches
+    ]
+
 
 def _pick_substrate_and_react(components: list[str]) -> tuple[str, str, list[str], list[dict]]:
     """Try each recognized fragment as the substrate (largest first), with the
@@ -2152,38 +2215,14 @@ def _react_from_image(raw_bytes: bytes) -> dict:
     """
     from rdkit import Chem
 
-    # 1. Preprocess image
+    # 1. Preprocess image — same decode/polarity/repair pipeline as /analyze.
     try:
-        pil = Image.open(io.BytesIO(raw_bytes))
-        try:
-            from PIL import ImageOps
-            pil = ImageOps.exif_transpose(pil)
-        except Exception:
-            pass
-        pil = pil.convert("RGB")
-        img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-    except Exception as exc:
-        return {"error": f"Could not decode image: {exc}", "products": []}
+        img = _decode_upload(raw_bytes)
+    except ValueError as exc:
+        return {"error": str(exc), "products": []}
 
-    img = _resize(img)
-    # Same gating as /analyze: clean digital depictions skip the photo-repair
-    # stages (slow, and binarization can destroy thin bonds in crisp renders);
-    # dark-mode renders are flipped to the polarity OSR expects.
-    polarity = _digital_polarity(img)
-    if polarity == "dark":
-        img = cv2.bitwise_not(img)
-    digital = polarity is not None
-    current = img.copy()
-    photo_stages = [] if digital else [
-        ("perspective", perspective_correct), ("deskew", deskew), ("denoise", denoise),
-    ]
-    for _, fn in photo_stages + [("binarize", normalize_binarize)]:
-        try:
-            result = fn(current)
-            if result is not None and isinstance(result, np.ndarray):
-                current = result
-        except Exception:
-            pass
+    img, digital, _inverted = _normalize_polarity(img)
+    current = _repair_and_binarize(img, digital)
 
     # 2. OSR via DECIMER — digital images read the original first (closest to
     # DECIMER's training distribution), binarized only as fallback; photos the
@@ -2211,18 +2250,14 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         return {"error": "No structure recognized in the image.", "products": []}
 
     # 3. Parse all components — split on '.' but re-validate each fragment
-    raw_mol = Chem.MolFromSmiles(recognized_smiles)
+    raw_mol = _mol_from_smiles_loose(recognized_smiles)
     if raw_mol is None:
-        # Try replacing '+' notation (some DECIMER outputs use '+' for fragment sep)
-        alt = recognized_smiles.replace("+", ".")
-        raw_mol = Chem.MolFromSmiles(alt)
-        if raw_mol is None:
-            logger.info("DECIMER SMILES invalid — calling Ollama reaction parse")
-            fallback = _ollama_reaction_smiles(_img_bytes)
-            logger.info("Ollama (invalid SMILES fallback) returned: %r", fallback)
-            if fallback:
-                recognized_smiles = fallback
-                raw_mol = Chem.MolFromSmiles(recognized_smiles)
+        logger.info("DECIMER SMILES invalid — calling Ollama reaction parse")
+        fallback = _ollama_reaction_smiles(_img_bytes)
+        logger.info("Ollama (invalid SMILES fallback) returned: %r", fallback)
+        if fallback:
+            recognized_smiles = fallback
+            raw_mol = Chem.MolFromSmiles(recognized_smiles)
         if raw_mol is None:
             return {
                 "recognized_smiles": recognized_smiles,
@@ -2297,16 +2332,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
                         substrate_smiles, reagent_smiles, conditions, len(branches),
                     )
 
-    products = [
-        {
-            "smiles":            b["final_product"],
-            "reaction_name":     b["reaction_name"],
-            "template_id":       b["template_id"],
-            "steps_taken":       b["steps_taken"],
-            "execution_history": b["execution_history"],
-        }
-        for b in branches
-    ]
+    products = _branch_products(branches)
 
     return {
         "recognized_smiles": recognized_smiles,
@@ -2354,22 +2380,11 @@ async def react(req: ReactRequest):
 
     environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
 
-    products = [
-        {
-            "smiles":            b["final_product"],
-            "reaction_name":     b["reaction_name"],
-            "template_id":       b["template_id"],
-            "steps_taken":       b["steps_taken"],
-            "execution_history": b["execution_history"],
-        }
-        for b in branches
-    ]
-
     return {
         "substrate_smiles": substrate,
         "reagent_smiles":   reagent,
         "environment":      environment,
-        "products":         products,
+        "products":         _branch_products(branches),
     }
 
 

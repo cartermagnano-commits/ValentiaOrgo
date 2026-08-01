@@ -107,14 +107,25 @@ export function setApiKey(key: string): void {
   }
 }
 
+// Model ids are per-provider, so a stored pref can hold a model that doesn't
+// belong to the stored provider — prefs saved before a provider switch, or by
+// an older build of the picker. Sending that pair means the request reaches
+// the right provider with an id it will reject, so fall back to the
+// provider's own default instead of shipping the mismatch.
+function modelForProvider(provider: Provider, model: string): string {
+  const stops = STRENGTH[provider] ?? []
+  return stops.some(s => s.model === model) ? model : stops[0]?.model ?? ''
+}
+
 // The object attached to /explain and /chat request bodies.
 export function getEnginePayload(): EnginePayload {
   const p = loadPrefs()
   if (p.mode === 'local') {
     return { mode: 'local', model: p.ollamaModel || null }
   }
+  const model = modelForProvider(p.provider, p.model)
   if (p.mode === 'byok') {
-    return { mode: 'byok', provider: p.provider, model: p.model, api_key: getApiKey() || null }
+    return { mode: 'byok', provider: p.provider, model, api_key: getApiKey() || null }
   }
-  return { mode: 'hosted', provider: p.provider, model: p.model }
+  return { mode: 'hosted', provider: p.provider, model }
 }
