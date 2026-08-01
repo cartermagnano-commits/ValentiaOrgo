@@ -75,7 +75,7 @@ from osr_arbitration import (
     arbitrate_local, plausible_or_none, resolve_with_vision,
 )
 from reaction_arbitration import (
-    AI_ONLY, DISPUTED, UNVERIFIED, VERIFIED, candidate_pool,
+    AI_ONLY, DISPUTED, UNVERIFIED, VERIFIED, agreement, candidate_pool,
     plausible_products, verdict,
 )
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
@@ -545,7 +545,7 @@ MAX_HISTORY_LINES = 500
 # well over 60 SVG tiles in a minute, so it can't share the HEAVY tier.
 # /health and /engine/* polls stay unlimited.
 RATE_LIMIT_HEAVY = {
-    "/analyze", "/react-from-image", "/react", "/pathways",
+    "/analyze", "/react-from-image", "/react", "/react/assess", "/pathways",
     "/explain", "/chat", "/assist", "/stereo",
 }
 RATE_LIMIT_HEAVY_MAX = 60       # requests per window per IP
@@ -2494,6 +2494,126 @@ async def react(req: ReactRequest):
         "reagent_smiles":   reagent,
         "environment":      environment,
         "products":         _branch_products(branches),
+    }
+
+
+# ── /react/assess — joint AI + deterministic verdict ─────────────────────────
+# The deterministic engine has already answered by the time this runs; the
+# frontend calls it with whatever the engine produced (possibly nothing). The
+# AI predicts INDEPENDENTLY first — it never sees the engine's answer in round
+# one — and only then are the two compared. Rubber-stamping is the failure mode
+# that makes verification worthless, so the blind round is load-bearing.
+
+MAX_ASSESS_ROUNDS = 3          # 1 blind + up to 2 reconciliation
+ASSESS_MAX_TOKENS = 120        # SMILES-only replies are short
+
+_ASSESS_SYSTEM = (
+    "You are an expert organic chemist predicting reaction products.\n"
+    "HARD RULES:\n"
+    "- Output ONLY SMILES strings, one per line. No prose, no numbering, "
+    "no markdown, no explanation.\n"
+    "- Give the MAJOR product first. At most 3 lines.\n"
+    "- Output only the organic product(s) — omit counterions, solvent, and "
+    "inorganic byproducts.\n"
+    "- If you cannot determine the product, output exactly: UNKNOWN"
+)
+
+
+class AssessRequest(BaseModel):
+    substrate_smiles: str
+    reagent_smiles: str
+    engine_products: list[str] = []
+    engine: Optional[EngineConfig] = None
+
+
+@app.post("/react/assess")
+async def react_assess(req: AssessRequest, user_id: str | None = Depends(require_auth)):
+    """Return the joint AI/deterministic verdict for one reaction.
+
+    Stateless by design: the client supplies the engine's products, so the
+    same endpoint serves /react, a selected pathway branch, and
+    /react-from-image — and a page reload can re-ask without server state.
+    """
+    _enforce_hosted_quota(req.engine, user_id)
+
+    substrate = _canonical_smiles(req.substrate_smiles.strip())
+    if not substrate:
+        raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
+    reagent = _canonical_smiles(req.reagent_smiles.strip())
+    if not reagent:
+        raise HTTPException(status_code=422, detail="Invalid reagent SMILES")
+
+    if len(req.engine_products) > 12:
+        raise HTTPException(status_code=413, detail="Too many engine products.")
+    engine_products = plausible_products(
+        [c for c in (_canonical_smiles(p) for p in req.engine_products) if c])
+
+    # ── Round 1: blind independent prediction ────────────────────────────────
+    blind_prompt = (
+        f"Substrate: {substrate}\n"
+        f"Reagent: {reagent}\n\n"
+        "What is the major organic product of this reaction? "
+        "Answer with SMILES only."
+    )
+    reply = await _llm_complete(
+        _ASSESS_SYSTEM, [{"role": "user", "content": blind_prompt}],
+        ASSESS_MAX_TOKENS, req.engine)
+    ai_products = _parse_smiles_list(reply)
+    rounds = 1
+
+    # ── Rounds 2-3: neutral reconciliation ───────────────────────────────────
+    # Only worth running when the AI actually produced something AND the engine
+    # has a competing answer. A silent AI stays silent; a template miss is
+    # already settled by the blind round.
+    while (rounds < MAX_ASSESS_ROUNDS and ai_products and engine_products
+           and agreement(engine_products, ai_products) is None):
+        pool = candidate_pool(engine_products, ai_products, seed=rounds)
+        if not pool:
+            break
+        listing = "\n".join(pool)
+        reconcile_prompt = (
+            f"Substrate: {substrate}\n"
+            f"Reagent: {reagent}\n\n"
+            "These are candidate products for this reaction:\n"
+            f"{listing}\n\n"
+            "Which single candidate is the major product? Reply with that "
+            "candidate's SMILES exactly as written above. If none is correct, "
+            "reply with the correct product's SMILES instead."
+        )
+        reply = await _llm_complete(
+            _ASSESS_SYSTEM, [{"role": "user", "content": reconcile_prompt}],
+            ASSESS_MAX_TOKENS, req.engine)
+        rounds += 1
+        picked = _parse_smiles_list(reply)
+        if not picked:
+            break                      # AI went silent — stop burning calls
+        ai_products = picked
+
+    ai_failed = not ai_products
+    status, agreed = verdict(engine_products, ai_products, rounds, ai_failed)
+
+    notes = {
+        VERIFIED: "The AI independently predicted the same product as the "
+                  "deterministic engine.",
+        DISPUTED: "The AI predicted a different product. The engine's result "
+                  "is shown as computed — review both and choose.",
+        AI_ONLY: "No reaction template matched, so this product is the AI's "
+                 "prediction alone — it has NOT been checked by the "
+                 "deterministic engine.",
+        UNVERIFIED: "The AI could not verify this result. The deterministic "
+                    "engine's output is unchanged.",
+    }
+    logger.info(
+        "Assess: substrate=%r reagent=%r engine=%s ai=%s rounds=%d → %s",
+        substrate, reagent, engine_products, ai_products, rounds, status)
+
+    return {
+        "status": status,
+        "agreed_product": agreed,
+        "ai_products": ai_products,
+        "engine_products": engine_products,
+        "rounds": rounds,
+        "note": notes[status],
     }
 
 
