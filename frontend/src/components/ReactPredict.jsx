@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import StructureView from './StructureView'
-import { reactFromImage } from '../api'
+import { AiOnlyCard, DisputePicker, VerdictBadge } from './VerdictBadge'
+import { assessReaction, reactFromImage } from '../api'
 import { imageFileFromClipboard, pasteTargetIsEditable, readImageFromClipboard } from '../../lib/clipboard'
 import { ArrowLeft, Camera, Check, ClipboardPaste, Copy, X } from 'lucide-react'
 
@@ -117,6 +118,9 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
   const [error, setError]     = useState(null)
   const [preview, setPreview] = useState(null)
   const [dragOver, setDragOver] = useState(false)
+  const [verdict,   setVerdict]   = useState(null)
+  const [verifying, setVerifying] = useState(false)
+  const assessSeq = useRef(0)
   const fileRef = useRef(null)
 
   async function handleFile(file) {
@@ -124,6 +128,7 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
     setLoading(true)
     setError(null)
     setResult(null)
+    setVerdict(null)
     setPreview(prev => {
       if (prev) URL.revokeObjectURL(prev)
       return URL.createObjectURL(file)
@@ -140,6 +145,18 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
       }
       if (data.error && !data.products?.length) {
         setError(data.error)
+      }
+
+      // Recognition and the template engine have both run; ask the AI to
+      // assess the same reaction independently.
+      if (data.substrate_smiles && data.reagent_smiles) {
+        const seq = ++assessSeq.current
+        setVerifying(true)
+        assessReaction(data.substrate_smiles, data.reagent_smiles,
+                       data.products?.map(p => p.smiles) ?? [])
+          .then(v => { if (assessSeq.current === seq) setVerdict(v) })
+          .catch(() => { /* best-effort */ })
+          .finally(() => { if (assessSeq.current === seq) setVerifying(false) })
       }
     } catch (e) {
       setError(e.message || 'Pipeline failed')
@@ -180,6 +197,7 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
   function reset() {
     setResult(null)
     setError(null)
+    setVerdict(null)
     setPreview(prev => {
       if (prev) URL.revokeObjectURL(prev)
       return null
@@ -324,6 +342,20 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
                   wordBreak: 'break-all', lineHeight: 1.5,
                 }}>{result.recognized_smiles}</code>
                 <CopyButton text={result.recognized_smiles} />
+                {result.recognition_confidence && (
+                  <span
+                    title="How the structure readers agreed on this SMILES"
+                    style={{
+                      fontSize: 10, fontWeight: 700, borderRadius: 20, padding: '2px 10px',
+                      color: result.recognition_confidence === 'high' ? 'var(--success)' : 'var(--muted)',
+                      border: '1px solid var(--border)', whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {result.recognition_confidence === 'high' ? 'Readers agree'
+                      : result.recognition_confidence === 'low' ? 'Readers disagree — check structure'
+                      : 'Unverified read'}
+                  </span>
+                )}
               </div>
             </div>
           )}
@@ -352,15 +384,19 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
               <div style={{
                 fontSize: 11, fontWeight: 700, color: 'var(--success)',
                 textTransform: 'uppercase', letterSpacing: '0.08em',
-                marginBottom: 10,
+                marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8,
               }}>
                 {result.products.length} Predicted Product{result.products.length !== 1 ? 's' : ''}
+                <VerdictBadge verdict={verdict} loading={verifying} />
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {result.products.map((p, i) => (
                   <ProductCard key={i} product={p} index={i} />
                 ))}
               </div>
+              {verdict?.status === 'disputed' && (
+                <div style={{ marginTop: 14 }}><DisputePicker verdict={verdict} /></div>
+              )}
             </div>
           )}
 
@@ -371,6 +407,7 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
               borderRadius: 8, padding: '10px 14px', fontSize: 12, color: 'var(--danger)',
             }}>
               {result.error || 'No reaction templates matched this substrate/reagent pair.'}
+              <AiOnlyCard verdict={verdict} />
             </div>
           )}
 
