@@ -44,3 +44,6 @@ Thumbs.db
 # Nested scratch repo (not a submodule)
 Image Pre-Processing/
 frontend/tsconfig.tsbuildinfo
+
+# Superpowers SDD scratch (ledger, briefs, review packages)
+.superpowers/
