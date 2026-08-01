@@ -105,6 +105,9 @@ Responsibilities:
   which source.
   - AI selects an engine product → `verified` (response records `rounds`).
   - AI holds its own candidate through round 3 → `disputed`.
+  - AI answers "none of these" (or an entirely new candidate) → counts as
+    continued disagreement; new valid candidates join the shuffled list for
+    the next round, and at exhaustion the verdict is `disputed`.
 - All AI outputs pass RDKit validation + canonicalization + degeneracy
   gating in `app.py` before entering arbitration.
 
@@ -157,6 +160,12 @@ New router `_vision_smiles_routed(png_bytes, prompt, engine)`:
    text).
 2. Local Ollama vision model (existing `_ollama_call` path).
 3. `None` — existing graceful degradation.
+
+Model selection per mode: hosted/BYOK use `engine.model` when set (all
+current Anthropic/OpenAI chat models are multimodal), else the provider
+default (`DEFAULT_ANTHROPIC_MODEL` / `DEFAULT_OPENAI_MODEL`). Local mode
+uses the auto-detected Ollama *vision* model — never `engine.model`, which
+in local mode names a text model.
 
 Integration:
 
