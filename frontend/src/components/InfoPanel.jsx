@@ -169,12 +169,19 @@ function BranchInfoView({ branch, substrateSMILES }) {
   // One assess call per branch the user actually opens — verifying every
   // branch in a pathway search would mean dozens of LLM calls per search.
   useEffect(() => {
+    // Reset before the guards, not after: a rendered branch must never keep
+    // displaying a prior branch's verdict badge (or a stale DisputePicker) —
+    // or its spinner — just because this branch happens to lack a
+    // product/substrate/reagent. (A bail here also can't rely on a prior
+    // branch's in-flight promise to clear `verifying`: its `finally` sees
+    // `stale === true`, set by this effect's own cleanup, and skips the reset.)
+    setVerdict(null)
+    setVerifying(false)
     if (!branch?.product_smiles) return
     const substrate = branch.steps?.[0]?.smiles ?? substrateSMILES
     const reagentSmiles = branch.reagent?.smiles
     if (!substrate || !reagentSmiles) return
     let stale = false
-    setVerdict(null)
     setVerifying(true)
     assessReaction(substrate, reagentSmiles, [branch.product_smiles])
       .then(v => { if (!stale) setVerdict(v) })
