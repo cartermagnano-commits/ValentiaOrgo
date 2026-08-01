@@ -31,6 +31,9 @@ async function post(path, body) {
 export async function analyzeImage(file) {
   const form = new FormData()
   form.append('file', file)
+  // Lets the backend arbitrate the OSR read with the user's chosen (often much
+  // faster and more accurate) vision model instead of the local VLM.
+  form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/analyze', {
     method: 'POST',
     headers: await authHeaders(),
@@ -61,9 +64,22 @@ export async function reactDirect(substrateSMILES, reagentSMILES) {
   return post('/react', { substrate_smiles: substrateSMILES, reagent_smiles: reagentSMILES })
 }
 
+// Ask the AI to independently assess a reaction the deterministic engine has
+// already answered (or failed to answer). Returns a verdict, never a
+// replacement result — see docs/superpowers/specs for the no-flip rule.
+export async function assessReaction(substrateSMILES, reagentSMILES, engineProducts) {
+  return post('/react/assess', {
+    substrate_smiles: substrateSMILES,
+    reagent_smiles: reagentSMILES,
+    engine_products: engineProducts ?? [],
+    engine: getEnginePayload(),
+  })
+}
+
 export async function reactFromImage(file) {
   const form = new FormData()
   form.append('file', file)
+  form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/react-from-image', {
     method: 'POST',
     headers: await authHeaders(),
