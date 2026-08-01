@@ -13,6 +13,7 @@ results/
 
 # DECIMER model cache (downloaded at runtime, ~570 MB)
 .data/
+.cache/
 
 # Secrets
 .env
