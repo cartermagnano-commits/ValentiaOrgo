@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import MoleculeInput from './MoleculeInput'
 import StructureView from './StructureView'
-import { reactDirect } from '../api'
+import { AiOnlyCard, DisputePicker, VerdictBadge } from './VerdictBadge'
+import { assessReaction, reactDirect } from '../api'
 import { downloadMolfile, downloadSvg, copyText, buildReactionReport } from '../../lib/exports'
 import { ArrowDown, Check, ChevronRight, Copy, Download, FileText, FlaskConical, Image, Plus } from 'lucide-react'
 
@@ -111,6 +112,11 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
   const [result,    setResult]    = useState(initialResult ?? null)
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState(null)
+  const [verdict,   setVerdict]   = useState(null)
+  const [verifying, setVerifying] = useState(false)
+  // Bumped per run so a slow verdict from a previous reaction can't land on
+  // the current one.
+  const assessSeq = useRef(0)
 
   const canRun = substrate.trim() && reagent.trim() && !loading
 
@@ -119,6 +125,8 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
     setLoading(true)
     setError(null)
     setResult(null)
+    setVerdict(null)
+    const seq = ++assessSeq.current
     try {
       const data = await reactDirect(substrate.trim(), reagent.trim())
       setResult(data)
@@ -128,9 +136,13 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
         predictedProducts: data.products?.map(p => p.smiles) ?? [],
         result: data,
       })
-      if (!data.products?.length) {
-        setError('No reaction templates matched this substrate/reagent combination.')
-      }
+      // The engine has answered; now let the AI weigh in alongside it. A
+      // template miss still gets assessed — that's the AI-only path.
+      setVerifying(true)
+      assessReaction(substrate.trim(), reagent.trim(), data.products?.map(p => p.smiles) ?? [])
+        .then(v => { if (assessSeq.current === seq) setVerdict(v) })
+        .catch(() => { /* verification is best-effort; engine result stands */ })
+        .finally(() => { if (assessSeq.current === seq) setVerifying(false) })
     } catch (e) {
       setError(e.message || 'Reaction failed')
     } finally {
@@ -139,10 +151,13 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
   }
 
   function handleClear() {
+    assessSeq.current++
     setSubstrate('')
     setReagent('')
     setResult(null)
     setError(null)
+    setVerdict(null)
+    setVerifying(false)
   }
 
   return (
@@ -247,6 +262,7 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
               border: '1px solid var(--border)', borderRadius: 20, padding: '1px 8px' }}>
               {result.environment}
             </span>
+            <VerdictBadge verdict={verdict} loading={verifying} />
             <button
               className="export-chip"
               onClick={() => copyText(buildReactionReport({
@@ -267,6 +283,27 @@ export default function DirectReact({ initialSubstrate, initialReagent, initialR
               <ProductCard key={i} product={p} index={i} />
             ))}
           </div>
+
+          {verdict?.status === 'disputed' && (
+            <div style={{ marginTop: 14 }}>
+              <DisputePicker verdict={verdict} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Template miss: the engine had nothing, so the AI's answer (clearly
+          flagged) is better than an empty screen. */}
+      {result && !loading && !result.products?.length && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            fontSize: 12, color: 'var(--muted)',
+          }}>
+            No reaction template matched this pair.
+            <VerdictBadge verdict={verdict} loading={verifying} />
+          </div>
+          <AiOnlyCard verdict={verdict} />
         </div>
       )}
     </div>
