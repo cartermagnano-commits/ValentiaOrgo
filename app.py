@@ -52,7 +52,7 @@ if not _rxn_arb_logger.handlers:
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image
@@ -180,12 +180,12 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
     return None
 
 
-def _ollama_vision_smiles(img_bytes: bytes) -> str | None:
+def _ollama_vision_smiles(img_bytes: bytes, engine=None) -> str | None:
     """
     Extract all molecule SMILES from an image, ignoring reaction notation.
     Used by the /analyze pipeline as a DECIMER fallback.
     """
-    return _ollama_call(
+    return _vision_smiles_routed(
         img_bytes,
         "You are an expert chemist. The image shows chemical structures, possibly alongside "
         "reaction notation.\n\n"
@@ -196,17 +196,18 @@ def _ollama_vision_smiles(img_bytes: bytes) -> str | None:
         "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures\n\n"
         "Output ONLY the SMILES string. Separate multiple molecules with '.'. "
         "No explanation, no prose, no markdown.",
+        engine,
     )
 
 
-def _ollama_reaction_smiles(img_bytes: bytes) -> str | None:
+def _ollama_reaction_smiles(img_bytes: bytes, engine=None) -> str | None:
     """
     Extract only the INPUT molecules (starting materials + reagents) from a reaction image.
     Understands that arrows show reaction direction and question marks indicate the unknown
     product — neither should appear in the returned SMILES.
     Used by the /react-from-image pipeline.
     """
-    return _ollama_call(
+    return _vision_smiles_routed(
         img_bytes,
         "You are an expert organic chemist reading a reaction problem image.\n\n"
         "The image shows a chemical reaction: starting material(s) on the LEFT of a reaction "
@@ -221,7 +222,109 @@ def _ollama_reaction_smiles(img_bytes: bytes) -> str | None:
         "  - Plus signs (+) as separators — use a period (.) instead\n\n"
         "Output ONLY a SMILES string — no prose, no labels, no markdown. "
         "Separate multiple input molecules with a period (.).",
+        engine,
     )
+
+
+# ── Vision provider routing ──────────────────────────────────────────────────
+# The local VLM is the OSR pipeline's slowest and least accurate arbiter
+# (~58 s per read on a dev machine, and it has misread a test ketone by a
+# carbon). Cloud multimodal models answer in seconds and read structures far
+# better, so when the user's engine choice gives us one, use it — and fall
+# back down the ladder (cloud → local → none) so a missing key or a provider
+# outage degrades exactly as it does today.
+
+VISION_MAX_TOKENS = 256
+
+
+def _cloud_vision_smiles(img_bytes: bytes, prompt: str, provider: str,
+                         model: str | None, api_key: str | None) -> str | None:
+    """One-shot multimodal read via Anthropic or OpenAI. None on any failure."""
+    b64 = base64.b64encode(img_bytes).decode()
+    try:
+        if provider == "openai":
+            import openai
+            client = openai.OpenAI(api_key=api_key or os.environ["OPENAI_API_KEY"])
+            resp = client.chat.completions.create(
+                model=model or DEFAULT_OPENAI_MODEL,
+                max_tokens=VISION_MAX_TOKENS,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ]}],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+        else:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
+            resp = client.messages.create(
+                model=model or DEFAULT_ANTHROPIC_MODEL,
+                max_tokens=VISION_MAX_TOKENS,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": b64}},
+                    {"type": "text", "text": prompt},
+                ]}],
+            )
+            text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    except Exception as exc:
+        logger.warning("Cloud vision read failed (%s: %s)", type(exc).__name__, exc)
+        return None
+
+    logger.info("Cloud vision (%s) raw response: %r", provider, text[:300])
+    result = plausible_or_none(_canonical_smiles(text), "CloudVision")
+    if result:
+        return result
+    for candidate in _SMILES_TOKEN.findall(text):
+        result = plausible_or_none(_canonical_smiles(candidate), "CloudVision")
+        if result:
+            return result
+    return None
+
+
+def _vision_smiles_routed(img_bytes: bytes, prompt: str,
+                          engine: Optional["EngineConfig"] = None) -> str | None:
+    """Read SMILES from an image using the best vision model the engine
+    selection allows: cloud multimodal → local Ollama VLM → None.
+
+    Local mode never reaches the cloud even when a server key exists — the
+    user asked for local. Note engine.model is only meaningful for the cloud
+    branch: in local mode it names a TEXT model, so the Ollama path resolves
+    its own vision model instead.
+    """
+    mode = (engine.mode or "hosted").lower() if engine else None
+    if engine is not None and mode != "local":
+        provider = (engine.provider or "anthropic").lower()
+        if mode == "byok":
+            if engine.api_key:
+                read = _cloud_vision_smiles(img_bytes, prompt, provider,
+                                            engine.model, engine.api_key)
+                if read:
+                    return read
+        else:  # hosted — server key
+            env_key = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+            if os.environ.get(env_key):
+                read = _cloud_vision_smiles(img_bytes, prompt, provider,
+                                            engine.model, None)
+                if read:
+                    return read
+    return _ollama_call(img_bytes, prompt)
+
+
+def _parse_engine_field(raw: str | None) -> Optional["EngineConfig"]:
+    """Parse the optional `engine` multipart field on image uploads.
+
+    Malformed input is ignored rather than fatal: a bad engine field should
+    cost the user a faster vision model, not their upload.
+    """
+    if not raw:
+        return None
+    try:
+        return EngineConfig(**json.loads(raw))
+    except Exception as exc:
+        logger.warning("Ignoring malformed engine field (%s)", type(exc).__name__)
+        return None
 
 
 # ── "Choose Your Engine" — generative LLM provider router ────────────────────
@@ -1175,7 +1278,7 @@ def _molscribe_read(arr: np.ndarray) -> str | None:
         return None
 
 
-def _process(raw_bytes: bytes) -> dict:
+def _process(raw_bytes: bytes, engine=None) -> dict:
     img = _decode_upload(raw_bytes)
     stages: dict[str, str | None] = {"original": _stage_b64(img)}
 
@@ -1192,7 +1295,7 @@ def _process(raw_bytes: bytes) -> dict:
     #   * vision (Ollama HTTP) — sees a downscaled copy of the upload
     #   * MolScribe (torch)    — reads the original now; the binarized
     #     rendition is submitted as soon as preprocessing produces it
-    vision_future = _vision_pool.submit(_ollama_vision_smiles, _vision_png(img))
+    vision_future = _vision_pool.submit(_ollama_vision_smiles, _vision_png(img), engine)
     ms_orig_future = _molscribe_pool.submit(_molscribe_read, img)
 
     current = _repair_and_binarize(
@@ -1347,15 +1450,16 @@ def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/analyze", dependencies=[Depends(require_auth)])
-async def analyze(file: UploadFile = File(...)):
+async def analyze(file: UploadFile = File(...), engine: str | None = Form(default=None)):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Image too large (max 8 MB).")
+    engine_cfg = _parse_engine_field(engine)
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(_executor, _process, contents)
+        result = await loop.run_in_executor(_executor, _process, contents, engine_cfg)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -2308,7 +2412,7 @@ def _pick_substrate_and_react(components: list[str]) -> tuple[str, str, list[str
     return substrate, reagent, conditions, []
 
 
-def _react_from_image(raw_bytes: bytes) -> dict:
+def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
     """
     Full pipeline: raw image bytes → preprocessing → DECIMER → split
     into substrate + reagent → template engine → product SMILES.
@@ -2353,7 +2457,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
 
     if not recognized_smiles:
         logger.info("DECIMER returned nothing — calling Ollama reaction parse")
-        recognized_smiles = _ollama_reaction_smiles(_img_bytes)
+        recognized_smiles = _ollama_reaction_smiles(_img_bytes, engine)
         logger.info("Ollama (empty DECIMER fallback) returned: %r", recognized_smiles)
     if not recognized_smiles:
         return {"error": "No structure recognized in the image.", "products": []}
@@ -2362,7 +2466,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
     raw_mol = _mol_from_smiles_loose(recognized_smiles)
     if raw_mol is None:
         logger.info("DECIMER SMILES invalid — calling Ollama reaction parse")
-        fallback = _ollama_reaction_smiles(_img_bytes)
+        fallback = _ollama_reaction_smiles(_img_bytes, engine)
         logger.info("Ollama (invalid SMILES fallback) returned: %r", fallback)
         if fallback:
             recognized_smiles = fallback
@@ -2386,7 +2490,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
             "Suspicious DECIMER output (%d frags, non-organic atoms=%s, smiles=%r) — calling Ollama",
             len(frags), _bad_atoms or "none", recognized_smiles,
         )
-        fix = _ollama_reaction_smiles(_img_bytes)
+        fix = _ollama_reaction_smiles(_img_bytes, engine)
         logger.info("Ollama (suspicious DECIMER) returned: %r", fix)
         if fix:
             fix_mol = Chem.MolFromSmiles(fix)
@@ -2422,7 +2526,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
     # 5. Last-resort: if engine matched nothing, ask Ollama for a cleaner re-read and retry
     if not branches:
         logger.info("No templates matched — calling Ollama for last-resort re-identification")
-        retry_smiles = _ollama_reaction_smiles(_img_bytes)
+        retry_smiles = _ollama_reaction_smiles(_img_bytes, engine)
         logger.info("Ollama (no-match retry) returned: %r", retry_smiles)
         if retry_smiles and retry_smiles != recognized_smiles:
             retry_mol = Chem.MolFromSmiles(retry_smiles)
@@ -2618,15 +2722,16 @@ async def react_assess(req: AssessRequest, user_id: str | None = Depends(require
 
 
 @app.post("/react-from-image", dependencies=[Depends(require_auth)])
-async def react_from_image(file: UploadFile = File(...)):
+async def react_from_image(file: UploadFile = File(...), engine: str | None = Form(default=None)):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Image too large (max 8 MB).")
+    engine_cfg = _parse_engine_field(engine)
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(_executor, _react_from_image, contents)
+        result = await loop.run_in_executor(_executor, _react_from_image, contents, engine_cfg)
     except Exception as exc:
         logger.exception("react-from-image pipeline failed")
         raise HTTPException(status_code=500, detail="Reaction image processing failed.") from exc
