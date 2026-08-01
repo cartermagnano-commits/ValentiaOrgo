@@ -1,7 +1,10 @@
 """test_reaction_arbitration.py — verdict-table suite for reaction_arbitration.
 
-Plain python (no pytest), same style as test_osr.py:
+Plain python (no pytest):
     python test_reaction_arbitration.py
+
+Uses check(name, got, want) rather than test_osr.py's check(name, ok, detail) —
+better failure output for value comparisons.
 """
 
 import sys
@@ -70,6 +73,22 @@ check("pool: deterministic for a given seed",
       candidate_pool(["CCO", "CC=O"], ["CC=O", "CCC"], seed=7), pool)
 check("pool: drops degenerate candidates",
       sorted(candidate_pool(["CCO"], ["*CC"], seed=1)), ["CCO"])
+
+# ── response parsing (imports app; heavier, kept last) ───────────────────────
+import app  # noqa: E402
+
+check("parse: bare smiles", app._parse_smiles_list("CCO"), ["CCO"])
+check("parse: prose around smiles",
+      app._parse_smiles_list("The major product is CC(=O)CCO here."), ["CC(=O)CCO"])
+check("parse: newline separated, order kept",
+      app._parse_smiles_list("CCO\nCC=O"), ["CCO", "CC=O"])
+check("parse: markdown fence stripped",
+      app._parse_smiles_list("```\nCCO\n```"), ["CCO"])
+check("parse: garbage yields nothing", app._parse_smiles_list("I am not sure."), [])
+check("parse: empty yields nothing", app._parse_smiles_list(""), [])
+check("parse: degenerate output filtered", app._parse_smiles_list("*CCO"), [])
+check("parse: duplicates collapsed", app._parse_smiles_list("CCO\nOCC"), ["CCO"])
+check("parse: honors limit", len(app._parse_smiles_list("CCO\nCC=O\nCCC\nCCCC\nCCCCC", limit=2)), 2)
 
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

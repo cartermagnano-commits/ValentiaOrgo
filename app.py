@@ -21,6 +21,7 @@ import io
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -42,6 +43,12 @@ _arb_logger.setLevel(logging.INFO)
 if not _arb_logger.handlers:
     _arb_logger.addHandler(logging.StreamHandler())
     _arb_logger.propagate = False
+
+_rxn_arb_logger = logging.getLogger("reaction_arbitration")
+_rxn_arb_logger.setLevel(logging.INFO)
+if not _rxn_arb_logger.handlers:
+    _rxn_arb_logger.addHandler(logging.StreamHandler())
+    _rxn_arb_logger.propagate = False
 
 import cv2
 import numpy as np
@@ -66,6 +73,10 @@ except ImportError:
 
 from osr_arbitration import (
     arbitrate_local, plausible_or_none, resolve_with_vision,
+)
+from reaction_arbitration import (
+    AI_ONLY, DISPUTED, UNVERIFIED, VERIFIED, candidate_pool,
+    plausible_products, verdict,
 )
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
 from reactivity_engine import TemplateEngine
@@ -125,7 +136,6 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
     canonical SMILES found in the response. Returns None on any failure.
     Runs synchronously — always call from a thread pool, never the event loop.
     """
-    import re
     import httpx
 
     model = _ollama_vision_model()
@@ -407,6 +417,77 @@ def _select_stream(system: str, messages: list[dict], max_tokens: int,
         if have_openai:
             return _stream_openai(system, messages, max_tokens)
     return _stream_ollama(system, messages, max_tokens)
+
+
+async def _llm_complete(system: str, messages: list[dict], max_tokens: int,
+                        engine: Optional[EngineConfig] = None) -> str:
+    """Run a generative call to completion and return its full text.
+
+    Drains the same generator `/explain` streams, so provider routing, BYOK
+    key handling, and hosted fallbacks are reused rather than duplicated.
+    Returns "" on any failure — callers treat an empty reply as "the AI had
+    nothing to say", which degrades to an unverified verdict.
+    """
+    chunks: list[str] = []
+    try:
+        async for frame in _select_stream(system, messages, max_tokens, engine):
+            if not frame.startswith("data: "):
+                continue
+            payload = frame[6:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            if data.get("error"):
+                logger.warning("LLM completion error frame: %s", data["error"])
+                return ""
+            if data.get("delta"):
+                chunks.append(data["delta"])
+    except HTTPException:
+        raise           # missing BYOK key etc. — surface as a real HTTP error
+    except Exception as exc:
+        logger.warning("LLM completion failed (%s): %s", type(exc).__name__, exc)
+        return ""
+    return "".join(chunks)
+
+
+# A SMILES-ish token: the character set RDKit accepts, long enough not to
+# match ordinary prose words.
+_SMILES_TOKEN = re.compile(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{2,}")
+
+
+def _parse_smiles_list(text: str, limit: int = 4) -> list[str]:
+    """Extract canonical, plausible product SMILES from a model reply.
+
+    The prompt asks for SMILES-only output, but models still wrap replies in
+    prose or code fences — so parse defensively: try each line whole first
+    (a line IS the answer in the common case), then fall back to tokens.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    for line in text.replace("```", "\n").splitlines():
+        line = line.strip().strip(",;")
+        if not line:
+            continue
+        # A clean single-SMILES line never contains embedded whitespace — a
+        # line with a space is prose, not "the answer". This guard matters
+        # because current RDKit parses space-delimited input leniently
+        # (MolFromSmiles stops at the first space and accepts the valid
+        # prefix) rather than rejecting the whole string, so without it
+        # "I am not sure." would wrongly canonicalize to "I" here.
+        canon = _canonical_smiles(line) if " " not in line else None
+        if canon:
+            found.append(canon)
+            continue
+        for token in _SMILES_TOKEN.findall(line):
+            canon = _canonical_smiles(token)
+            if canon:
+                found.append(canon)
+    return plausible_products(found)[:limit]
+
 
 app = FastAPI(title="Orgo AI")
 
