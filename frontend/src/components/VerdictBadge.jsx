@@ -56,6 +56,7 @@ export function DisputePicker({ verdict, onChoose }) {
   const engine = verdict.engine_products?.[0]
   const ai = verdict.ai_products?.[0]
   if (!engine || !ai) return null
+  const rounds = verdict.rounds ?? 1
 
   const card = (label, smiles, sub, accent) => (
     <div style={{
@@ -84,7 +85,7 @@ export function DisputePicker({ verdict, onChoose }) {
         <AlertTriangle size={14} /> The engine and the AI disagree
       </div>
       <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.6 }}>
-        They were re-asked {verdict.rounds} time{verdict.rounds !== 1 ? 's' : ''} and still
+        They were re-asked {rounds} time{rounds !== 1 ? 's' : ''} and still
         reached different products. Both are shown — pick the one you judge correct.
       </div>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
