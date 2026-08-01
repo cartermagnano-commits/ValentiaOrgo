@@ -90,5 +90,13 @@ check("parse: degenerate output filtered", app._parse_smiles_list("*CCO"), [])
 check("parse: duplicates collapsed", app._parse_smiles_list("CCO\nOCC"), ["CCO"])
 check("parse: honors limit", len(app._parse_smiles_list("CCO\nCC=O\nCCC\nCCCC\nCCCCC", limit=2)), 2)
 
+# ── prose words that happen to be valid diatomic SMILES (round-1 fix) ───────
+check("parse: NO as prose word is not a product",
+      app._parse_smiles_list("I cannot determine this. NO reaction occurs."), [])
+check("parse: CO as prose word is not a product",
+      app._parse_smiles_list("There is CO present in the mixture"), [])
+check("parse: bare CO line is still trusted as methanol",
+      app._parse_smiles_list("CO"), ["CO"])
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

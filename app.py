@@ -457,6 +457,20 @@ async def _llm_complete(system: str, messages: list[dict], max_tokens: int,
 # match ordinary prose words.
 _SMILES_TOKEN = re.compile(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{2,}")
 
+# Evidence that a token scraped out of prose is actually a structure rather
+# than an English word that happens to be valid SMILES. Plain uppercase
+# element-letter words are a real hazard: RDKit will happily canonicalize
+# "CO", "NO", "ON", "SO"/"OS", and "CN" as real diatomic molecules (methanol/
+# CO, nitric oxide, disulfur monoxide, cyanogen radical...), so a reply like
+# "NO reaction occurs" would otherwise leak nitric oxide as a "product". A
+# digit, bracket, or bond/branch character is proof of an actual drawn
+# structure (no English word contains them); a bare run of letters needs
+# enough length instead, since real short fragments like "CO"/"CN" only
+# become trustworthy once they're a clean answer on their own line — see the
+# whole-line branch below, which has no such restriction.
+_SMILES_STRUCTURAL_CHAR = re.compile(r"[0-9\[\]=#()]")
+_TOKEN_FALLBACK_MIN_LEN = 4
+
 
 def _parse_smiles_list(text: str, limit: int = 4) -> list[str]:
     """Extract canonical, plausible product SMILES from a model reply.
@@ -464,6 +478,17 @@ def _parse_smiles_list(text: str, limit: int = 4) -> list[str]:
     The prompt asks for SMILES-only output, but models still wrap replies in
     prose or code fences — so parse defensively: try each line whole first
     (a line IS the answer in the common case), then fall back to tokens.
+
+    The two paths trust their input differently on purpose. A whole line
+    with no embedded whitespace is either the model's entire answer or
+    nothing — there's no surrounding prose to be confused with a structure,
+    so a bare "CO" line is trusted as methanol at any length. A token pulled
+    out of a longer, space-containing line is guesswork by comparison — the
+    regex has no idea whether it split a real SMILES out of prose or just
+    isolated an English word — so it additionally requires either a
+    structural character (digit/bracket/bond/branch) or enough length to
+    make an all-letters false positive implausible (see
+    _SMILES_STRUCTURAL_CHAR above).
     """
     if not text:
         return []
@@ -483,6 +508,9 @@ def _parse_smiles_list(text: str, limit: int = 4) -> list[str]:
             found.append(canon)
             continue
         for token in _SMILES_TOKEN.findall(line):
+            if not (_SMILES_STRUCTURAL_CHAR.search(token)
+                    or len(token) >= _TOKEN_FALLBACK_MIN_LEN):
+                continue
             canon = _canonical_smiles(token)
             if canon:
                 found.append(canon)
