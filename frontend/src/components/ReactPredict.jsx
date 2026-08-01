@@ -129,6 +129,16 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
     setError(null)
     setResult(null)
     setVerdict(null)
+    setVerifying(false)
+    // Invariant: every new upload bumps assessSeq, invalidating any
+    // in-flight assess response from a prior upload — regardless of whether
+    // *this* upload ends up firing its own assess call. Without this
+    // unconditional bump, an upload whose recognition doesn't yield both
+    // substrate and reagent (so the assess block below never fires) would
+    // leave assessSeq unchanged, letting a still-in-flight response from the
+    // previous upload sail through the `assessSeq.current === seq` check
+    // below and render its verdict against the wrong image's result.
+    const uploadSeq = ++assessSeq.current
     setPreview(prev => {
       if (prev) URL.revokeObjectURL(prev)
       return URL.createObjectURL(file)
@@ -150,7 +160,7 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
       // Recognition and the template engine have both run; ask the AI to
       // assess the same reaction independently.
       if (data.substrate_smiles && data.reagent_smiles) {
-        const seq = ++assessSeq.current
+        const seq = uploadSeq
         setVerifying(true)
         assessReaction(data.substrate_smiles, data.reagent_smiles,
                        data.products?.map(p => p.smiles) ?? [])
@@ -198,6 +208,10 @@ export default function ReactPredict({ initialResult, onSave } = {}) {
     setResult(null)
     setError(null)
     setVerdict(null)
+    setVerifying(false)
+    // Same invariant as in handleFile: clearing the result invalidates any
+    // assess call still in flight so it can't resurrect a verdict later.
+    assessSeq.current++
     setPreview(prev => {
       if (prev) URL.revokeObjectURL(prev)
       return null
