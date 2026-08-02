@@ -157,11 +157,14 @@ export async function streamStereo(branch, substrateSMILES, onDelta) {
   }, onDelta)
 }
 
+// useEngine=false asks the backend to skip the deterministic engine for this
+// turn: no app tools, and no OSR/template run on an attached image.
 export async function streamChat(messages, context, onDelta, model = null,
-                                 surface = null, onToolEvent = null) {
+                                 surface = null, onToolEvent = null,
+                                 useEngine = true) {
   return streamSSE(
     '/chat',
-    { messages, context, engine: getEnginePayload(model), surface },
+    { messages, context, engine: getEnginePayload(model), surface, use_engine: useEngine },
     onDelta,
     onToolEvent,
   )

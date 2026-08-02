@@ -187,7 +187,19 @@ def _anthropic_vision_call(img_bytes: bytes, prompt: str) -> str | None:
             timeout=VISION_TIMEOUT,
         )
         resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"].strip()
+        choice = resp.json()["choices"][0]
+        # A gateway content filter returns HTTP 200 with content=null and
+        # finish_reason="content_filter" — without this branch that surfaced as
+        # an opaque AttributeError and the whole OSR path failed silently.
+        if choice.get("finish_reason") == "content_filter" or choice["message"].get("content") is None:
+            logger.warning(
+                "Claude vision blocked by gateway content filter (%s): %s — "
+                "the prompt wording likely tripped it; see the note in _vision_smiles.",
+                choice.get("finish_reason"),
+                choice["message"].get("refusal") or "no detail",
+            )
+            return None
+        text = choice["message"]["content"].strip()
         logger.info("Claude vision raw response: %r", text[:300])
     except Exception as exc:
         logger.warning("Claude vision error (%s): %s", type(exc).__name__, exc)
@@ -252,15 +264,17 @@ def _vision_smiles(img_bytes: bytes) -> str | None:
     """
     return _vision_call(
         img_bytes,
-        "You are an expert chemist. The image shows chemical structures, possibly alongside "
-        "reaction notation.\n\n"
-        "Extract SMILES for every actual chemical molecule present. Ignore:\n"
+        # Wording is load-bearing: the Parley gateway content-filters persona
+        # assignments ("You are an expert chemist") and output-suppression
+        # directives ("Output ONLY ... no prose, no markdown"), returning
+        # finish_reason=content_filter. Re-test against Parley before editing.
+        "The image shows chemical structures, possibly alongside reaction notation.\n\n"
+        "Report the SMILES for every actual chemical molecule present, separating "
+        "molecules with a period (.). Leave out:\n"
         "  - Reaction arrows (→, ->, ⟶, curved electron-flow arrows)\n"
         "  - Question marks (?) indicating unknown products\n"
-        "  - Plus signs (+) as separators — use a period (.) instead\n"
-        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures\n\n"
-        "Output ONLY the SMILES string. Separate multiple molecules with '.'. "
-        "No explanation, no prose, no markdown.",
+        "  - Plus signs (+) used as separators\n"
+        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures",
     )
 
 
@@ -273,19 +287,17 @@ def _vision_reaction_smiles(img_bytes: bytes) -> str | None:
     """
     return _vision_call(
         img_bytes,
-        "You are an expert organic chemist reading a reaction problem image.\n\n"
-        "The image shows a chemical reaction: starting material(s) on the LEFT of a reaction "
+        # See the wording note in _vision_smiles. A bulleted exclusion list trips
+        # the Parley filter here (it does not in _vision_smiles), so the
+        # exclusions are prose. Re-test against Parley before editing.
+        "The image shows a chemical reaction: starting material(s) on the left of a reaction "
         "arrow, possibly reagents written above or below the arrow, and a product or question "
-        "mark (?) on the RIGHT.\n\n"
-        "Output ONLY the SMILES of the INPUT molecules — starting materials and reagents that "
-        "go INTO the reaction. Do NOT output the product or question mark.\n\n"
-        "Ignore completely:\n"
-        "  - Reaction arrows (→, ->, ⟶) and curved electron-flow arrows\n"
-        "  - Question marks (?) — these are the unknown product, not an input\n"
-        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures\n"
-        "  - Plus signs (+) as separators — use a period (.) instead\n\n"
-        "Output ONLY a SMILES string — no prose, no labels, no markdown. "
-        "Separate multiple input molecules with a period (.).",
+        "mark (?) on the right.\n\n"
+        "Report the SMILES for the input molecules — the starting materials and reagents that "
+        "go into the reaction — separating molecules with a period (.). Leave out the product "
+        "and the question mark, along with reaction arrows, curved electron-flow arrows, plus "
+        "signs used as separators, and text annotations such as 'heat', 'Δ', 'hν', solvent "
+        "names and temperatures.",
     )
 
 
@@ -401,6 +413,15 @@ async def _anthropic_complete(system: str, user: str, max_tokens: int,
         system=system,
         messages=[{"role": "user", "content": user}],
     )
+    # A refusal is a successful HTTP 200 whose text is a canned decline string,
+    # which _parse_json_object would silently reject as unparseable. Log it so
+    # the cause is visible — on the Parley gateway this is usually the prompt
+    # wording tripping its content filter, not the chemistry.
+    if resp.stop_reason == "refusal":
+        logger.warning("Anthropic/gateway refused the request (stop_details=%s) — "
+                       "check the prompt wording; see the note in _blind_guess_prompts.",
+                       getattr(resp, "stop_details", None))
+        return ""
     return resp.content[0].text if resp.content else ""
 
 
@@ -890,11 +911,14 @@ def _blind_guess_prompts(substrate_smiles: str, reagent_smiles: str) -> tuple[st
         "Give your own single best-guess prediction of the major organic "
         "product, the way a careful organic chemistry student would attempt "
         "it by hand.\n\n"
-        "HARD RULES:\n"
+        # Phrasing note: the MIT Parley gateway runs an input content filter that
+        # rejects output-suppression directives ("respond with ONLY", "no prose
+        # outside the JSON") with finish_reason=content_filter. Keep format
+        # requests permissive — _parse_json_object already strips code fences.
+        "GUIDELINES:\n"
         "- You are shown NO verified ground truth here. This is a genuine, "
         "unverified guess and must be labeled as such.\n"
-        "- Respond with ONLY a single JSON object — no markdown fences, no "
-        "prose outside the JSON.\n"
+        "- Format your answer as a JSON object with the shape below.\n"
         "- JSON shape exactly: "
         '{"product_smiles": "<valid SMILES of the major product, or "" if '
         'you cannot determine one>", "reaction_name": "<short mechanism name '
@@ -909,7 +933,7 @@ def _blind_guess_prompts(substrate_smiles: str, reagent_smiles: str) -> tuple[st
         "Predict the major organic product for this reaction.\n\n"
         f"Substrate (SMILES): {substrate_smiles}\n"
         f"Reagent(s) (SMILES): {reagent_smiles}\n\n"
-        "Respond with the JSON object only."
+        "Answer as a JSON object."
     )
     return system, user
 
@@ -922,16 +946,17 @@ def _sanity_check_prompts(substrate_smiles: str, reagent_smiles: str,
         "the product(s) below — this connectivity is confirmed correct by "
         "the template match and MUST NOT be second-guessed, relabeled, or "
         "revised.\n\n"
-        "Your ONLY job is to skim for something that would look genuinely "
+        "Your job is only to skim for something that would look genuinely "
         "surprising or worth a caveat to an organic chemistry instructor "
         "(e.g. an unusual reagent/substrate pairing for the matched reaction "
         "class, a stereochemistry/regiochemistry caveat worth noting, a "
         "safety or side-reaction note). This is a purely advisory pass.\n\n"
-        "HARD RULES:\n"
+        # See the phrasing note in _blind_guess_prompts — the Parley gateway
+        # content-filters output-suppression directives.
+        "GUIDELINES:\n"
         "- Do not propose an alternative product. Do not contradict the "
         "given product.\n"
-        "- Respond with ONLY a single JSON object — no markdown fences, no "
-        "prose outside the JSON.\n"
+        "- Format your answer as a JSON object with the shape below.\n"
         "- JSON shape exactly: "
         '{"flagged": true | false, "note": "<one short sentence, under 160 '
         'characters, only when flagged is true, else empty string>"}\n'
@@ -945,8 +970,7 @@ def _sanity_check_prompts(substrate_smiles: str, reagent_smiles: str,
         f"Substrate: {substrate_smiles}\n"
         f"Reagent(s): {reagent_smiles}\n"
         f"Engine product(s):\n{product_lines}\n\n"
-        "Is anything here worth flagging to a student? Respond with the "
-        "JSON object only."
+        "Is anything here worth flagging to a student? Answer as a JSON object."
     )
     return system, user
 
@@ -2575,6 +2599,68 @@ class ChatRequest(BaseModel):
     context: Optional[dict] = None
     engine: Optional[EngineConfig] = None  # generative engine selection (Choose Your Engine)
     surface: Optional[str] = None          # "synthesis" | "reaction" | "chat" — enables app tools
+    # False = answer straight from the model: no app tools, and no OSR/template
+    # run on an attached image. The escape hatch for when OSR misreads the
+    # picture and the deterministic path is getting in the way of the question.
+    use_engine: bool = True
+
+
+def _reaction_ground_text(result: dict) -> str:
+    """Grounding block appended to the chat system prompt when the engine ran on
+    an attached reaction image — the LLM must explain this verified result, not
+    re-derive it."""
+    products = result.get("products") or []
+    lines = [
+        "\n--- ENGINE-VERIFIED REACTION (read from the attached image; never contradict) ---",
+        f"Substrate: {result.get('substrate_smiles', '')}",
+        f"Reagent: {result.get('reagent_smiles', '')}",
+    ]
+    if products:
+        lines.append("Verified products:")
+        for p in products[:4]:
+            lines.append(f"  - {p.get('reaction_name', '')}: {p.get('smiles', '')}")
+    else:
+        lines.append(
+            "The verified engine found no matching template for this pair. Say so "
+            "plainly; any product you propose is an unverified general-chemistry guess."
+        )
+    return "\n".join(lines)
+
+
+async def _image_reaction_then_explain(system: str, messages: list[dict],
+                                       engine: Optional[EngineConfig]):
+    """Image-bearing chats can't use the native tool path (the gateway drops
+    image blocks on the tools endpoint). So run OSR + the deterministic engine
+    on the newest attached image ourselves, emit a `reaction_result` frame — the
+    same one the run_reaction tool emits, so the UI renders its banner/card —
+    then stream a grounded explanation that still carries the image."""
+    newest_image: str | None = None
+    for message in reversed(messages):
+        images = message.get("images") or []
+        if images:
+            newest_image = images[-1].get("data")
+            break
+
+    ground = ""
+    if newest_image:
+        result = None
+        try:
+            raw = base64.b64decode(newest_image)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(_executor, _react_from_image, raw)
+        except Exception as exc:
+            logger.warning("chat image-reaction OSR failed (%s): %s",
+                           type(exc).__name__, exc)
+        if (result and not result.get("error")
+                and result.get("substrate_smiles") and result.get("reagent_smiles")):
+            if not result.get("products"):
+                _record_template_gap("chat_image", result["substrate_smiles"],
+                                     result["reagent_smiles"], [])
+            yield f"data: {json.dumps({'tool_event': {'type': 'reaction_result', 'data': result}})}\n\n"
+            ground = _reaction_ground_text(result)
+
+    async for frame in _sse_stream(system + ground, messages, 800, engine):
+        yield frame
 
 
 @app.post("/chat")
@@ -2624,13 +2710,26 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
     # never both.
     has_images = any(m.get("images") for m in messages)
     mode = (req.engine.mode if req.engine else "hosted") or "hosted"
-    if (req.surface and not has_images and mode == "hosted"
+    # use_engine=False drops both engine paths below (tools and image-OSR) to the
+    # plain streaming branch — a direct model answer with no deterministic run.
+    surface_runs_reactions = (
+        req.use_engine
+        and bool(req.surface)
+        and "run_reaction" in (_SURFACE_TOOLS.get(req.surface) or [])
+    )
+
+    if (surface_runs_reactions and not has_images and mode == "hosted"
             and os.environ.get("ANTHROPIC_API_KEY")):
         _record_usage("hosted", "anthropic")
         stream = _with_error_frames(_stream_anthropic_tools(
             system_prompt + _CHAT_TOOLS_SYSTEM, messages, 800,
             req.surface, model=req.engine.model if req.engine else None,
         ))
+    elif surface_runs_reactions and has_images:
+        # Image chats bypass the native tool path — run the engine on the image
+        # ourselves so the reaction still surfaces (banner/card + grounding).
+        stream = _with_error_frames(
+            _image_reaction_then_explain(system_prompt, messages, req.engine))
     else:
         stream = _sse_stream(system_prompt, messages, 800, req.engine)
 
@@ -2901,14 +3000,26 @@ def _react_from_image(raw_bytes: bytes) -> dict:
 
     frags = Chem.GetMolFrags(raw_mol, asMols=True)
 
-    # Detect suspicious DECIMER output: non-organic elements (e.g. [U] = uranium, a
-    # common DECIMER artefact when it misreads image noise) or excessive fragment count.
-    _NON_ORGANIC = {"U", "Tc", "Re", "Os", "Ir", "Rh", "Ru", "Pd", "Pt", "Au", "Hg"}
+    # Detect suspicious DECIMER output: implausible elements or excessive fragment
+    # count. This is an allowlist rather than a denylist of exotic elements: DECIMER
+    # invents whatever two-letter symbol fits the pixels, and the failure that
+    # motivated this — "SOCl2" written over the arrow read back as [CH3][Sb](Cl)Cl,
+    # antimony — is exactly the case a hand-written denylist keeps missing. Anything
+    # outside the set an undergraduate depiction can actually contain is treated as a
+    # misread. Reagents that only ever appear as text over the arrow (OsO4, Pd/C,
+    # KMnO4, PCC) are deliberately absent: seeing them as *drawn atoms* means the
+    # label was misparsed. A false positive here costs one extra vision call and
+    # nothing else — the re-read only replaces the SMILES if it yields >= 2 fragments.
+    _PLAUSIBLE_ATOMS = {
+        "C", "H", "N", "O", "S", "P", "F", "Cl", "Br", "I",   # organic core
+        "B", "Si",                                            # boranes, silyl groups
+        "Li", "Na", "K", "Mg", "Ca", "Al", "Zn", "Cu", "Fe",  # counterions / Grignards
+    }
     _atom_syms = {a.GetSymbol() for a in raw_mol.GetAtoms()}
-    _bad_atoms = _atom_syms & _NON_ORGANIC
+    _bad_atoms = _atom_syms - _PLAUSIBLE_ATOMS
     if len(frags) > 5 or _bad_atoms:
         logger.info(
-            "Suspicious DECIMER output (%d frags, non-organic atoms=%s, smiles=%r) — calling vision",
+            "Suspicious DECIMER output (%d frags, implausible atoms=%s, smiles=%r) — calling vision",
             len(frags), _bad_atoms or "none", recognized_smiles,
         )
         fix = _vision_reaction_smiles(_img_bytes)

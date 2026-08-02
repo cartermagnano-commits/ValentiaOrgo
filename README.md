@@ -5,31 +5,39 @@ interactive branching reaction pathways with mechanism explanations powered by C
 
 ## Architecture
 
-Two processes: a **Next.js web app** (port 3000, the UI + Supabase auth/projects)
-and a **FastAPI backend** (port 8000, the chemistry API). Next.js proxies the API
-routes to FastAPI via rewrites in `frontend/next.config.mjs`.
+Two processes: a **Next.js web app** (port 3000, the UI) and a **FastAPI backend**
+(port 8000, the chemistry API). Next.js proxies the API routes to FastAPI via rewrites
+in `frontend/next.config.mjs`.
 
 ```
 Next.js app (port 3000)  ──proxy──►  FastAPI API (port 8000)
-    login / dashboard / projects        ├── POST /analyze   → image → SMILES (DECIMER OSR + round-trip verify)
-    per-file chemistry tools            ├── GET  /structure → SMILES → SVG (RDKit)
-                                        ├── POST /pathways  → branching graph (deterministic engine)
+    single-page workspace               ├── POST /analyze   → image → SMILES (DECIMER/MolScribe OSR + round-trip verify)
+    Synthesis / Reaction / Chat         ├── GET  /structure → SMILES → SVG (RDKit)
+    localStorage sessions & projects    ├── POST /pathways  → branching graph (deterministic engine)
                                         ├── POST /react     → substrate + reagent → products
                                         ├── POST /explain   → engine output → prose explanation (LLM)
                                         ├── POST /stereo    → stereo/regiochem annotation (LLM, opt-in)
-                                        ├── POST /assist    → grounded help for note/mechanism/retro files (LLM)
-                                        └── POST /chat       → chatbot grounded in current pathway (LLM)
+                                        ├── POST /assist    → grounded help for a synthesis file (LLM)
+                                        └── POST /chat       → chatbot grounded in current work (LLM, tool-use)
 
 Ground truth layer (deterministic):
-    reactivity_engine.py   — RDKit-based reaction engine (template-driven)
+    reactivity_engine.py    — RDKit-based reaction engine (template-driven)
     reaction_templates.json — all reaction SMARTS + names (the only place chemistry lives)
 
-Explanation layer (LLM) — "Choose Your Engine" (Settings → Engine):
-    Local (Ollama)  — free, keyless, runs on the user's machine
-    BYOK            — user's own Anthropic/OpenAI key, sent per-request, never stored
-    Hosted          — server-side key (billing deferred)
+Explanation layer (LLM) — hosted only:
+    Every generative call (explain / stereo / assist / chat) runs on the server-side
+    key configured in the backend .env. There is nothing for the user to configure.
+    The chat composer offers a per-prompt strength pick (Haiku / Sonnet / Opus).
     The LLM explains engine output; it never re-derives chemistry or names reactions.
 ```
+
+The web app has **no accounts and no cloud**: your work (sessions, and the projects
+that group them) is saved in the browser's `localStorage`. Nothing to set up, nothing
+to log into.
+
+> The backend still *contains* optional Supabase-token auth and Ollama/BYOK engine
+> machinery for self-hosted deployments (see "Production mode"), but the shipped
+> web app does not exercise them — it is keyless and hosted-only.
 
 ## Requirements
 
@@ -54,10 +62,11 @@ lock file instead:
 pip install -r requirements.lock
 ```
 
-### 2. API key (required for AI explanations and chatbot)
+### 2. API key (required for AI explanations, stereo notes, and chat)
 
-The AI explanation panel and chatbot use the Claude API, which is a **paid service**.
-The graph, structure recognition, and deterministic reaction engine work without a key.
+The generative features (explanation panel, stereochemistry notes, and chat) run on
+the **server-side** Claude key. Structure recognition and the deterministic reaction
+engine work without any key.
 
 **Steps:**
 
@@ -70,19 +79,19 @@ The graph, structure recognition, and deterministic reaction engine work without
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 ```
 
+To route through a gateway instead (e.g. an MIT Parley key, `sk-parley-v1-...`), set
+`ANTHROPIC_BASE_URL` as well — see `.env.example` for all optional overrides
+(`HOSTED_ANTHROPIC_MODEL` for chat/explanations, `ANTHROPIC_VISION_MODEL` for
+structure recognition).
+
 > **Never commit `.env`** — it is listed in `.gitignore`. If you accidentally expose a key,
 > rotate it immediately in the Anthropic console.
 
-Without a key the app still works: the explanation box will show a message explaining
-that the key is missing instead of crashing.
+Without a key the app still works: structure recognition, the pathway graph, and the
+reaction engine run as usual; only the generative text panels report that the key is
+missing instead of crashing.
 
-### 3. Supabase (auth + saved projects)
-
-The web app uses Supabase for login and saving projects/files. See
-[`SUPABASE_SETUP.md`](SUPABASE_SETUP.md): create a project, run `supabase/schema.sql`,
-and add `frontend/.env.local` with your project URL + anon key.
-
-### 4. Run
+### 3. Run
 
 ```bat
 start.bat
@@ -91,11 +100,11 @@ start.bat
 This installs frontend deps (first run), starts the **FastAPI backend on :8000**
 in its own window, and runs the **Next.js web app on :3000** in the current window.
 
-Open **http://localhost:3000** on your computer or  
+Open **http://localhost:3000** on your computer or
 **http://\<your-LAN-IP\>:3000** on an iPhone on the same Wi-Fi.
 
-Pick your generative-AI engine under **Settings → Engine** (the "Engine" button in
-the top bar). Structure recognition and the reaction engine work with no key at all.
+There is nothing to configure in the UI — pick a model strength per message in the chat
+composer if you like; structure recognition and the reaction engine need no key at all.
 
 ### Development mode
 
@@ -122,19 +131,19 @@ it does), which sets `ORGO_ENV=prod` and changes the contract:
 
 - The backend **refuses to start** unless it can verify Supabase login tokens.
   Set one (or both) of:
-  - `SUPABASE_URL` — your project URL (same value as the frontend's
-    `NEXT_PUBLIC_SUPABASE_URL`). Tokens are verified against the project's
+  - `SUPABASE_URL` — your project URL. Tokens are verified against the project's
     public JWKS endpoint. This is what you want for projects created after
     May 2025, which sign tokens with asymmetric keys (RS256/ES256/EdDSA).
   - `SUPABASE_JWT_SECRET` — the legacy HS256 shared secret (Supabase → Project
     Settings → API → JWT secret), for older projects that haven't migrated.
 
-  With auth enabled, every compute and AI endpoint requires a valid Supabase
-  login token; the frontend already attaches it to all API calls.
+  With auth enabled, every compute and AI endpoint requires a valid Supabase login
+  token. **The shipped web app does not send one** (it has no login flow), so
+  enabling prod auth requires wiring a Supabase session and attaching its bearer
+  token to the API calls in `frontend/src/api.js` — treat prod auth as a
+  self-hosting integration point, not a turnkey feature.
 - Hosted engine mode (server-side LLM key) is metered per user:
   `HOSTED_DAILY_REQUESTS` requests per day (default 200), 429 beyond that.
-  Local (Ollama) and BYOK modes are unmetered — they spend the user's own
-  resources.
 
 ```bat
 :: Windows — builds the frontend, then starts uvicorn on 127.0.0.1:8000 and
@@ -168,18 +177,25 @@ and expose no user data.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/analyze` | Upload image → `{smiles, valid, verified, confidence, stages}` |
+| GET  | `/analyze/verify/{token}` | Finish deferred round-trip verification for an `/analyze` result |
 | POST | `/react` | `{substrate_smiles, reagent_smiles}` → all products |
 | POST | `/react-from-image` | Image → recognized reaction → products |
 | GET  | `/structure` | `?smiles=&width=&height=` → SVG |
+| GET  | `/molfile` | `?smiles=` → MDL molfile |
 | POST | `/pathways` | `{start_smiles[], target_smiles?, desired_depth?}` → graph |
 | POST | `/explain` | Engine output → LLM prose explanation (streamed) |
 | POST | `/stereo` | Engine product → stereo/regiochem annotation (streamed, opt-in) |
-| POST | `/assist` | File content → grounded LLM help for note/mechanism/retro files |
-| POST | `/chat` | Conversational chatbot with reaction context (streamed) |
-| GET  | `/engine/ollama-status` | Live probe for the Local (Ollama) engine option |
+| POST | `/assist` | File content → grounded LLM help for a synthesis file |
+| POST | `/chat` | Conversational chatbot with reaction context and engine tool-use (streamed). `use_engine: false` answers straight from the model — no tools, no OSR on attached images |
+| GET  | `/health` | Liveness probe |
+| GET  | `/engine/ollama-status` | Live probe for a self-hosted Ollama engine (unused by the shipped UI) |
+| GET  | `/engine/usage` | Per-mode request counters |
+| GET  | `/engine/template-gaps` | Substrate/reagent pairs where no template fired |
 
 Streaming endpoints accept an optional `engine` object (`{mode, provider, model, api_key}`)
-selecting the generative provider. `api_key` (BYOK) is used per-request and never stored or logged.
+selecting the generative provider. The shipped UI always sends
+`{mode:'hosted', provider:'anthropic', model?}`; `api_key` (BYOK) is supported by the
+backend for self-hosting and, if sent, is used per-request and never stored or logged.
 
 ## Adding reagents
 
@@ -193,6 +209,7 @@ python test_templates.py      # template regression suite — run before committ
                               # changes to reaction_templates.json, reagents.py,
                               # or reactivity_engine.py
 python diagnose_templates.py  # firing matrix + dead-template report (real engine)
+python test_osr.py            # OSR recognition / arbitration tests
 ```
 
 Reaction names come from the template that fired (`name` in
@@ -206,38 +223,47 @@ Orgo AI/
 ├── reactivity_engine.py    ← deterministic reaction engine (do not modify)
 ├── reaction_templates.json ← all reaction SMARTS (the only place chemistry lives)
 ├── reagents.py             ← reagent catalog (name, SMILES, condition tags)
+├── osr_arbitration.py      ← picks the best SMILES across OSR reads (+ optional vision)
 ├── preprocessing.py        ← OpenCV image pipeline (do not modify)
 ├── test_templates.py       ← template regression suite (run before template edits)
 ├── diagnose_templates.py   ← firing matrix / dead-template diagnostic
+├── test_osr.py             ← OSR / arbitration tests
 ├── requirements.txt
-├── .env.example            ← optional: ANTHROPIC_API_KEY / OPENAI_API_KEY for Hosted mode
+├── .env.example            ← server-side keys + optional prod/auth and engine overrides
 ├── start.bat               ← starts FastAPI (:8000) + Next.js (:3000) for dev
 ├── start-prod.bat          ← production launcher (see "Production mode")
-├── supabase/schema.sql     ← projects, chemistry_files, user_settings + RLS
+├── supabase/schema.sql     ← optional Supabase schema for self-hosted prod auth
 └── frontend/               ← Next.js app (App Router, TypeScript)
-    ├── app/                 ← routes: /login /signup /dashboard /projects/[id] /settings
-    ├── lib/                 ← supabaseClient, database, engine (Choose Your Engine)
+    ├── app/                 ← single route: page.tsx → the Workspace
+    ├── lib/                 ← sessions (localStorage store), engine (hosted payload),
+    │                          exports, clipboard
     └── src/
-        ├── api.js           ← calls the FastAPI backend (attaches engine config)
-        ├── platform/        ← DashboardPage, ProjectPage, FileEditor, EngineSettings
-        └── components/      ← PathwayExplorer, DirectReact, ReactPredict, InfoPanel,
-                               PathwayGraph, MoleculeInput, Chatbot, StructureView
+        ├── api.js           ← calls the FastAPI backend (attaches the engine config)
+        ├── platform/        ← Workspace, ChatPanel, Toast, banners
+        └── components/      ← PathwayExplorer, PathwayGraph, StructureView,
+                               MoleculeInput, InfoPanel, MolDrawer
 ```
+
+The Workspace has three tools — **Synthesis** (reagent routes from a starting
+molecule), **Reaction** (a chat surface that predicts products from typed molecules or
+a photographed reaction), and **Chat** — plus a **Projects** view that groups sessions.
+All state lives in `localStorage` via `frontend/lib/sessions.ts`.
 
 ## Manual test flow
 
 1. Start both servers: `start.bat`
-2. Open http://localhost:3000 and sign up / log in
-3. (Optional) **Settings → Engine**: pick Local (Ollama) or paste your own key (BYOK)
-4. Create a project, then a **Synthesis** file
-5. In **Starting Material**: upload a photo of a ketone (e.g., 2-pentanone) or type `CC(=O)CCC`
-6. Click **Analyze Pathways**; click a node or branch to see the reaction + streamed explanation
-7. Click **Analyze stereochemistry** for the stereo/regiochem note
-8. Try a **Mechanism** or **Molecule note** file — the AI button streams grounded help
+2. Open http://localhost:3000 (no login — the app opens ready to use)
+3. Click **Synthesis**
+4. In **Starting Material**: upload a photo of a ketone (e.g., 2-pentanone) or type `CC(=O)CCC`
+5. Click **Analyze Pathways**; click a node or branch to see the reaction + streamed explanation
+6. Click **Analyze stereochemistry** for the stereo/regiochem note
+7. Open the **Assistant** drawer to ask about the route, set your stockroom, or run pathways by chat
+8. Try the **Reaction** tool: type "react t-BuBr with NaOH" or photograph a reaction
 
 ## Design constraints
 
 - The LLM **never names reactions or asserts connectivity** — that is always the
   deterministic template engine. The LLM only explains and annotates.
 - Every product shown is RDKit-validated before being returned.
-- API keys never leave the server. BYOK keys are used per-request and never stored or logged.
+- API keys never leave the server. BYOK keys (self-hosting only) are used per-request
+  and never stored or logged.

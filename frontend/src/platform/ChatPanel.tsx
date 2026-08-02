@@ -1,11 +1,12 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Camera, FileText, FlaskConical, Network, Paperclip, X } from 'lucide-react'
+import { Camera, FileText, FlaskConical, Network, Paperclip, X, Zap } from 'lucide-react'
 import type { ChatAttachment, ChatContent, ChatMessage, ChatToolResult } from '../types'
-import { STRENGTH } from '../../lib/engine'
+import { STRENGTH, loadPreferredModel, savePreferredModel } from '../../lib/engine'
 import { reactFromImage, streamChat } from '../api'
 import StructureView from '../components/StructureView'
+import ReactionBanner from '../components/ReactionBanner'
 import { useToast } from './Toast'
 
 const MAX_TEXT_FILE_CHARS = 8_000        // per attached text file, keeps the
@@ -96,6 +97,16 @@ function toApiMessages(history: ChatMessage[]) {
   // Newest images win the budget: walk backwards, then restore order.
   const budget = { left: MAX_IMAGES_PER_REQUEST }
   return live.slice().reverse().map(message => toApiMessage(message, budget)).reverse()
+}
+
+// Newest engine reaction across the thread's tool results (for the banner's
+// initial state when a saved reaction session is reopened).
+function findLatestReaction(history: ChatMessage[]): Record<string, unknown> | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const hit = history[i].toolResults?.slice().reverse().find(t => t.type === 'reaction_result')
+    if (hit) return hit.data
+  }
+  return null
 }
 
 // Cards for tools the assistant ran mid-reply: engine reaction results,
@@ -213,28 +224,44 @@ export default function ChatPanel({
 }) {
   const data = content
   const messages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : []
+  // The full-reaction banner shows wherever the engine can run mid-conversation:
+  // the Reaction tab and general Chat (both expose the run_reaction tool).
+  const showReactionBanner = surface === 'reaction' || surface === 'chat'
+  // Every named surface unlocks app tools server-side, so every named surface
+  // has an engine worth bypassing. A surface-less chat already streams straight
+  // from the model and needs no toggle.
+  const canBypassEngine = Boolean(surface)
   const [input, setInput] = useState('')
   const [pending, setPending] = useState<ChatAttachment[]>([])
   const [streaming, setStreaming] = useState(false)
   const [photoReading, setPhotoReading] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
   const [model, setModel] = useState(STRENGTH.anthropic[0].model)
+  // Engine on: the backend may run templates/OSR for this turn and the answer is
+  // grounded in verified output. Engine off ("Direct"): the question goes
+  // straight to the model. Per-turn and never persisted — the deterministic
+  // path is the product, so every new conversation starts back on it.
+  const [useEngine, setUseEngine] = useState(true)
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const photoInputRef = useRef<HTMLInputElement>(null)
   // Most recent engine reaction seen in this conversation (tool call or photo
   // read) — sent as grounding context on follow-up questions.
   const lastReactionRef = useRef<Record<string, unknown> | null>(null)
+  // Same reaction, as render state for the Reaction-tab banner. Seeded from
+  // history so a reopened session shows its last reaction immediately.
+  const [latestReaction, setLatestReaction] = useState<Record<string, unknown> | null>(
+    () => (showReactionBanner ? findLatestReaction(messages) : null),
+  )
   const { notify } = useToast()
 
   useEffect(() => {
-    const saved = window.localStorage.getItem('orgo.chat.model')
-    if (saved && STRENGTH.anthropic.some(s => s.model === saved)) setModel(saved)
+    setModel(loadPreferredModel())
   }, [])
 
   function selectModel(next: string) {
     setModel(next)
-    try { window.localStorage.setItem('orgo.chat.model', next) } catch { /* ignore */ }
+    savePreferredModel(next)
   }
 
   useEffect(() => {
@@ -309,7 +336,12 @@ export default function ChatPanel({
     try {
       await streamChat(
         toApiMessages(history),
-        contextOverride !== undefined ? contextOverride : (context ?? lastReactionRef.current),
+        // Direct mode sends no grounding either: the context block is a previous
+        // engine result, and when that result came from a bad OSR read it is
+        // exactly what the user is trying to get away from.
+        useEngine
+          ? (contextOverride !== undefined ? contextOverride : (context ?? lastReactionRef.current))
+          : null,
         (delta: string) => {
           acc += delta
           onChange(withReply(acc))
@@ -320,12 +352,14 @@ export default function ChatPanel({
           toolResults.push(event)
           if (event.type === 'reaction_result') {
             lastReactionRef.current = reactionContextFrom(event.data)
+            setLatestReaction(event.data)
           }
           if (onUiEvent && (event.type === 'set_stockroom' || event.type === 'pathways_result')) {
             onUiEvent(event)
           }
           onChange(withReply(acc))
         },
+        useEngine,
       )
       if (!acc && !toolResults.length) {
         throw new Error('The AI engine returned no response. Try again in a moment.')
@@ -383,6 +417,7 @@ export default function ChatPanel({
       if (result.error) throw new Error(result.error)
       const reactionContext = reactionContextFrom(result)
       lastReactionRef.current = reactionContext
+      setLatestReaction(result)
       setPhotoReading(false)
       await streamReply(history, [{ type: 'reaction_result', data: result }], reactionContext)
     } catch (err) {
@@ -404,7 +439,7 @@ export default function ChatPanel({
 
   return (
     <div
-      className="claude-chat"
+      className={`claude-chat${messages.length ? '' : ' is-empty'}`}
       onDragEnter={event => { event.preventDefault(); setDragDepth(depth => depth + 1) }}
       onDragLeave={event => { event.preventDefault(); setDragDepth(depth => Math.max(0, depth - 1)) }}
       onDragOver={event => event.preventDefault()}
@@ -416,6 +451,8 @@ export default function ChatPanel({
           Drop files to attach
         </div>
       )}
+
+      {showReactionBanner && <ReactionBanner reaction={latestReaction} />}
 
       <div className="chat-messages chat-messages-full">
         {!messages.length && (
@@ -460,6 +497,12 @@ export default function ChatPanel({
       </div>
 
       <div className="chat-composer">
+        {canBypassEngine && !useEngine && (
+          <div className="chat-direct-notice">
+            Direct — answering from the model alone. No structure recognition, no
+            verified product.
+          </div>
+        )}
         {pending.length > 0 && (
           <div className="chat-attach-row">
             {pending.map((att, index) => (
@@ -496,11 +539,28 @@ export default function ChatPanel({
             <button
               type="button"
               className="chat-attach-button"
-              title="Photograph a reaction — structures are recognized and run through the engine"
+              title={useEngine
+                ? 'Photograph a reaction — structures are recognized and run through the engine'
+                : 'Photo reading needs the engine — switch off Direct to use it'}
               aria-label="Upload reaction photo"
+              disabled={!useEngine}
               onClick={() => photoInputRef.current?.click()}
             >
               <Camera size={16} />
+            </button>
+          )}
+          {canBypassEngine && (
+            <button
+              type="button"
+              className={`chat-attach-button chat-direct-toggle${useEngine ? '' : ' is-active'}`}
+              title={useEngine
+                ? 'Engine on — verified templates run first, answers stay grounded in them. Click to ask the model directly instead.'
+                : 'Direct — this question goes straight to the model: no structure recognition, no templates, no verified product. Click to turn the engine back on.'}
+              aria-label="Ask the model directly, bypassing the engine"
+              aria-pressed={!useEngine}
+              onClick={() => setUseEngine(prev => !prev)}
+            >
+              <Zap size={16} />
             </button>
           )}
           <textarea

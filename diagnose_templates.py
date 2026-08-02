@@ -36,6 +36,25 @@ DEFAULT_TEMPLATE_FILE = Path(__file__).parent / "reaction_templates.json"
 # Sample substrates covering the functional groups the template set targets.
 # Extend this list when adding templates for a new substrate class.
 DEFAULT_SUBSTRATES = [
+    # Batch 1 curriculum expansion — nitriles, acid derivatives, oxidation
+    # ladder, alkenes/alkynes and arenes. Without these the batch-1 templates
+    # report DEAD purely for lack of a matching substrate class.
+    "N#Cc1ccccc1",      # benzonitrile (nitrile)
+    "CC#N",             # acetonitrile
+    "NC(=O)c1ccccc1",   # benzamide (primary amide)
+    "OC(=O)c1ccccc1",   # benzoic acid
+    "CC(=O)Cl",         # acetyl chloride
+    "CCOC(=O)c1ccccc1", # ethyl benzoate (ester)
+    "CCO",              # ethanol (primary alcohol)
+    "CC(C)O",           # isopropanol (secondary alcohol)
+    "CCC=O",            # propanal
+    "C=CC",             # propene
+    "C#CC",             # propyne
+    "c1ccccc1",         # benzene
+    "[O-][N+](=O)c1ccccc1",  # nitrobenzene
+    "CCN=C(C)C",        # an imine (for imine hydrolysis)
+    "CO",               # methanol (acetal / esterification partner)
+
     "CC(=O)CCBr",       # 4-bromobutan-2-one (ketone + alkyl bromide)
     "CCBr",             # ethyl bromide
     "CCC(C)Br",         # 2-bromobutane (secondary halide — E2/SN2)

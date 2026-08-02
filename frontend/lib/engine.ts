@@ -27,6 +27,23 @@ export const STRENGTH: { anthropic: StrengthStop[] } = {
   ],
 }
 
+// The composer's model pick is remembered across sessions, and Settings edits
+// the same preference — both go through here so the key stays in one place.
+const MODEL_KEY = 'orgo.chat.model'
+
+export function loadPreferredModel(): string {
+  if (typeof window === 'undefined') return STRENGTH.anthropic[0].model
+  try {
+    const saved = window.localStorage.getItem(MODEL_KEY)
+    if (saved && STRENGTH.anthropic.some(s => s.model === saved)) return saved
+  } catch { /* fall through to the default */ }
+  return STRENGTH.anthropic[0].model
+}
+
+export function savePreferredModel(model: string): void {
+  try { window.localStorage.setItem(MODEL_KEY, model) } catch { /* preference is best-effort */ }
+}
+
 // The object attached to /explain, /stereo, and /chat request bodies.
 // Without a model the server's HOSTED_ANTHROPIC_MODEL decides what runs.
 export function getEnginePayload(modelOverride?: string | null): EnginePayload {

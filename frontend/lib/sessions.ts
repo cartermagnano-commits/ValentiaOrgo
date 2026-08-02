@@ -17,11 +17,15 @@ export type Session = {
 export type Project = {
   id: string
   name: string
+  /** Free-text "what this project is about" shown on the project card. */
+  description?: string
   createdAt: string
+  updatedAt: string
 }
 
 const STORE_KEY = 'orgo.sessions.v1'
 const PROJECTS_KEY = 'orgo.projects.v1'
+const UI_STATE_KEY = 'orgo.ui.v1'
 
 export function makeInitialContent(tool: Tool): SessionContent {
   if (tool === 'synthesis') return { targetMolecule: '', startingMaterials: [], pathwaysData: null }
@@ -71,7 +75,9 @@ export function loadSessions(): Session[] {
     const raw = window.localStorage.getItem(STORE_KEY)
     const parsed = raw ? JSON.parse(raw) : []
     if (!Array.isArray(parsed)) return []
-    return parsed
+    // Newest first: every list in the app (recents, Chats, a project's page)
+    // groups by day, so an out-of-order store would show days out of order.
+    return parsed.sort((a: Session, b: Session) => b.updatedAt.localeCompare(a.updatedAt))
   } catch {
     return []
   }
@@ -106,6 +112,16 @@ export function deleteSession(id: string): void {
   persist(loadSessions().filter(s => s.id !== id))
 }
 
+// Settings' "delete everything" — the local store is the only copy, so this is
+// destructive and the caller must confirm first.
+export function clearAll(): void {
+  try {
+    window.localStorage.removeItem(STORE_KEY)
+    window.localStorage.removeItem(PROJECTS_KEY)
+    window.localStorage.removeItem(UI_STATE_KEY)
+  } catch { /* nothing else to do if storage is unavailable */ }
+}
+
 function makeId(prefix: string): string {
   return typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
@@ -125,6 +141,50 @@ export function createSession(tool: Tool, projectId?: string | null): Session {
   }
 }
 
+// ── UI state: what the user was looking at, so a refresh doesn't lose it ─────
+
+// Which page the shell is showing. 'tool' is the workspace itself (a chat,
+// reaction or synthesis session); the rest are nav-rail destinations.
+export type View = 'tool' | 'chats' | 'projects' | 'project' | 'settings'
+
+export type UiState = {
+  sessionId: string | null
+  tool: Tool
+  view: View
+  projectId: string | null
+  /** Whether the recents panel next to the rail is pinned open. */
+  sidebarOpen?: boolean
+}
+
+const TOOLS: Tool[] = ['synthesis', 'direct_reaction', 'chat']
+const VIEWS: View[] = ['tool', 'chats', 'projects', 'project', 'settings']
+
+export function loadUiState(): UiState | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(UI_STATE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<UiState>
+    // Anything unrecognised falls back to the old default (a fresh chat).
+    if (!parsed || typeof parsed !== 'object') return null
+    return {
+      sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : null,
+      tool: TOOLS.includes(parsed.tool as Tool) ? (parsed.tool as Tool) : 'chat',
+      view: VIEWS.includes(parsed.view as View) ? (parsed.view as View) : 'tool',
+      projectId: typeof parsed.projectId === 'string' ? parsed.projectId : null,
+      sidebarOpen: parsed.sidebarOpen === true,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function saveUiState(state: UiState): void {
+  try {
+    window.localStorage.setItem(UI_STATE_KEY, JSON.stringify(state))
+  } catch { /* the UI state is tiny; a failed write just costs us the restore */ }
+}
+
 // ── Projects: lightweight local grouping for sessions ────────────────────────
 
 export function loadProjects(): Project[] {
@@ -132,7 +192,9 @@ export function loadProjects(): Project[] {
   try {
     const raw = window.localStorage.getItem(PROJECTS_KEY)
     const parsed = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    // Projects written before descriptions/updatedAt existed still load.
+    return parsed.map((p: Project) => ({ ...p, updatedAt: p.updatedAt ?? p.createdAt }))
   } catch {
     return []
   }
@@ -144,10 +206,33 @@ function persistProjects(projects: Project[]): void {
   } catch { /* projects are tiny; a failed write just loses the grouping */ }
 }
 
-export function createProject(name: string): Project {
-  const project: Project = { id: makeId('p'), name: name.trim(), createdAt: new Date().toISOString() }
+export function createProject(name: string, description = ''): Project {
+  const now = new Date().toISOString()
+  const project: Project = {
+    id: makeId('p'),
+    name: name.trim(),
+    description: description.trim(),
+    createdAt: now,
+    updatedAt: now,
+  }
   persistProjects([project, ...loadProjects()])
   return project
+}
+
+// Edits (rename, re-describe) and any activity inside a project bump its
+// updatedAt, which is what the Projects page sorts on by default.
+export function updateProject(id: string, patch: Partial<Pick<Project, 'name' | 'description'>>): Project | null {
+  const projects = loadProjects()
+  const project = projects.find(p => p.id === id)
+  if (!project) return null
+  const updated: Project = {
+    ...project,
+    ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
+    ...(patch.description !== undefined ? { description: patch.description.trim() } : {}),
+    updatedAt: new Date().toISOString(),
+  }
+  persistProjects(projects.map(p => (p.id === id ? updated : p)))
+  return updated
 }
 
 // Deleting a project keeps its sessions — they just return to the ungrouped
