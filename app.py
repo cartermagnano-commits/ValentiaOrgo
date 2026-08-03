@@ -28,6 +28,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -65,11 +66,25 @@ try:
 except ImportError:
     pass
 
+from askcos_client import AskcosClient, AskcosUnavailable
 from osr_arbitration import (
     arbitrate_local, plausible_or_none, resolve_with_vision,
 )
+from prediction import UNNAMED_REACTION, Prediction, resolve_products
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
 from reactivity_engine import TemplateEngine
+
+# ── ASKCOS forward predictor ─────────────────────────────────────────────────
+# None when ASKCOS_BASE_URL is unset, which means "ASKCOS off" — /react then
+# behaves exactly as it did before the integration, on templates alone. Built
+# once at import (after load_dotenv above); the client holds no connection
+# state, so a single instance is safe across threads and requests.
+ASKCOS = AskcosClient.from_env()
+if ASKCOS is not None:
+    logger.info("ASKCOS forward predictor enabled: %s (backend=%s, model=%s)",
+                ASKCOS.base_url, ASKCOS.backend, ASKCOS.model_name)
+else:
+    logger.info("ASKCOS disabled (ASKCOS_BASE_URL unset) — using template engine only")
 
 # ── LLM config — Ollama is used when no Anthropic key is present ─────────────
 OLLAMA_BASE_URL    = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -1041,14 +1056,22 @@ _CHAT_TOOL_DEFS: dict[str, dict] = {
     "run_reaction": {
         "name": "run_reaction",
         "description": (
-            "Run Orgo AI's verified deterministic reaction engine on one "
-            "substrate + one reagent (SMILES). Use this BEFORE answering any "
-            "question about what two specific molecules form. Convert names "
-            "to SMILES yourself, writing ionic reagents in their reactive "
-            "ionic form — sodium ethoxide as CC[O-].[Na+], NaOH as "
-            "[OH-].[Na+], t-BuOK as CC(C)(C)[O-].[K+], LDA as "
-            "CC(C)[N-]C(C)C.[Li+] — never as neutral aggregates like "
-            "CCO.[Na]. Results render as cards in the UI."
+            "Run Orgo AI's reaction engine on one substrate + one reagent "
+            "(SMILES). Use this BEFORE answering any question about what two "
+            "specific molecules form. Convert names to SMILES yourself, "
+            "writing ionic reagents in their reactive ionic form — sodium "
+            "ethoxide as CC[O-].[Na+], NaOH as [OH-].[Na+], t-BuOK as "
+            "CC(C)(C)[O-].[K+], LDA as CC(C)[N-]C(C)C.[Li+] — never as "
+            "neutral aggregates like CCO.[Na]. Results render as cards in "
+            "the UI.\n"
+            "Reading the result: `source` is 'templates' (a curated, "
+            "human-written rule — treat as ground truth) or 'askcos' (an ML "
+            "forward predictor — reliable when `probability` is high). "
+            "`low_confidence: true` means no curated rule corroborates the "
+            "prediction and the model itself is unsure — say so plainly "
+            "rather than presenting it as settled. A reaction_name of "
+            "'Predicted (unnamed)' means the product is predicted but the "
+            "name library has no entry; do not invent a name for it."
         ),
         "input_schema": {
             "type": "object",
@@ -1137,9 +1160,17 @@ async def _execute_chat_tool(name: str, args: dict) -> tuple[dict, dict | None]:
                 "substrate_smiles": core["substrate_smiles"],
                 "reagent_smiles": core["reagent_smiles"],
                 "environment": core["environment"],
+                # The model is told which engine answered and how confident it
+                # was, so it can hedge on a low-probability ASKCOS prediction
+                # instead of presenting everything with equal certainty. In
+                # chat the model IS the second opinion, so low_confidence is
+                # surfaced to it rather than triggering a separate call.
+                "source": core["source"],
+                "low_confidence": core["low_confidence"],
                 "products": [
                     {"smiles": p["smiles"], "reaction_name": p["reaction_name"],
                      "steps_taken": p["steps_taken"],
+                     "probability": p.get("probability"),
                      "execution_history": p["execution_history"]}
                     for p in core["products"]
                 ],
@@ -2904,10 +2935,56 @@ def _pick_substrate_and_react(components: list[str]) -> tuple[str, str, list[str
     return substrate, reagent, conditions, []
 
 
+# ── Product prediction: ASKCOS predicts, templates name and overrule ─────────
+# The decision logic lives in prediction.py so it can be tested without
+# importing this module (and with it TensorFlow/DECIMER/MolScribe). What
+# remains here is only the I/O around it.
+
+
+def _askcos_outcomes_sync(substrate: str, reagent: str) -> tuple[list | None, str | None]:
+    """Blocking ASKCOS call → (outcomes, failure). Never raises."""
+    if ASKCOS is None:
+        return None, None
+    try:
+        return ASKCOS.predict([substrate], reagents=reagent), None
+    except AskcosUnavailable as exc:
+        return None, str(exc)
+
+
+async def _askcos_outcomes(substrate: str, reagent: str) -> tuple[list | None, str | None]:
+    """Async ASKCOS call → (outcomes, failure). Never raises."""
+    if ASKCOS is None:
+        return None, None
+    try:
+        return await ASKCOS.apredict([substrate], reagents=reagent), None
+    except AskcosUnavailable as exc:
+        return None, str(exc)
+
+
+async def _predict_products(substrate: str, reagent: str,
+                            conditions: list[str]) -> Prediction:
+    """Predicted products for a substrate/reagent pair.
+
+    Runs the template engine and ASKCOS concurrently — the templates are needed
+    either way (to name ASKCOS products, to overrule them, or to stand in for
+    them), so there is no reason to pay for them serially.
+    """
+    def _run_templates():
+        return _get_engine().run_for_reagent(substrate, reagent, conditions)
+
+    loop = asyncio.get_event_loop()
+    branches, (outcomes, failure) = await asyncio.gather(
+        loop.run_in_executor(_chem_pool, _run_templates),
+        _askcos_outcomes(substrate, reagent),
+    )
+    return resolve_products(branches, outcomes, failure)
+
+
 def _react_from_image(raw_bytes: bytes) -> dict:
     """
-    Full pipeline: raw image bytes → preprocessing → DECIMER → split
-    into substrate + reagent → template engine → product SMILES.
+    Full pipeline: raw image bytes → preprocessing → DECIMER → substrate +
+    reagent split → ASKCOS forward prediction (named by the template engine,
+    which also stands in when ASKCOS is unreachable) → product SMILES.
 
     Returns a dict with keys:
         recognized_smiles   — raw DECIMER output
@@ -2915,7 +2992,8 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         substrate_smiles    — first component (canonical)
         reagent_smiles      — remaining components joined with '.'
         products            — list of {smiles, reaction_name, template_id,
-                               steps_taken, execution_history}
+                               steps_taken, execution_history, probability}
+        source              — "askcos" | "templates", which engine produced them
         error               — str | None
     """
     from rdkit import Chem
@@ -3045,6 +3123,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
             "reagent_smiles": "",
             "error": "Only one molecule was recognized. Upload an image containing both substrate and reagent.",
             "products": [],
+            "source": "templates",
         }
 
     # 4. Assign substrate/reagent and run the engine — every fragment gets a
@@ -3077,23 +3156,22 @@ def _react_from_image(raw_bytes: bytes) -> dict:
                         substrate_smiles, reagent_smiles, conditions, len(branches),
                     )
 
-    products = [
-        {
-            "smiles":            b["final_product"],
-            "reaction_name":     b["reaction_name"],
-            "template_id":       b["template_id"],
-            "steps_taken":       b["steps_taken"],
-            "execution_history": b["execution_history"],
-        }
-        for b in branches
-    ]
+    # 6. Predict. The template run above already happened (and drove both the
+    # substrate/reagent assignment and the vision retries), so ASKCOS only has
+    # to answer for the assignment that survived all of that.
+    outcomes, failure = _askcos_outcomes_sync(substrate_smiles, reagent_smiles)
+    prediction = resolve_products(branches, outcomes, failure)
+    logger.info("Prediction source=%s low_confidence=%s → %d product(s)",
+                prediction.source, prediction.low_confidence, len(prediction.products))
 
     return {
         "recognized_smiles": recognized_smiles,
         "components":        components,
         "substrate_smiles":  substrate_smiles,
         "reagent_smiles":    reagent_smiles,
-        "products":          products,
+        "products":          prediction.products,
+        "source":            prediction.source,
+        "low_confidence":    prediction.low_confidence,
         # Empty products is NOT an error here: the endpoint layers an AI-guess
         # fallback on that case, and an error string would make the frontend
         # bail before rendering it. Genuine OSR failures return earlier with
@@ -3108,8 +3186,8 @@ class ReactRequest(BaseModel):
 
 
 async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
-    """Deterministic-engine reaction run shared by /react and the chat
-    run_reaction tool: canonicalize, infer conditions, run templates.
+    """Reaction run shared by /react and the chat run_reaction tool:
+    canonicalize, infer conditions, predict via ASKCOS, name via templates.
     Raises HTTPException(422) on invalid SMILES; no LLM involvement."""
     from rdkit import Chem
 
@@ -3131,27 +3209,16 @@ async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
             conditions = r.get("conditions", conditions)
             break
 
-    def _run():
-        return _get_engine().run_for_reagent(substrate, reagent, conditions)
-
-    loop = asyncio.get_event_loop()
-    branches = await loop.run_in_executor(_chem_pool, _run)
+    prediction = await _predict_products(substrate, reagent, conditions)
 
     return {
         "substrate_smiles": substrate,
         "reagent_smiles":   reagent,
         "environment":      "Kinetic" if "kinetic_base" in conditions else "Thermodynamic",
         "conditions":       conditions,
-        "products": [
-            {
-                "smiles":            b["final_product"],
-                "reaction_name":     b["reaction_name"],
-                "template_id":       b["template_id"],
-                "steps_taken":       b["steps_taken"],
-                "execution_history": b["execution_history"],
-            }
-            for b in branches
-        ],
+        "products":         prediction.products,
+        "source":           prediction.source,
+        "low_confidence":   prediction.low_confidence,
     }
 
 
@@ -3168,13 +3235,31 @@ async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
         _record_template_gap("react", substrate, reagent, core["conditions"])
         ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
     else:
-        sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id)
+        # An ASKCOS product the templates couldn't reproduce is a library gap,
+        # and a sharper one than "nothing matched" — we know a reaction happens
+        # and what it yields, just not what to call it.
+        if any(p["reaction_name"] == UNNAMED_REACTION for p in products):
+            _record_template_gap("react_unnamed", substrate, reagent, core["conditions"])
+
+        if core["low_confidence"]:
+            # No template corroborates ASKCOS and ASKCOS itself isn't sure, so
+            # neither deterministic source is standing behind this answer. Ask
+            # Claude as a second opinion. It arrives in the same `ai_guess`
+            # channel as the no-products case — already RDKit-validated and
+            # already flagged `unverified` — so the UI presents it as a guess
+            # sitting alongside the prediction, never as ground truth.
+            _record_template_gap("react_low_confidence", substrate, reagent, core["conditions"])
+            ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
+        else:
+            sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id)
 
     return {
         "substrate_smiles": substrate,
         "reagent_smiles":   reagent,
         "environment":      core["environment"],
         "products":         products,
+        "source":           core["source"],
+        "low_confidence":   core["low_confidence"],
         "ai_guess":         ai_guess,
         "sanity_check":     sanity_check,
     }
@@ -3200,6 +3285,13 @@ async def react_from_image(file: UploadFile = File(...),
     if result.get("substrate_smiles") and result.get("reagent_smiles") and not result.get("error"):
         if not result.get("products"):
             _record_template_gap("react_from_image",
+                                 result["substrate_smiles"], result["reagent_smiles"], [])
+            result["ai_guess"] = await _maybe_blind_guess(
+                result["substrate_smiles"], result["reagent_smiles"], user_id)
+        elif result.get("low_confidence"):
+            # Same escalation as /react: nothing deterministic vouches for this
+            # product, so Claude gives a second opinion alongside it.
+            _record_template_gap("react_from_image_low_confidence",
                                  result["substrate_smiles"], result["reagent_smiles"], [])
             result["ai_guess"] = await _maybe_blind_guess(
                 result["substrate_smiles"], result["reagent_smiles"], user_id)

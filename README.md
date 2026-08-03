@@ -20,9 +20,13 @@ Next.js app (port 3000)  ──proxy──►  FastAPI API (port 8000)
                                         ├── POST /assist    → grounded help for a synthesis file (LLM)
                                         └── POST /chat       → chatbot grounded in current work (LLM, tool-use)
 
-Ground truth layer (deterministic):
-    reactivity_engine.py    — RDKit-based reaction engine (template-driven)
-    reaction_templates.json — all reaction SMARTS + names (the only place chemistry lives)
+Prediction layer (no LLM):
+    askcos_client.py        — ASKCOS forward predictor; predicts products for /react
+    reactivity_engine.py    — RDKit reaction engine (template-driven); names ASKCOS
+                              products, overrules them on disagreement, builds /pathways,
+                              and stands in when ASKCOS is down
+    reaction_templates.json — all reaction SMARTS + names (the only place names live)
+    prediction.py           — decides which of the two answers wins
 
 Explanation layer (LLM) — hosted only:
     Every generative call (explain / stereo / assist / chat) runs on the server-side
@@ -208,24 +212,44 @@ Edit `REAGENT_LIST` in `reagents.py` — each entry needs `name`, `smiles`,
 python test_templates.py      # template regression suite — run before committing
                               # changes to reaction_templates.json, reagents.py,
                               # or reactivity_engine.py
+python test_askcos.py         # ASKCOS client suite — run before committing changes to
+                              # askcos_client.py. Offline by default; set ASKCOS_BASE_URL
+                              # to also run one live call against the real instance.
+python test_prediction.py     # ASKCOS-vs-templates decision suite — run before committing
+                              # changes to prediction.py
 python diagnose_templates.py  # firing matrix + dead-template report (real engine)
 python test_osr.py            # OSR recognition / arbitration tests
 ```
 
-Reaction names come from the template that fired (`name` in
-`reaction_templates.json`) — there is no separate classifier.
+Products come from ASKCOS; reaction *names* still come from the template that reproduces
+them (`name` in `reaction_templates.json`) — there is no separate classifier, and no LLM
+involvement. A product no template reproduces is labeled `Predicted (unnamed)` rather
+than guessed at.
+
+**Where the two engines disagree, the template wins.** ASKCOS is broad but not always
+right: on the live MIT instance it ranks a dibromo*alkene* first for cyclohexene + Br₂
+and sulfuryl chloride first for ethanol + SOCl₂, both of which the template library
+already handles correctly. So a firing template overrules ASKCOS's top pick. ASKCOS's
+value is coverage — it answers Grignards and everything else no one wrote a template
+for. When *neither* engine is confident (no template fires and ASKCOS is below
+`ASKCOS_TRUST_PROBABILITY`), `/react` additionally asks Claude and returns it as a
+clearly-labeled unverified `ai_guess` beside the prediction — never as the product.
 
 ## Project layout
 
 ```
 Orgo AI/
 ├── app.py                  ← FastAPI backend + all endpoints
+├── askcos_client.py        ← ASKCOS forward-predictor client (product prediction)
+├── prediction.py           ← ASKCOS-vs-templates decision (which answer wins)
 ├── reactivity_engine.py    ← deterministic reaction engine (do not modify)
-├── reaction_templates.json ← all reaction SMARTS (the only place chemistry lives)
+├── reaction_templates.json ← all reaction SMARTS (the only place reaction names live)
 ├── reagents.py             ← reagent catalog (name, SMILES, condition tags)
 ├── osr_arbitration.py      ← picks the best SMILES across OSR reads (+ optional vision)
 ├── preprocessing.py        ← OpenCV image pipeline (do not modify)
 ├── test_templates.py       ← template regression suite (run before template edits)
+├── test_askcos.py          ← ASKCOS client suite (run before askcos_client.py edits)
+├── test_prediction.py      ← engine-arbitration suite (run before prediction.py edits)
 ├── diagnose_templates.py   ← firing matrix / dead-template diagnostic
 ├── test_osr.py             ← OSR / arbitration tests
 ├── requirements.txt
@@ -262,8 +286,11 @@ All state lives in `localStorage` via `frontend/lib/sessions.ts`.
 
 ## Design constraints
 
-- The LLM **never names reactions or asserts connectivity** — that is always the
-  deterministic template engine. The LLM only explains and annotates.
-- Every product shown is RDKit-validated before being returned.
+- The LLM **never names reactions or asserts connectivity**. Products come from ASKCOS,
+  names from the deterministic template engine. The LLM only explains and annotates.
+- Every product shown is RDKit-validated before being returned — ASKCOS output included.
+- ASKCOS is **optional**. Leave `ASKCOS_BASE_URL` unset and `/react` runs on the template
+  engine alone, exactly as before. Every `/react` response reports which engine answered
+  (`source: "askcos" | "templates"`), so the two are never silently confused.
 - API keys never leave the server. BYOK keys (self-hosting only) are used per-request
   and never stored or logged.
