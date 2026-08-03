@@ -153,14 +153,32 @@ resolved mechanism, a `not_applicable` verdict carrying the template's
 `template_id`, or guard mismatch) — the last being the only one that hands off to
 the LLM fallback. The module itself never calls the LLM.
 
+0. **Single-step branches only.** If the product's `steps_taken > 1`, return no
+   deterministic answer. On a multi-step branch the engine's `template_id` is
+   `chain[0][1]["template_id"]` (`reactivity_engine.py:306`) — the *first* template
+   in the chain, not the whole route — so its archetype describes only the opening
+   transformation and could never reach the final product. Bailing here is cheaper
+   and clearer than letting the guard reject it.
 1. Look up the template by id → its `mechanism` field → the archetype. Absent or
    `null` short-circuits to the states in section 1.
-2. Fire the archetype's steps in order with `RunReactants`, starting from
-   substrate + reagent. Each step's output feeds the next.
+2. Fire the archetype's steps in order with `RunReactants`, starting from the
+   fragment pool of substrate + reagent. Each step's output pool feeds the next.
 3. A step matching at several sites forks. Enumerate every surviving sequence
    rather than picking one arbitrarily.
-4. **Terminal-product guard.** Canonicalize each sequence's final species; keep
-   only those equal to the engine's `product_smiles`.
+
+A step may declare **several SMARTS variants**, unioned when the step fires. This is
+what lets one `sn2` archetype cover 20 templates: anionic heteroatom nucleophile,
+anionic carbon nucleophile, neutral amine, and halide exchange are four variants of
+one concerted step, not four archetypes. Regiochemistry needs no variants at all —
+electrophilic addition fires both protonation directions and the guard keeps the
+Markovnikov one, because that is the branch whose product the engine computed.
+4. **Terminal-product guard.** Keep only those sequences whose final fragment set
+   contains the engine's `product_smiles`, compared as canonical SMILES.
+
+   Membership rather than whole-string equality, because the final pool
+   legitimately also holds the leaving group (`[Br-]`) and any spectator counter-ion
+   carried in from the reagent — `NaOH` arrives as `[OH-].[Na+]`, and the `[Na+]`
+   rides along untouched.
    - Exactly one survives → that is the mechanism.
    - Several survive → equivalent sites on a symmetric substrate. Take the first
      by canonical ordering, log `MECHANISM_AMBIGUOUS`.
