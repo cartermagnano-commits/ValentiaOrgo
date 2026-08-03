@@ -466,11 +466,25 @@ export default function ChatPanel({
     try {
       const result = await reactFromImage(file)
       if (result.error) throw new Error(result.error)
-      const reactionContext = reactionContextFrom(result)
-      lastReactionRef.current = reactionContext
+      // Still recorded as grounding for follow-up questions — we're deferring
+      // the explanation, not forgetting the reaction.
+      lastReactionRef.current = reactionContextFrom(result)
       setLatestReaction(result)
       setPhotoReading(false)
-      await streamReply(history, [{ type: 'reaction_result', data: result }], reactionContext)
+      // Post the engine result as its own bubble with no prose. It matches
+      // canExplain(), so the Explanation button appears on it automatically.
+      const explained: ChatContent = {
+        ...data,
+        messages: [...history, {
+          id: `msg_${Date.now()}_reply`,
+          role: 'assistant',
+          content: '',
+          createdAt: new Date().toISOString(),
+          toolResults: [{ type: 'reaction_result', data: result }],
+        }],
+      }
+      onChange(explained)
+      await onSave(explained)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not read the reaction image.'
       onChange({
