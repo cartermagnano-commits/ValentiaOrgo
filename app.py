@@ -1237,7 +1237,8 @@ async def _execute_chat_tool(name: str, args: dict) -> tuple[dict, dict | None]:
 
 
 async def _stream_anthropic_tools(system: str, messages: list[dict], max_tokens: int,
-                                  surface: str, model: str | None = None):
+                                  surface: str, model: str | None = None,
+                                  explain: bool = True):
     """Streaming Anthropic chat with a bounded server-side tool loop. Text
     deltas stream as normal SSE frames; each executed tool additionally emits
     a `tool_event` frame for the UI."""
@@ -1252,6 +1253,11 @@ async def _stream_anthropic_tools(system: str, messages: list[dict], max_tokens:
         # toolUse/toolResult blocks — Bedrock-backed gateways (Parley) reject
         # the request otherwise. Termination comes from the round cap below,
         # not from withdrawing the tools.
+        # Deferred mode cannot stream as it goes: the model often writes a
+        # preamble BEFORE its tool call (measured on this stack: first text at
+        # 4.4s, tool call at 9.4s), and that preamble is exactly the prose the
+        # user asked us not to generate. Buffer until we know whether a tool ran.
+        buffered: list[str] = []
         async with client.messages.stream(
             model=model or DEFAULT_ANTHROPIC_MODEL,
             max_tokens=max_tokens,
@@ -1260,10 +1266,31 @@ async def _stream_anthropic_tools(system: str, messages: list[dict], max_tokens:
             tools=tools,
         ) as stream:
             async for text in stream.text_stream:
-                yield f"data: {json.dumps({'delta': text})}\n\n"
+                if explain:
+                    yield f"data: {json.dumps({'delta': text})}\n\n"
+                else:
+                    buffered.append(text)
             final = await stream.get_final_message()
 
         tool_uses = [b for b in final.content if getattr(b, "type", None) == "tool_use"]
+
+        if not explain:
+            if not tool_uses:
+                # No engine work this turn, so nothing was deferred — this is a
+                # real answer to a real question (a follow-up like "why SN1?")
+                # and withholding it would just lose the reply.
+                for text in buffered:
+                    yield f"data: {json.dumps({'delta': text})}\n\n"
+                break
+            # A tool ran: the card is the answer. Drop the preamble, emit the
+            # engine result, and stop before the explanation round.
+            for block in tool_uses:
+                _model_view, ui_event = await _execute_chat_tool(
+                    block.name, dict(block.input or {}))
+                if ui_event:
+                    yield f"data: {json.dumps({'tool_event': ui_event})}\n\n"
+            break
+
         # Round cap reached: stop executing tools; the text streamed so far
         # stands as the answer.
         if not tool_uses or round_index == _CHAT_TOOL_ROUNDS - 1:
@@ -2636,6 +2663,10 @@ class ChatRequest(BaseModel):
     # run on an attached image. The escape hatch for when OSR misreads the
     # picture and the deterministic path is getting in the way of the question.
     use_engine: bool = True
+    # False = the client wants only the engine result this turn; the model's
+    # prose is deferred until the user asks for it. The Reaction tab's
+    # Explanation button re-sends the same turn with explain=True.
+    explain: bool = True
 
 
 def _reaction_ground_text(result: dict) -> str:
@@ -2661,7 +2692,8 @@ def _reaction_ground_text(result: dict) -> str:
 
 
 async def _image_reaction_then_explain(system: str, messages: list[dict],
-                                       engine: Optional[EngineConfig]):
+                                       engine: Optional[EngineConfig],
+                                       explain: bool = True):
     """Image-bearing chats can't use the native tool path (the gateway drops
     image blocks on the tools endpoint). So run OSR + the deterministic engine
     on the newest attached image ourselves, emit a `reaction_result` frame — the
@@ -2690,6 +2722,9 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
                 _record_template_gap("chat_image", result["substrate_smiles"],
                                      result["reagent_smiles"], [])
             yield f"data: {json.dumps({'tool_event': {'type': 'reaction_result', 'data': result}})}\n\n"
+            if not explain:
+                # Card only. The Explanation button re-runs this turn.
+                return
             ground = _reaction_ground_text(result)
 
     async for frame in _sse_stream(system + ground, messages, 800, engine):
@@ -2757,12 +2792,14 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
         stream = _with_error_frames(_stream_anthropic_tools(
             system_prompt + _CHAT_TOOLS_SYSTEM, messages, 800,
             req.surface, model=req.engine.model if req.engine else None,
+            explain=req.explain,
         ))
     elif surface_runs_reactions and has_images:
         # Image chats bypass the native tool path — run the engine on the image
         # ourselves so the reaction still surfaces (banner/card + grounding).
         stream = _with_error_frames(
-            _image_reaction_then_explain(system_prompt, messages, req.engine))
+            _image_reaction_then_explain(system_prompt, messages, req.engine,
+                                         explain=req.explain))
     else:
         stream = _sse_stream(system_prompt, messages, 800, req.engine)
 
