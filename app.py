@@ -2724,6 +2724,7 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
             yield f"data: {json.dumps({'tool_event': {'type': 'reaction_result', 'data': result}})}\n\n"
             if not explain:
                 # Card only. The Explanation button re-runs this turn.
+                yield "data: [DONE]\n\n"
                 return
             ground = _reaction_ground_text(result)
 

@@ -12,6 +12,8 @@ checks (does the server stop before the explanation round?) only exists
 end-to-end, inside a live Anthropic tool loop.
 """
 
+import base64
+import io
 import json
 import socket
 import sys
@@ -45,10 +47,20 @@ def backend_up() -> bool:
         return False
 
 
-def chat(text: str, explain: bool) -> tuple[list[str], list[dict]]:
-    """POST /chat on the reaction surface. Returns (text deltas, tool events)."""
+def chat(text: str, explain: bool, attachments: list[dict] | None = None,
+         timeout: int = 180) -> tuple[list[str], list[dict]]:
+    """POST /chat on the reaction surface. Returns (text deltas, tool events).
+
+    `attachments` matches the `ChatAttachment` wire shape the backend parses
+    in app.py (`ChatMessage.attachments` -> `entry["images"]` in the /chat
+    handler): {"kind": "image", "media_type": "...", "data": "<base64>",
+    "name": "..."}.
+    """
+    message: dict = {"role": "user", "content": text}
+    if attachments:
+        message["attachments"] = attachments
     body = json.dumps({
-        "messages": [{"role": "user", "content": text}],
+        "messages": [message],
         "context": None,
         "engine": {"mode": "hosted", "provider": "anthropic",
                    "model": "claude-haiku-4-5"},
@@ -60,7 +72,7 @@ def chat(text: str, explain: bool) -> tuple[list[str], list[dict]]:
                                  headers={"Content-Type": "application/json"})
     deltas: list[str] = []
     events: list[dict] = []
-    with urllib.request.urlopen(req, timeout=180) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         for raw in response:
             line = raw.decode(errors="replace").strip()
             if not line.startswith("data: "):
@@ -109,6 +121,46 @@ deltas, events = chat(
 check("explain=false still answers a question that ran no tool",
       len("".join(deltas).strip()) > 0,
       f"got {len(deltas)} deltas, events={[e.get('type') for e in events]}")
+
+# 4. The image-bearing deferred path (_image_reaction_then_explain), which the
+#    tool-loop cases above never touch (they carry no attachments, so
+#    has_images is always False in the /chat dispatch). This one is slow —
+#    OSR runs synchronously inside the request and can take 30-60s in this
+#    environment (MolScribe is not installed; Ollama vision fallback is
+#    unreachable), so DECIMER alone must read the image. Generated at test
+#    time with RDKit rather than committing a binary fixture.
+try:
+    from rdkit import Chem
+    from rdkit.Chem import Draw
+except ImportError:
+    print("SKIP  image-bearing deferred turn — rdkit not importable")
+else:
+    mol1 = Chem.MolFromSmiles("CCO")
+    mol2 = Chem.MolFromSmiles("O=S(Cl)Cl")
+    grid = Draw.MolsToGridImage([mol1, mol2], molsPerRow=2,
+                                subImgSize=(300, 300), useSVG=False)
+    buf = io.BytesIO()
+    grid.save(buf, format="PNG")
+    image_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    attachments = [{"kind": "image", "media_type": "image/png",
+                    "data": image_b64, "name": "rxn.png"}]
+    deltas, events = chat("What reaction is shown in this image?", explain=False,
+                          attachments=attachments, timeout=240)
+    if any(e.get("type") == "reaction_result" for e in events):
+        # OSR read both components: this is the deferred contract, same as
+        # the tool-loop path — card only, no prose.
+        check("explain=false image turn emits no explanation text when OSR succeeds",
+              deltas == [], f"got {len(deltas)} deltas: {''.join(deltas)[:200]!r}")
+    else:
+        # OSR is degraded on this machine and didn't recognize a reaction in
+        # the synthetic image — _image_reaction_then_explain correctly falls
+        # through to a normal streamed answer in that case, so deltas ARE
+        # expected. Nothing to assert; this case just didn't exercise the
+        # deferral.
+        print("SKIP  image-bearing deferred turn — OSR produced no reaction_result "
+              f"on this machine (events={[e.get('type') for e in events]}, "
+              f"{len(deltas)} deltas)")
 
 print()
 print(f"{passes} passed, {len(failures)} failed")
