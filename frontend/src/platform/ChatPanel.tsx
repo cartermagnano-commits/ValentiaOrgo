@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { Camera, FileText, FlaskConical, Network, Paperclip, X, Zap } from 'lucide-react'
+import { Camera, FileText, FlaskConical, Network, Paperclip, Sparkles, X, Zap } from 'lucide-react'
 import type { ChatAttachment, ChatContent, ChatMessage, ChatToolResult } from '../types'
 import { STRENGTH, loadPreferredModel, savePreferredModel } from '../../lib/engine'
 import { reactFromImage, streamChat } from '../api'
@@ -321,6 +321,27 @@ export default function ChatPanel({
     }
   }
 
+  // A deferred reaction: the engine card is already in the bubble but no prose
+  // has been generated for it. The same condition hides the button once prose
+  // exists, so a reopened session shows what it already paid for and nothing else.
+  function canExplain(message: ChatMessage): boolean {
+    return message.role === 'assistant'
+      && !message.content.trim()
+      && Boolean(message.toolResults?.some(result => result.type === 'reaction_result'))
+  }
+
+  // Re-run the turn that produced this bubble, this time asking for the prose.
+  // The bubble itself is excluded from the replayed history — it is the message
+  // being filled in, and an empty assistant message is rejected by the API —
+  // while `targetId` keeps everything after it untouched.
+  async function explainMessage(message: ChatMessage) {
+    if (streaming || saving) return
+    const index = messages.findIndex(entry => entry.id === message.id)
+    if (index < 0) return
+    await streamReply(messages.slice(0, index), message.toolResults ?? [],
+                      undefined, true, message.id)
+  }
+
   // Stream one assistant reply for `history`, collecting tool events into the
   // reply's cards and forwarding app-level events (stockroom, pathways) up.
   async function streamReply(
@@ -514,6 +535,17 @@ export default function ChatPanel({
             ))}
             {message.toolResults?.length ? <ToolResultCards results={message.toolResults} /> : null}
             {message.content}
+            {canExplain(message) && (
+              <button
+                type="button"
+                className="chat-explain-btn"
+                onClick={() => void explainMessage(message)}
+                disabled={streaming || saving}
+              >
+                <Sparkles size={13} />
+                Explanation
+              </button>
+            )}
           </div>
         ))}
         {streaming && messages[messages.length - 1]?.role === 'user' && (

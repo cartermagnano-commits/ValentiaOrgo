@@ -4761,6 +4761,25 @@ header h1 {
   color: var(--warning);
 }
 
+/* Deferred explanation: the product is the answer, prose is opt-in. */
+.chat-explain-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.chat-explain-btn:hover:not(:disabled) { background: var(--card); }
+.chat-explain-btn:disabled { opacity: 0.5; cursor: default; }
+
 /* ── Reaction tab: full-reaction banner (drawn structures, no SMILES) ── */
 .reaction-banner {
   flex-shrink: 0;
