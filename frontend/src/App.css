@@ -552,8 +552,26 @@ html, body, #root {
   min-height: 100%;
 }
 
+/* The explorer fills whatever the shell gives it. It used to subtract a fixed
+   131px of chrome that isn't always there — the project breadcrumb above it is
+   conditional — which left a dead band under the panels. */
+.workspace-main.synthesis-main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.synthesis-main .pathway-explorer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .main-content.embedded {
-  height: calc(100vh - 131px);
+  flex: 1;
+  min-height: 0;
+  height: auto;
 }
 
 .generic-editor {
@@ -702,10 +720,6 @@ html, body, #root {
   .generic-editor {
     grid-template-columns: 1fr;
   }
-
-  .main-content.embedded {
-    height: auto;
-  }
 }
 
 header {
@@ -768,9 +782,12 @@ header .subtitle {
   box-shadow: var(--shadow-sm);
 }
 
+/* Side columns are driven by --col-left / --col-right, which the drag handles
+   in PathwayExplorer rewrite; the values here are the untouched defaults. */
 .main-content {
   display: grid;
-  grid-template-columns: 380px 1fr 340px;
+  grid-template-columns:
+    var(--col-left, 380px) 7px minmax(0, 1fr) 7px var(--col-right, 340px);
   gap: 0;
   overflow: hidden;
   height: calc(100vh - 57px);
@@ -783,6 +800,20 @@ header .subtitle {
     height: auto;
     overflow: visible;
   }
+
+  /* Stacked panels have no vertical boundary to drag. */
+  .panel-resizer { display: none; }
+  .main-content > .panel { border-bottom: 1px solid var(--border); }
+
+  /* …and they scroll as one column instead of each fighting for height. */
+  .workspace-main.synthesis-main { overflow-y: auto; }
+
+  .synthesis-main .pathway-explorer,
+  .main-content.embedded {
+    flex: none;
+    min-height: 0;
+    height: auto;
+  }
 }
 
 /* ── Panels ───────────────────────────────────────────────────── */
@@ -791,11 +822,61 @@ header .subtitle {
   border-right: 1px solid var(--border);
   background: var(--surface);
   overflow-y: auto;
+  /* A grid item defaults to min-content width; without this a long SMILES or a
+     wide button row pushes the panel past its column instead of wrapping. */
+  min-width: 0;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
 }
 
 .panel:last-child { border-right: none; }
+
+/* Inside the explorer the hairline belongs to the resize handle, not the panel. */
+.main-content > .panel { border-right: none; }
+
+/* ── Column resize handles ────────────────────────────────────── */
+
+.panel-resizer {
+  position: relative;
+  align-self: stretch;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 5;
+}
+
+/* The visible hairline — 1px of the 7px handle. */
+.panel-resizer::before {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: var(--border);
+  transition: background 0.15s ease;
+}
+
+/* Widen the grab target past the hairline without widening the column. */
+.panel-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
+}
+
+.panel-resizer:hover::before,
+.panel-resizer:focus-visible::before,
+body.is-col-resizing .panel-resizer::before {
+  background: var(--accent);
+}
+
+.panel-resizer:focus-visible { outline: none; }
+
+/* Keep the resize cursor and kill text selection for the whole drag. */
+body.is-col-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
 
 .panel-header {
   padding: 13px 16px 10px;
@@ -811,9 +892,13 @@ header .subtitle {
 .panel-body {
   padding: 16px;
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* SMILES are long unbreakable tokens — let them wrap instead of widening
+     the panel past its column. */
+  overflow-wrap: anywhere;
 }
 
 /* ── Cards ────────────────────────────────────────────────────── */
@@ -3421,10 +3506,15 @@ header h1 {
   margin-top: 0;
 }
 
+/* One line tall to start, so the placeholder sits on the same row as the
+   attach / model / send controls; JS grows the height as the text wraps. */
 .claude-chat .chat-input {
   font-size: 14.5px;
   line-height: 1.55;
-  padding: 8px 4px;
+  padding: 6px 4px;
+  min-height: 34px;
+  max-height: 200px;
+  overflow-y: auto;
   background: transparent;
   border: none;
   border-radius: 0;
@@ -4513,11 +4603,14 @@ header h1 {
   color: var(--subtle);
 }
 
-/* Action row: uniform height, no wrapping, calmer chrome */
+/* Action row: uniform height, calmer chrome. It wraps rather than clipping —
+   the Eye and Clear buttons only appear once a structure is loaded, and at a
+   narrow panel width that sixth button has nowhere to go. */
 .mol-actions {
-  gap: 6px;
-  padding: 10px;
+  gap: 5px;
+  padding: 10px 9px;
   align-items: stretch;
+  flex-wrap: wrap;
   border-top: none;
 }
 
@@ -4526,9 +4619,11 @@ header h1 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 5px;
   min-height: 32px;
-  padding: 0 11px;
+  /* Never shrink a label into an ellipsis; let the row wrap instead. */
+  flex: 0 0 auto;
+  padding: 0 9px;
   border-radius: 8px;
   font-size: 12px;
   font-weight: 500;
@@ -4540,7 +4635,7 @@ header h1 {
 .mol-actions .btn-icon:hover:not(:disabled) { color: var(--text); }
 .mol-actions .btn-icon.active { color: var(--accent); border-color: var(--accent); }
 
-.mol-actions label { display: flex; }
+.mol-actions label { display: flex; min-width: 0; }
 
 .mol-action-fill {
   width: 100%;

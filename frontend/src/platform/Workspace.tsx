@@ -386,7 +386,7 @@ export default function Workspace() {
       )}
 
       {view === 'tool' && (
-        <main className={`workspace-main${active.tool !== 'synthesis' ? ' chat-main' : ''}`}>
+        <main className={`workspace-main${active.tool === 'synthesis' ? ' synthesis-main' : ' chat-main'}`}>
           {activeProject && (
             <div className="tool-context-bar">
               <FolderOpen size={13} />

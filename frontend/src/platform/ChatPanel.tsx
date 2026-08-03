@@ -245,6 +245,9 @@ export default function ChatPanel({
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const photoInputRef = useRef<HTMLInputElement>(null)
+  // The composer starts one line tall so its text sits on the same line as the
+  // buttons beside it, and grows upward from there as you type.
+  const inputRef = useRef<HTMLTextAreaElement>(null)
   // Most recent engine reaction seen in this conversation (tool call or photo
   // read) — sent as grounding context on follow-up questions.
   const lastReactionRef = useRef<Record<string, unknown> | null>(null)
@@ -267,6 +270,13 @@ export default function ChatPanel({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages.length, streaming])
+
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [input])
 
   async function addFiles(files: Iterable<File>) {
     for (const file of files) {
@@ -564,8 +574,9 @@ export default function ChatPanel({
             </button>
           )}
           <textarea
+            ref={inputRef}
             className="chat-input"
-            rows={2}
+            rows={1}
             value={input}
             placeholder={placeholder ?? 'Ask a question, or attach an image or file…'}
             onChange={event => setInput(event.target.value)}

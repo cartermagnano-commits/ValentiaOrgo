@@ -3,7 +3,7 @@ import StructureView from './StructureView'
 import MolDrawer from './MolDrawer'
 import { analyzeImage, verifyAnalysis } from '../api'
 import { imageFileFromClipboard, pasteTargetIsEditable, readImageFromClipboard } from '../../lib/clipboard'
-import { Camera, ChevronUp, ClipboardPaste, Eye, Pencil, UploadCloud, X, ShieldCheck, AlertTriangle } from 'lucide-react'
+import { Camera, ChevronUp, ClipboardPaste, Eye, Pencil, ScanLine, X, ShieldCheck, AlertTriangle } from 'lucide-react'
 
 // Page-level paste routing: when the user hits Ctrl+V without having clicked
 // into a specific card (e.g. right after taking a screen snip), the image goes
@@ -203,8 +203,10 @@ export default function MoleculeInput({ label, value, onChange }) {
           </>
         ) : (
           <>
+            {/* A scan frame, not a cloud — nothing is uploaded to a bucket here;
+                the image is read for a structure. */}
             <span className="upload-icon-ring">
-              <UploadCloud className="upload-icon" size={22} strokeWidth={1.8} />
+              <ScanLine className="upload-icon" size={22} strokeWidth={1.8} />
             </span>
             <span className="upload-title">Upload, capture, or paste image</span>
             <span className="upload-hint">Ctrl+V a screen snip works</span>
@@ -214,7 +216,9 @@ export default function MoleculeInput({ label, value, onChange }) {
 
       {/* Actions row */}
       <div className="mol-actions">
-        <label style={{ flex: 1 }}>
+        {/* Grows into spare width but never shrinks below its label — the row
+            wraps instead of clipping "Upload" down to "Uplo". */}
+        <label style={{ flex: '1 0 auto' }}>
           <input
             ref={fileRef}
             type="file"
@@ -223,9 +227,9 @@ export default function MoleculeInput({ label, value, onChange }) {
             style={{ display: 'none' }}
             onChange={e => handleFile(e.target.files[0])}
           />
-          <span className="btn-secondary mol-action-fill" style={{ cursor: 'pointer' }}>
+          <span className="btn-secondary mol-action-fill" style={{ cursor: 'pointer' }} title="Take a photo or choose an image file">
             <Camera size={14} />
-            Camera / File
+            Upload
           </span>
         </label>
         <button

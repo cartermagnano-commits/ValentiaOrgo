@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import MoleculeInput from './MoleculeInput'
 import PathwayGraph from './PathwayGraph'
 import InfoPanel from './InfoPanel'
@@ -100,6 +100,28 @@ const STOCKROOM_PRESETS = [
   { name: 'Water',  smiles: 'O' },
 ]
 
+// ── Resizable columns ────────────────────────────────────────────────────────
+// The three-pane layout is a CSS grid; the two hairlines between the panes are
+// drag handles that rewrite `--col-left` / `--col-right` on the grid. Widths are
+// per-browser furniture, so they live in localStorage rather than the session.
+
+const COLS_KEY = 'orgo.synthesis.columns'
+const DEFAULT_COLS = { left: 380, right: 340 }
+const COL_LIMITS = { left: [300, 620], right: [280, 560] }
+const MIN_GRAPH_WIDTH = 320
+
+/** Clamp a column to its own limits *and* to whatever room the graph can spare. */
+function clampCol(side, px, cols, gridEl) {
+  const [min, max] = COL_LIMITS[side]
+  const other = cols[side === 'left' ? 'right' : 'left']
+  const room = (gridEl?.clientWidth ?? 1440) - other - MIN_GRAPH_WIDTH
+  return Math.round(Math.max(min, Math.min(px, max, Math.max(min, room))))
+}
+
+function saveColumns(cols) {
+  try { localStorage.setItem(COLS_KEY, JSON.stringify(cols)) } catch { /* private mode */ }
+}
+
 /** @param {{ initialSubstrate?: any, initialTarget?: any, initialPathways?: any, onSave?: any, onContextChange?: any }} [props] */
 export default function PathwayExplorer({ initialSubstrate, initialTarget, initialPathways, onSave, onContextChange } = {}) {
   const [startSmilesList,  setStartSmilesList]  = useState(() => initialSubstrate?.length ? initialSubstrate : [''])
@@ -114,6 +136,101 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   const [loading,   setLoading]   = useState(false)
   const [loadStage, setLoadStage] = useState('pathways')
   const [error,     setError]     = useState(null)
+
+  // Column widths. `colsRef` mirrors the state so the pointer handlers below can
+  // read the live width without re-subscribing on every move event.
+  const [cols, setCols] = useState(DEFAULT_COLS)
+  const colsRef = useRef(cols)
+  const gridRef = useRef(null)
+
+  function setColumns(next) {
+    colsRef.current = next
+    setCols(next)
+  }
+
+  // localStorage isn't available during SSR, so the stored widths land after
+  // mount. Defaults match the CSS fallbacks, so there's nothing to flash unless
+  // the user actually dragged something.
+  useEffect(() => {
+    let stored
+    try { stored = JSON.parse(localStorage.getItem(COLS_KEY) ?? 'null') } catch { /* ignore */ }
+    if (!stored) return
+    const next = {
+      left:  clampCol('left',  Number(stored.left)  || DEFAULT_COLS.left,  DEFAULT_COLS, gridRef.current),
+      right: clampCol('right', Number(stored.right) || DEFAULT_COLS.right, DEFAULT_COLS, gridRef.current),
+    }
+    setColumns(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function startResize(side, e) {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = colsRef.current[side]
+    const handle = e.currentTarget
+    // Pointer capture keeps the drag alive over the graph canvas, which would
+    // otherwise swallow the move events.
+    handle.setPointerCapture?.(e.pointerId)
+    document.body.classList.add('is-col-resizing')
+
+    const onMove = ev => {
+      const delta = side === 'left' ? ev.clientX - startX : startX - ev.clientX
+      setColumns({
+        ...colsRef.current,
+        [side]: clampCol(side, startW + delta, colsRef.current, gridRef.current),
+      })
+    }
+    const onUp = () => {
+      handle.releasePointerCapture?.(e.pointerId)
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onUp)
+      document.body.classList.remove('is-col-resizing')
+      saveColumns(colsRef.current)
+    }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onUp)
+  }
+
+  function nudgeResize(side, e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    // The right handle grows its panel when dragged left, so mirror the sign.
+    const dir = (e.key === 'ArrowRight' ? 1 : -1) * (side === 'left' ? 1 : -1)
+    const step = e.shiftKey ? 48 : 12
+    const next = {
+      ...colsRef.current,
+      [side]: clampCol(side, colsRef.current[side] + dir * step, colsRef.current, gridRef.current),
+    }
+    setColumns(next)
+    saveColumns(next)
+  }
+
+  function resetResize(side) {
+    const next = { ...colsRef.current, [side]: DEFAULT_COLS[side] }
+    setColumns(next)
+    saveColumns(next)
+  }
+
+  /** Shared props for the two drag handles between the panes. */
+  function resizerProps(side, label) {
+    return {
+      className: 'panel-resizer',
+      role: 'separator',
+      'aria-orientation': 'vertical',
+      'aria-label': label,
+      'aria-valuenow': cols[side],
+      'aria-valuemin': COL_LIMITS[side][0],
+      'aria-valuemax': COL_LIMITS[side][1],
+      tabIndex: 0,
+      title: 'Drag to resize · double-click to reset',
+      onPointerDown: e => startResize(side, e),
+      onKeyDown: e => nudgeResize(side, e),
+      onDoubleClick: () => resetResize(side),
+    }
+  }
 
   // Helpers to find selected items
   const selectedRoute  = pathwaysData?.routes?.find(r => r.id === selectedRouteId) ?? null
@@ -245,7 +362,11 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   return (
     <div className="pathway-explorer">
       {loading && <LoadingOverlay stage={loadStage} />}
-      <div className="main-content embedded">
+      <div
+        className="main-content embedded"
+        ref={gridRef}
+        style={{ '--col-left': `${cols.left}px`, '--col-right': `${cols.right}px` }}
+      >
 
         {/* ── Left: inputs ─────────────────────────────────────────── */}
         <div className="panel">
@@ -501,6 +622,8 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
           </div>
         </div>
 
+        <div {...resizerProps('left', 'Resize the Structures panel')} />
+
         {/* ── Center: pathway graph ─────────────────────────────────── */}
         <div className="panel graph-panel" style={{ border: 'none' }}>
           <div className="panel-header">
@@ -524,6 +647,8 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
             />
           </div>
         </div>
+
+        <div {...resizerProps('right', 'Resize the Reaction Info panel')} />
 
         {/* ── Right: reaction info (chat lives in the Assistant drawer) ── */}
         <div className="panel">
