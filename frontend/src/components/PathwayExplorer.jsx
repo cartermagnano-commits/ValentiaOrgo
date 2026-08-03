@@ -100,6 +100,14 @@ const STOCKROOM_PRESETS = [
   { name: 'Water',  smiles: 'O' },
 ]
 
+// The one preset whose structure the user picks: a straight-chain alkane of
+// `n` carbons ("CCCCCC" = hexane at the default 6). Bounded because the
+// pathway BFS walks every carbon, and a C40 chain is a stall, not a question.
+const CHAIN_DEFAULT = 6
+const CHAIN_MIN = 1
+const CHAIN_MAX = 20
+const chainSmiles = n => 'C'.repeat(n)
+
 // ── Resizable columns ────────────────────────────────────────────────────────
 // The three-pane layout is a CSS grid; the two hairlines between the panes are
 // drag handles that rewrite `--col-left` / `--col-right` on the grid. Widths are
@@ -127,6 +135,9 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   const [startSmilesList,  setStartSmilesList]  = useState(() => initialSubstrate?.length ? initialSubstrate : [''])
   const [targetSmiles,     setTargetSmiles]     = useState(initialTarget ?? '')
   const [desiredDepth,     setDesiredDepth]     = useState(5)
+  // Carbon count on the editable chain preset. Held as a string so the field
+  // can be empty mid-edit; `chainCount` is the clamped number actually added.
+  const [chainInput,       setChainInput]       = useState(String(CHAIN_DEFAULT))
   const [pathwaysData,     setPathwaysData]     = useState(initialPathways ?? null)
   const [selectedRouteId,  setSelectedRouteId]  = useState(null)
   const [selectedBranchId, setSelectedBranchId] = useState(null)
@@ -355,6 +366,8 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
     setSelectedNodeData(null)
   }
 
+  const chainCount = Math.min(CHAIN_MAX, Math.max(CHAIN_MIN, parseInt(chainInput, 10) || CHAIN_DEFAULT))
+
   const hasValidStart = startSmilesList.some(s => s.trim())
   const isTargetMode  = pathwaysData?.search_mode === 'target_search'
   const status        = pathwaysData?.result_status
@@ -403,6 +416,32 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
                     {preset.name}
                   </button>
                 ))}
+                <span className="stockroom-chain-chip" title={chainSmiles(chainCount)}>
+                  <button
+                    className="stockroom-chain-add"
+                    title={`Add ${chainSmiles(chainCount)} to the stockroom`}
+                    onClick={() => addPreset(chainSmiles(chainCount))}
+                  >
+                    Carbon Chain
+                  </button>
+                  <input
+                    className="stockroom-chain-count"
+                    type="number"
+                    min={CHAIN_MIN}
+                    max={CHAIN_MAX}
+                    value={chainInput}
+                    aria-label="Carbons in the chain"
+                    title={`Carbons in the chain (${CHAIN_MIN}–${CHAIN_MAX})`}
+                    onChange={e => setChainInput(e.target.value)}
+                    onBlur={() => setChainInput(String(chainCount))}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        setChainInput(String(chainCount))
+                        addPreset(chainSmiles(chainCount))
+                      }
+                    }}
+                  />
+                </span>
               </div>
               {startSmilesList.map((smi, idx) => (
                 <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>

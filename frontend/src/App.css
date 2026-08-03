@@ -4903,3 +4903,57 @@ header h1 {
   background: #eef7f8;
   border-color: #cfe4e9;
 }
+
+/* Same chip, split in two: a label you click to add and a carbon count you
+   can type into. The <span> carries the pill; the halves sit flush inside. */
+.stockroom-chain-chip {
+  display: inline-flex;
+  align-items: stretch;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.stockroom-chain-chip:hover,
+.stockroom-chain-chip:focus-within {
+  color: #1e6074;
+  border-color: #cfe4e9;
+}
+
+.stockroom-chain-add {
+  font: inherit;
+  color: inherit;
+  padding: 3px 8px 3px 9px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.stockroom-chain-add:hover { background: #eef7f8; }
+
+.stockroom-chain-count {
+  font: inherit;
+  color: inherit;
+  width: 34px;
+  padding: 3px 2px 3px 5px;
+  text-align: center;
+  background: transparent;
+  border: none;
+  border-left: 1px solid var(--border);
+  -moz-appearance: textfield;
+}
+
+.stockroom-chain-count:focus {
+  outline: none;
+  background: #eef7f8;
+}
+
+.stockroom-chain-count::-webkit-outer-spin-button,
+.stockroom-chain-count::-webkit-inner-spin-button {
+  margin: 0;
+  height: 16px;
+}
