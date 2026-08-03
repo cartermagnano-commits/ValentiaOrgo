@@ -443,8 +443,8 @@ export default function ChatPanel({
     await streamReply(history)
   }
 
-  // Camera flow: OSR-read a photo of a whole reaction, drop the engine result
-  // into the thread as a card, then have the assistant explain it.
+  // Camera flow: OSR-read a photo of a whole reaction and drop the engine
+  // result into the thread as a card. The explanation waits for the button.
   async function handleReactionPhoto(file: File | null | undefined) {
     if (!file || streaming || saving) return
     let imageAttachment: ChatAttachment | null = null
