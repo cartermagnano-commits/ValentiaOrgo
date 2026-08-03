@@ -159,12 +159,15 @@ export async function streamStereo(branch, substrateSMILES, onDelta) {
 
 // useEngine=false asks the backend to skip the deterministic engine for this
 // turn: no app tools, and no OSR/template run on an attached image.
+// explain=false asks it to stop after the engine result — the Reaction tab
+// shows the product first and generates prose only when asked.
 export async function streamChat(messages, context, onDelta, model = null,
                                  surface = null, onToolEvent = null,
-                                 useEngine = true) {
+                                 useEngine = true, explain = true) {
   return streamSSE(
     '/chat',
-    { messages, context, engine: getEnginePayload(model), surface, use_engine: useEngine },
+    { messages, context, engine: getEnginePayload(model), surface,
+      use_engine: useEngine, explain },
     onDelta,
     onToolEvent,
   )

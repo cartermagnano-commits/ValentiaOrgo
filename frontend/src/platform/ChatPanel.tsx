@@ -91,8 +91,11 @@ function toApiMessage(message: ChatMessage, imageBudget: { left: number }) {
 function toApiMessages(history: ChatMessage[]) {
   const live = history.filter(
     // Failed-request bubbles are UI state, not conversation — don't replay
-    // them to the model as if it had said "Error: ..." itself.
-    message => !(message.role === 'assistant' && message.content.startsWith('Error:')),
+    // them to the model as if it had said "Error: ..." itself. A deferred
+    // reaction bubble carries only its engine card, and an assistant message
+    // with empty content is rejected outright by the API.
+    message => !(message.role === 'assistant'
+      && (message.content.startsWith('Error:') || !message.content.trim())),
   )
   // Newest images win the budget: walk backwards, then restore order.
   const budget = { left: MAX_IMAGES_PER_REQUEST }
@@ -324,22 +327,38 @@ export default function ChatPanel({
     history: ChatMessage[],
     seedToolResults: ChatToolResult[] = [],
     contextOverride?: Record<string, unknown> | null,
+    // The Reaction tab shows the product first: its turns ask the backend to
+    // stop after the engine result. Every other surface answers immediately.
+    explain: boolean = surface !== 'reaction',
+    // When set, the streamed text fills THIS existing message instead of
+    // appending a new one — the Explanation button filling in a bubble that
+    // already holds its engine card, without disturbing anything after it.
+    targetId?: string,
   ) {
-    const assistantId = `msg_${Date.now()}_reply`
+    const assistantId = targetId ?? `msg_${Date.now()}_reply`
     const toolResults: ChatToolResult[] = [...seedToolResults]
-    const withReply = (replyText: string): ChatContent => ({
-      ...data,
-      messages: [
-        ...history,
-        {
-          id: assistantId,
-          role: 'assistant',
-          content: replyText,
-          createdAt: new Date().toISOString(),
-          ...(toolResults.length ? { toolResults: [...toolResults] } : {}),
-        },
-      ],
-    })
+    const withReply = (replyText: string): ChatContent => (
+      targetId
+        ? {
+            ...data,
+            messages: messages.map(message => (
+              message.id === targetId ? { ...message, content: replyText } : message
+            )),
+          }
+        : {
+            ...data,
+            messages: [
+              ...history,
+              {
+                id: assistantId,
+                role: 'assistant',
+                content: replyText,
+                createdAt: new Date().toISOString(),
+                ...(toolResults.length ? { toolResults: [...toolResults] } : {}),
+              },
+            ],
+          }
+    )
 
     setStreaming(true)
     let acc = ''
@@ -370,6 +389,7 @@ export default function ChatPanel({
           onChange(withReply(acc))
         },
         useEngine,
+        explain,
       )
       if (!acc && !toolResults.length) {
         throw new Error('The AI engine returned no response. Try again in a moment.')
