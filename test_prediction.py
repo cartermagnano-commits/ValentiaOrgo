@@ -29,7 +29,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
 
 from askcos_client import Outcome
 from prediction import (
-    UNNAMED_REACTION, branch_products, name_products, resolve_products,
+    UNNAMED_REACTION, branch_products, name_products, needs_sanity_check,
+    resolve_products,
 )
 
 failures: list[str] = []
@@ -218,6 +219,36 @@ check("name_products emits the same keys as branch_products",
 check("an unnamed product still gets a readable execution_history",
       n["execution_history"] == ["Step 1 (Stable Product Finalized): CCO"],
       str(n["execution_history"]))
+
+
+# ── Sanity-check gating ──────────────────────────────────────────────────────
+#
+# The LLM plausibility check is a full model round-trip (~2.4s measured through
+# the Parley gateway) sitting on the critical path of /react, AFTER the products
+# are already known. It only earns that cost where nothing deterministic vouches
+# for the answer: a product a curated template named needs no second opinion.
+
+named = branch_products([branch("CC(O)c1ccccc1", "Grignard addition", "gr_01")])
+check("a template-named product skips the sanity check",
+      needs_sanity_check(named, low_confidence=False) is False)
+
+unnamed = name_products([outcome("CC(O)c1ccccc1", 0.986)], [])
+check("an ASKCOS product no template reproduced still gets the sanity check",
+      needs_sanity_check(unnamed, low_confidence=False) is True)
+
+# One named + one unnamed: the unnamed one is unvouched, so the check is owed.
+mixed = name_products(
+    [outcome("CCCl", 0.9), outcome("CCBr", 0.6, rank=2)],
+    [branch("CCCl", "SOCl2: alcohol → alkyl chloride", "socl2_01")],
+)
+check("a mix of named and unnamed products still gets the sanity check",
+      needs_sanity_check(mixed, low_confidence=False) is True)
+
+check("no products means no sanity check (the blind-guess path owns that case)",
+      needs_sanity_check([], low_confidence=False) is False)
+
+check("low confidence means no sanity check (the blind-guess path owns that case)",
+      needs_sanity_check(unnamed, low_confidence=True) is False)
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────

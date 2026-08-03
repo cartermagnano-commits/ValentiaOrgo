@@ -70,7 +70,9 @@ from askcos_client import AskcosClient, AskcosUnavailable
 from osr_arbitration import (
     arbitrate_local, plausible_or_none, resolve_with_vision,
 )
-from prediction import UNNAMED_REACTION, Prediction, resolve_products
+from prediction import (
+    UNNAMED_REACTION, Prediction, needs_sanity_check, resolve_products,
+)
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
 from reactivity_engine import TemplateEngine
 
@@ -3250,7 +3252,10 @@ async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
             # sitting alongside the prediction, never as ground truth.
             _record_template_gap("react_low_confidence", substrate, reagent, core["conditions"])
             ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
-        else:
+        elif needs_sanity_check(products, core["low_confidence"]):
+            # A curated template named every product, so a hand-written rule
+            # already vouches for this answer — spending a model round-trip to
+            # second-guess it only makes the page slower. See needs_sanity_check.
             sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id)
 
     return {
@@ -3295,7 +3300,7 @@ async def react_from_image(file: UploadFile = File(...),
                                  result["substrate_smiles"], result["reagent_smiles"], [])
             result["ai_guess"] = await _maybe_blind_guess(
                 result["substrate_smiles"], result["reagent_smiles"], user_id)
-        else:
+        elif needs_sanity_check(result["products"], bool(result.get("low_confidence"))):
             result["sanity_check"] = await _maybe_sanity_check(
                 result["substrate_smiles"], result["reagent_smiles"],
                 result["products"], user_id)

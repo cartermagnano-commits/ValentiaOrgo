@@ -104,6 +104,25 @@ def name_products(outcomes: list, branches: list[dict]) -> list[dict]:
     return products
 
 
+def needs_sanity_check(products: list[dict], low_confidence: bool) -> bool:
+    """Whether an LLM plausibility check is worth the latency it costs.
+
+    The check is a full model round-trip appended to a request whose answer is
+    already computed — measured at ~2.4s through the Parley gateway, against a
+    ~3.4s ASKCOS call. It earns that only where nothing deterministic vouches
+    for the product. A curated template that named the product already did, and
+    the template library outranks the LLM everywhere else in this codebase; a
+    second opinion there buys nothing but a slower page.
+
+    Both excluded cases belong to the blind-guess path instead: no products at
+    all, and a low-confidence prediction, are escalated to Claude directly by
+    the caller rather than merely checked.
+    """
+    if not products or low_confidence:
+        return False
+    return any(p["reaction_name"] == UNNAMED_REACTION for p in products)
+
+
 def resolve_products(branches: list[dict], outcomes: list | None,
                      failure: str | None) -> Prediction:
     """Combine a template run and an ASKCOS run into one answer.
