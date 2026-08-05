@@ -12,8 +12,11 @@ const apiPaths = [
   'assist',
   'react',
   'react-from-image',
+  // Each entry is an exact path match, so '/react' does NOT cover '/react/assess'.
+  'react/assess',
   'engine/ollama-status',
   'engine/usage',
+  'engine/template-gaps',
   'health',
 ]
 
