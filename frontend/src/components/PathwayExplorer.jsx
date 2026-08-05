@@ -1,13 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import MoleculeInput from './MoleculeInput'
 import PathwayGraph from './PathwayGraph'
 import InfoPanel from './InfoPanel'
-import Chatbot from './Chatbot'
 import { fetchPathways } from '../api'
 import {
-  Bot,
   CheckCircle2,
-  Info,
   Plus,
   Route,
   X,
@@ -85,11 +82,62 @@ function LoadingOverlay({ stage }) {
 
 const MAX_STARTS = 4
 
-/** @param {{ initialSubstrate?: any, initialTarget?: any, initialPathways?: any, onSave?: any }} [props] */
-export default function PathwayExplorer({ initialSubstrate, initialTarget, initialPathways, onSave } = {}) {
+// Common stockroom picks — mirrors the backend's reagents.py catalog so the
+// names and SMILES stay in the forms the template engine expects.
+const STOCKROOM_PRESETS = [
+  { name: 'NaOH',   smiles: '[OH-].[Na+]' },
+  { name: 'NaOEt',  smiles: 'CC[O-].[Na+]' },
+  { name: 't-BuOK', smiles: '[O-]C(C)(C)C.[K+]' },
+  { name: 'LDA',    smiles: 'CC(C)[N-]C(C)C.[Li+]' },
+  { name: 'NaBH4',  smiles: '[BH4-].[Na+]' },
+  { name: 'LiAlH4', smiles: '[AlH4-].[Li+]' },
+  { name: 'HBr',    smiles: 'Br' },
+  { name: 'HCl',    smiles: 'Cl' },
+  { name: 'Br2',    smiles: 'BrBr' },
+  { name: 'NH3',    smiles: 'N' },
+  { name: 'NaI',    smiles: '[Na+].[I-]' },
+  { name: 'H2SO4',  smiles: 'OS(=O)(=O)O' },
+  { name: 'Water',  smiles: 'O' },
+]
+
+// The one preset whose structure the user picks: a straight-chain alkane of
+// `n` carbons ("CCCCCC" = hexane at the default 6). Bounded because the
+// pathway BFS walks every carbon, and a C40 chain is a stall, not a question.
+const CHAIN_DEFAULT = 6
+const CHAIN_MIN = 1
+const CHAIN_MAX = 20
+const chainSmiles = n => 'C'.repeat(n)
+
+// ── Resizable columns ────────────────────────────────────────────────────────
+// The three-pane layout is a CSS grid; the two hairlines between the panes are
+// drag handles that rewrite `--col-left` / `--col-right` on the grid. Widths are
+// per-browser furniture, so they live in localStorage rather than the session.
+
+const COLS_KEY = 'orgo.synthesis.columns'
+const DEFAULT_COLS = { left: 380, right: 340 }
+const COL_LIMITS = { left: [300, 620], right: [280, 560] }
+const MIN_GRAPH_WIDTH = 320
+
+/** Clamp a column to its own limits *and* to whatever room the graph can spare. */
+function clampCol(side, px, cols, gridEl) {
+  const [min, max] = COL_LIMITS[side]
+  const other = cols[side === 'left' ? 'right' : 'left']
+  const room = (gridEl?.clientWidth ?? 1440) - other - MIN_GRAPH_WIDTH
+  return Math.round(Math.max(min, Math.min(px, max, Math.max(min, room))))
+}
+
+function saveColumns(cols) {
+  try { localStorage.setItem(COLS_KEY, JSON.stringify(cols)) } catch { /* private mode */ }
+}
+
+/** @param {{ initialSubstrate?: any, initialTarget?: any, initialPathways?: any, onSave?: any, onContextChange?: any }} [props] */
+export default function PathwayExplorer({ initialSubstrate, initialTarget, initialPathways, onSave, onContextChange } = {}) {
   const [startSmilesList,  setStartSmilesList]  = useState(() => initialSubstrate?.length ? initialSubstrate : [''])
   const [targetSmiles,     setTargetSmiles]     = useState(initialTarget ?? '')
   const [desiredDepth,     setDesiredDepth]     = useState(5)
+  // Carbon count on the editable chain preset. Held as a string so the field
+  // can be empty mid-edit; `chainCount` is the clamped number actually added.
+  const [chainInput,       setChainInput]       = useState(String(CHAIN_DEFAULT))
   const [pathwaysData,     setPathwaysData]     = useState(initialPathways ?? null)
   const [selectedRouteId,  setSelectedRouteId]  = useState(null)
   const [selectedBranchId, setSelectedBranchId] = useState(null)
@@ -99,7 +147,101 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   const [loading,   setLoading]   = useState(false)
   const [loadStage, setLoadStage] = useState('pathways')
   const [error,     setError]     = useState(null)
-  const [activeTab, setActiveTab] = useState('info')
+
+  // Column widths. `colsRef` mirrors the state so the pointer handlers below can
+  // read the live width without re-subscribing on every move event.
+  const [cols, setCols] = useState(DEFAULT_COLS)
+  const colsRef = useRef(cols)
+  const gridRef = useRef(null)
+
+  function setColumns(next) {
+    colsRef.current = next
+    setCols(next)
+  }
+
+  // localStorage isn't available during SSR, so the stored widths land after
+  // mount. Defaults match the CSS fallbacks, so there's nothing to flash unless
+  // the user actually dragged something.
+  useEffect(() => {
+    let stored
+    try { stored = JSON.parse(localStorage.getItem(COLS_KEY) ?? 'null') } catch { /* ignore */ }
+    if (!stored) return
+    const next = {
+      left:  clampCol('left',  Number(stored.left)  || DEFAULT_COLS.left,  DEFAULT_COLS, gridRef.current),
+      right: clampCol('right', Number(stored.right) || DEFAULT_COLS.right, DEFAULT_COLS, gridRef.current),
+    }
+    setColumns(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function startResize(side, e) {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = colsRef.current[side]
+    const handle = e.currentTarget
+    // Pointer capture keeps the drag alive over the graph canvas, which would
+    // otherwise swallow the move events.
+    handle.setPointerCapture?.(e.pointerId)
+    document.body.classList.add('is-col-resizing')
+
+    const onMove = ev => {
+      const delta = side === 'left' ? ev.clientX - startX : startX - ev.clientX
+      setColumns({
+        ...colsRef.current,
+        [side]: clampCol(side, startW + delta, colsRef.current, gridRef.current),
+      })
+    }
+    const onUp = () => {
+      handle.releasePointerCapture?.(e.pointerId)
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onUp)
+      document.body.classList.remove('is-col-resizing')
+      saveColumns(colsRef.current)
+    }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onUp)
+  }
+
+  function nudgeResize(side, e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    // The right handle grows its panel when dragged left, so mirror the sign.
+    const dir = (e.key === 'ArrowRight' ? 1 : -1) * (side === 'left' ? 1 : -1)
+    const step = e.shiftKey ? 48 : 12
+    const next = {
+      ...colsRef.current,
+      [side]: clampCol(side, colsRef.current[side] + dir * step, colsRef.current, gridRef.current),
+    }
+    setColumns(next)
+    saveColumns(next)
+  }
+
+  function resetResize(side) {
+    const next = { ...colsRef.current, [side]: DEFAULT_COLS[side] }
+    setColumns(next)
+    saveColumns(next)
+  }
+
+  /** Shared props for the two drag handles between the panes. */
+  function resizerProps(side, label) {
+    return {
+      className: 'panel-resizer',
+      role: 'separator',
+      'aria-orientation': 'vertical',
+      'aria-label': label,
+      'aria-valuenow': cols[side],
+      'aria-valuemin': COL_LIMITS[side][0],
+      'aria-valuemax': COL_LIMITS[side][1],
+      tabIndex: 0,
+      title: 'Drag to resize · double-click to reset',
+      onPointerDown: e => startResize(side, e),
+      onKeyDown: e => nudgeResize(side, e),
+      onDoubleClick: () => resetResize(side),
+    }
+  }
 
   // Helpers to find selected items
   const selectedRoute  = pathwaysData?.routes?.find(r => r.id === selectedRouteId) ?? null
@@ -109,8 +251,29 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
     ? (pathwaysData?.branches?.find(b => b.id === selectedNodeData.branchId) ?? selectedBranch)
     : selectedBranch
 
-  // Primary substrate for InfoPanel/chatbot context
+  // Primary substrate for InfoPanel/assistant context
   const primaryStart = startSmilesList.find(s => s.trim()) ?? ''
+
+  // Surface the current selection to the workspace's Assistant drawer so its
+  // answers stay grounded in the branch the user is looking at.
+  useEffect(() => {
+    if (!onContextChange) return
+    if (!primaryStart && !selectedBranch) {
+      onContextChange(null)
+      return
+    }
+    onContextChange({
+      ...(primaryStart ? { substrate_smiles: primaryStart } : {}),
+      ...(selectedBranch ? {
+        reagent_name: selectedBranch.reagent?.name,
+        reagent_smiles: selectedBranch.reagent?.smiles,
+        reaction_name: selectedBranch.reaction_classification?.name,
+        product_smiles: selectedBranch.product_smiles,
+        execution_history: selectedBranch.execution_history,
+      } : {}),
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [primaryStart, selectedBranchId, pathwaysData])
 
   // Restore a default selection when reopening a saved pathway result.
   useEffect(() => {
@@ -132,6 +295,16 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   function addStart() {
     if (startSmilesList.length < MAX_STARTS)
       setStartSmilesList(prev => [...prev, ''])
+  }
+  // Preset chip click: fill the first empty slot, else append if room.
+  function addPreset(smiles) {
+    setStartSmilesList(prev => {
+      if (prev.includes(smiles)) return prev
+      const emptyIdx = prev.findIndex(s => !s.trim())
+      if (emptyIdx >= 0) return prev.map((s, i) => i === emptyIdx ? smiles : s)
+      if (prev.length < MAX_STARTS) return [...prev, smiles]
+      return prev
+    })
   }
   function removeStart(idx) {
     setStartSmilesList(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev)
@@ -193,6 +366,8 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
     setSelectedNodeData(null)
   }
 
+  const chainCount = Math.min(CHAIN_MAX, Math.max(CHAIN_MIN, parseInt(chainInput, 10) || CHAIN_DEFAULT))
+
   const hasValidStart = startSmilesList.some(s => s.trim())
   const isTargetMode  = pathwaysData?.search_mode === 'target_search'
   const status        = pathwaysData?.result_status
@@ -200,7 +375,11 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
   return (
     <div className="pathway-explorer">
       {loading && <LoadingOverlay stage={loadStage} />}
-      <div className="main-content embedded">
+      <div
+        className="main-content embedded"
+        ref={gridRef}
+        style={{ '--col-left': `${cols.left}px`, '--col-right': `${cols.right}px` }}
+      >
 
         {/* ── Left: inputs ─────────────────────────────────────────── */}
         <div className="panel">
@@ -211,7 +390,7 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                  Starting Material{startSmilesList.length > 1 ? 's' : ''}
+                  Stockroom
                 </span>
                 {startSmilesList.length < MAX_STARTS && (
                   <button
@@ -224,11 +403,51 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
                   </button>
                 )}
               </div>
+
+              {/* Common reagent presets — one click adds to the stockroom */}
+              <div className="stockroom-presets">
+                {STOCKROOM_PRESETS.map(preset => (
+                  <button
+                    key={preset.name}
+                    className="stockroom-preset-chip"
+                    title={preset.smiles}
+                    onClick={() => addPreset(preset.smiles)}
+                  >
+                    {preset.name}
+                  </button>
+                ))}
+                <span className="stockroom-chain-chip" title={chainSmiles(chainCount)}>
+                  <button
+                    className="stockroom-chain-add"
+                    title={`Add ${chainSmiles(chainCount)} to the stockroom`}
+                    onClick={() => addPreset(chainSmiles(chainCount))}
+                  >
+                    Carbon Chain
+                  </button>
+                  <input
+                    className="stockroom-chain-count"
+                    type="number"
+                    min={CHAIN_MIN}
+                    max={CHAIN_MAX}
+                    value={chainInput}
+                    aria-label="Carbons in the chain"
+                    title={`Carbons in the chain (${CHAIN_MIN}–${CHAIN_MAX})`}
+                    onChange={e => setChainInput(e.target.value)}
+                    onBlur={() => setChainInput(String(chainCount))}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        setChainInput(String(chainCount))
+                        addPreset(chainSmiles(chainCount))
+                      }
+                    }}
+                  />
+                </span>
+              </div>
               {startSmilesList.map((smi, idx) => (
                 <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
                   <div style={{ flex: 1 }}>
                     <MoleculeInput
-                      label={startSmilesList.length > 1 ? `Material ${idx + 1}` : 'SMILES / image'}
+                      label={startSmilesList.length > 1 ? `Material ${idx + 1}` : 'Enter SMILES or upload an image'}
                       value={smi}
                       onChange={val => updateStart(idx, val)}
                     />
@@ -442,6 +661,8 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
           </div>
         </div>
 
+        <div {...resizerProps('left', 'Resize the Structures panel')} />
+
         {/* ── Center: pathway graph ─────────────────────────────────── */}
         <div className="panel graph-panel" style={{ border: 'none' }}>
           <div className="panel-header">
@@ -466,32 +687,18 @@ export default function PathwayExplorer({ initialSubstrate, initialTarget, initi
           </div>
         </div>
 
-        {/* ── Right: info + chatbot ─────────────────────────────────── */}
-        <div className="panel">
-          <div className="panel-header" style={{ display: 'flex', gap: 0, padding: 0 }}>
-            {['info', 'chat'].map(tab => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`inspector-tab${activeTab === tab ? ' active' : ''}`}
-              >
-                {tab === 'info' ? <Info size={14} /> : <Bot size={14} />}
-                {tab === 'info' ? 'Reaction Info' : 'Assistant'}
-              </button>
-            ))}
-          </div>
+        <div {...resizerProps('right', 'Resize the Reaction Info panel')} />
 
-          {activeTab === 'info' ? (
-            <InfoPanel
-              branch={nodeBranch}
-              route={selectedRoute}
-              substrateSMILES={primaryStart}
-              selectedNode={selectedNodeId}
-              selectedNodeData={selectedNodeData}
-            />
-          ) : (
-            <Chatbot branch={selectedBranch} substrateSMILES={primaryStart} />
-          )}
+        {/* ── Right: reaction info (chat lives in the Assistant drawer) ── */}
+        <div className="panel">
+          <div className="panel-header">Reaction Info</div>
+          <InfoPanel
+            branch={nodeBranch}
+            route={selectedRoute}
+            substrateSMILES={primaryStart}
+            selectedNode={selectedNodeId}
+            selectedNodeData={selectedNodeData}
+          />
         </div>
 
       </div>

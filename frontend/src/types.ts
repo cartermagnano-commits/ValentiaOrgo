@@ -1,110 +1,40 @@
-export type ChemistryFileType =
-  | 'synthesis'
-  | 'direct_reaction'
-  | 'predict_reaction'
-  | 'mechanism'
-  | 'retrosynthesis'
-  | 'molecule_note'
-  | 'chat'
+export type Tool = 'synthesis' | 'direct_reaction' | 'chat'
 
-export type MechanismStep = {
+export type ChatAttachment =
+  | { kind: 'image'; name: string; mediaType: string; data: string }  // raw base64
+  | { kind: 'text'; name: string; text: string }
+
+// A tool the assistant ran during its reply (engine reaction, stockroom
+// update, pathway analysis) — rendered as a card inside the bubble.
+export type ChatToolResult = {
+  type: 'reaction_result' | 'set_stockroom' | 'pathways_result'
+  data: Record<string, unknown>
+}
+
+export type ChatMessage = {
   id: string
-  label: string
-  description: string
-  electronPushingNotes?: string
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: string
+  attachments?: ChatAttachment[]
+  toolResults?: ChatToolResult[]
 }
 
-export type MoleculeContext = {
-  moleculeOfInterest?: string
+export type ChatContent = {
+  messages: ChatMessage[]
 }
 
-export type SynthesisContent = MoleculeContext & {
+export type SynthesisContent = {
   targetMolecule?: string
   startingMaterials: string[]
-  constraints?: string
-  notes?: string
-  aiResponse?: string
+  pathwaysData?: unknown
+  assistantMessages?: ChatMessage[]   // the tool's side-drawer chat
 }
 
-export type DirectReactionContent = MoleculeContext & {
-  reactants: string[]
-  reagents?: string
-  solventConditions?: string
-  predictedProducts: string[]
-  notes?: string
-  aiResponse?: string
+// Reaction sessions are chat-shaped: molecules arrive typed or photographed
+// in the conversation, engine results render as cards in the thread.
+export type DirectReactionContent = {
+  messages: ChatMessage[]
 }
 
-export type PredictReactionContent = MoleculeContext & {
-  reactants: string[]
-  reagents?: string
-  conditions?: string
-  predictedMajorProduct?: string
-  sideProducts: string[]
-  notes?: string
-  aiResponse?: string
-}
-
-export type MechanismContent = MoleculeContext & {
-  reactionInput?: string
-  mechanismSteps: MechanismStep[]
-  electronPushingNotes?: string
-  notes?: string
-  aiResponse?: string
-}
-
-export type RetrosynthesisContent = MoleculeContext & {
-  targetMolecule?: string
-  disconnections: string[]
-  proposedPrecursors: string[]
-  notes?: string
-  aiResponse?: string
-}
-
-export type MoleculeNoteContent = MoleculeContext & {
-  moleculeName?: string
-  smiles?: string
-  functionalGroups: string[]
-  notes?: string
-  savedObservations: string[]
-}
-
-export type ChatContent = MoleculeContext & {
-  notes?: string
-  messages: Array<{
-    id: string
-    role: 'user' | 'assistant'
-    content: string
-    createdAt: string
-  }>
-}
-
-export type ChemistryFileContent =
-  | SynthesisContent
-  | DirectReactionContent
-  | PredictReactionContent
-  | MechanismContent
-  | RetrosynthesisContent
-  | MoleculeNoteContent
-  | ChatContent
-
-export type ChemistryFile = {
-  id: string
-  project_id: string
-  user_id: string
-  title: string
-  type: ChemistryFileType
-  content: ChemistryFileContent
-  created_at: string
-  updated_at: string
-}
-
-export type Project = {
-  id: string
-  user_id: string
-  name: string
-  description: string | null
-  created_at: string
-  updated_at: string
-  fileCount?: number
-}
+export type SessionContent = SynthesisContent | DirectReactionContent | ChatContent

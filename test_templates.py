@@ -163,6 +163,96 @@ mass_ok = all(
 check("lactone product doesn't duplicate the ring remnant", mass_ok,
       str([b["final_product"] for b in branches]))
 
+# ── Batch 1: curriculum expansion ────────────────────────────────────────────
+# Positive cases assert the transform fires with the right product; the `forbid`
+# and negative cases guard against over-broad SMARTS, which is the failure mode
+# hand-review misses most often as the library grows.
+
+# Nitriles — the gap that motivated this batch.
+react("nitrile + water -> primary amide", "N#Cc1ccccc1", "Water",
+      expect=["NC(=O)c1ccccc1"])
+react("hydroxide alone does not hydrate the nitrile", "N#Cc1ccccc1", "NaOH",
+      forbid=["NC(=O)c1ccccc1", "OC(=O)c1ccccc1"], min_branches=0)
+react("LiAlH4 reduces nitrile to primary amine", "N#Cc1ccccc1", "LiAlH4",
+      expect=["NCc1ccccc1"])
+# Regression: one-step nitrile -> acid fabricated an oxygen (needs 2 H2O).
+# The acid must be reached by chaining through the amide, never in one step.
+react("nitrile + water does NOT jump straight to the acid", "N#Cc1ccccc1", "Water",
+      forbid=["OC(=O)c1ccccc1"])
+
+# Carbonyl / acid-derivative interconversion.
+react("LiAlH4 reduces carboxylic acid to primary alcohol", "OC(=O)c1ccccc1", "LiAlH4",
+      expect=["OCc1ccccc1"])
+react("amide hydrolysis gives the carboxylic acid", "NC(=O)c1ccccc1", "Water",
+      expect=["OC(=O)c1ccccc1"])
+react("acyl chloride + amine -> amide", "CC(=O)Cl", "EtNH2", expect=["CCNC(C)=O"])
+react("acyl chloride + alcohol -> ester", "CC(=O)Cl", "EtOH", expect=["CCOC(C)=O"])
+
+# Oxidation ladder — strength must be respected.
+react("PCC stops at the aldehyde", "CCO", "PCC", expect=["CC=O"])
+react("PCC does NOT over-oxidise to the acid", "CCO", "PCC", forbid=["CC(=O)O"])
+react("KMnO4 takes the secondary alcohol to the ketone", "CC(C)O", "KMnO4",
+      expect=["CC(C)=O"])
+
+# Alkenes / alkynes.
+react("H2/Pd reduces the alkene", "C=CC", "H2/Pd-C", expect=["CCC"])
+react("Lindlar stops the alkyne at the alkene", "C#CC", "H2/Lindlar", expect=["C=CC"])
+react("Lindlar does NOT go through to the alkane", "C#CC", "H2/Lindlar", forbid=["CCC"])
+react("mCPBA epoxidises the alkene", "C=CC", "mCPBA", expect=["CC1CO1"])
+
+# Aromatic substitution — regression: the halogen must come from the halogen
+# reagent. Both of these produced bromobenzene before the fix, because Br was
+# hardcoded on the product side instead of mapped from Br2.
+react("Br2 brominates benzene", "c1ccccc1", "Br2", expect=["Brc1ccccc1"])
+react("Cl2 chlorinates benzene", "c1ccccc1", "Cl2", expect=["Clc1ccccc1"])
+react("Cl2 does NOT produce an aryl bromide", "c1ccccc1", "Cl2", forbid=["Brc1ccccc1"])
+react("AlCl3 alone does NOT halogenate", "c1ccccc1", "AlCl3",
+      forbid=["Brc1ccccc1", "Clc1ccccc1"], min_branches=0)
+# Regression: nitration chained to tri-nitrobenzene before the ring guard.
+react("nitration stops at mononitration", "c1ccccc1", "HNO3/H2SO4",
+      forbid=["[O-][N+](=O)c1ccccc1[N+](=O)[O-]"])
+
+# Substitution.
+react("SN2 with cyanide gives the nitrile", "CCBr", "NaCN", expect=["CCC#N"])
+react("SN2 with azide gives the alkyl azide", "CCBr", "NaN3", expect=["CCN=[N+]=[N-]"])
+
+# Regression: a one-equivalent acetal SMARTS wrote both alkoxy groups and
+# duplicated the alcohol's carbons. Acetal must be reached via the hemiacetal.
+react("aldehyde + alcohol gives the hemiacetal", "CCC=O", "EtOH",
+      expect=["CCC(O)OCC"])
+react("one alcohol equivalent does NOT give the acetal", "CCC=O", "EtOH",
+      forbid=["CCOC(CC)OCC"])
+
+# ── Batch 2: alcohol activation (SOCl2 / PBr3 / TsCl) ────────────────────────
+# Motivated by a real miss: "benzyl alcohol + SOCl2" returned no verified
+# product, so the endpoint fell through to an unverified LLM guess. Each
+# activator gets its own SMARTS keyed on the actual reagent skeleton, because
+# _infer_conditions collapses SOCl2 and TsCl to the same "hcl" tag as HCl —
+# the condition tag alone cannot tell them apart.
+
+react("SOCl2 converts benzyl alcohol to benzyl chloride", "OCc1ccccc1", "SOCl2",
+      expect=["ClCc1ccccc1"])
+react("SOCl2 converts a primary alcohol to the alkyl chloride", "CCCCO", "SOCl2",
+      expect=["CCCCCl"])
+react("SOCl2 converts a carboxylic acid to the acyl chloride", "CC(=O)O", "SOCl2",
+      expect=["CC(=O)Cl"])
+react("PBr3 converts 1-butanol to 1-bromobutane", "CCCCO", "PBr3",
+      expect=["CCCCBr"])
+react("TsCl tosylates the alcohol", "CCO", "TsCl",
+      expect=["CCOS(=O)(=O)c1ccc(C)cc1"])
+
+# Negative guards — the activator SMARTS must key on the reagent skeleton, not
+# on the shared "hcl"/"hbr" condition tag.
+react("HCl alone does NOT chlorinate benzyl alcohol", "OCc1ccccc1", "HCl",
+      forbid=["ClCc1ccccc1"], min_branches=0)
+react("SOCl2 does NOT add across an alkene", "C=CCC", "SOCl2",
+      forbid=["CCC(C)Cl"], min_branches=0)
+react("PBr3 does NOT add across an alkene", "C=CCC", "PBr3",
+      forbid=["CCC(C)Br"], min_branches=0)
+react("TsCl does NOT chlorinate the alcohol", "CCO", "TsCl", forbid=["CCCl"])
+react("SOCl2 leaves the ether alone", "CCOCC", "SOCl2", min_branches=0)
+react("SOCl2 does NOT convert the ketone", "CC(=O)C", "SOCl2", min_branches=0)
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 print()

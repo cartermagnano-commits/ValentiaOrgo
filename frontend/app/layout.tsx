@@ -7,7 +7,7 @@ import PwaRegister from '../src/platform/PwaRegister'
 
 export const metadata: Metadata = {
   title: 'Orgo AI',
-  description: 'Project-based organic chemistry AI workspace',
+  description: 'Organic chemistry AI workspace',
   icons: { icon: '/icon.svg', apple: '/icon.svg' },
   appleWebApp: { capable: true, title: 'Orgo AI', statusBarStyle: 'default' },
 }

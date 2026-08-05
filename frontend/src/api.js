@@ -1,24 +1,11 @@
 import { getEnginePayload } from '../lib/engine'
-import { supabase } from '../lib/supabaseClient'
 
 const BASE = ''  // same-origin; Next.js rewrites (next.config.mjs) proxy to the FastAPI backend
-
-// Attach the Supabase access token so the backend can enforce auth when
-// SUPABASE_JWT_SECRET is configured. Harmless (ignored) when auth is disabled.
-async function authHeaders() {
-  try {
-    const { data } = await supabase.auth.getSession()
-    const token = data?.session?.access_token
-    return token ? { Authorization: `Bearer ${token}` } : {}
-  } catch {
-    return {}
-  }
-}
 
 async function post(path, body) {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -36,7 +23,6 @@ export async function analyzeImage(file) {
   form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/analyze', {
     method: 'POST',
-    headers: await authHeaders(),
     body: form,
   })
   if (!res.ok) {
@@ -50,9 +36,7 @@ export async function analyzeImage(file) {
 // returned confidence "verifying". Blocks server-side until the vision read
 // finishes; the token is single-use.
 export async function verifyAnalysis(token) {
-  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`, {
-    headers: await authHeaders(),
-  })
+  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`)
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Verification failed')
@@ -82,7 +66,6 @@ export async function reactFromImage(file) {
   form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/react-from-image', {
     method: 'POST',
-    headers: await authHeaders(),
     body: form,
   })
   if (!res.ok) {
@@ -104,10 +87,10 @@ export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth 
   })
 }
 
-async function streamSSE(path, body, onDelta) {
+async function streamSSE(path, body, onDelta, onToolEvent = null) {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -125,6 +108,7 @@ async function streamSSE(path, body, onDelta) {
     try { p = JSON.parse(data) } catch { return false }
     if (p?.error) throw new Error(p.error)
     if (p?.delta) onDelta(p.delta)
+    if (p?.tool_event && onToolEvent) onToolEvent(p.tool_event)
     return false
   }
   while (true) {
@@ -189,10 +173,18 @@ export async function streamStereo(branch, substrateSMILES, onDelta) {
   }, onDelta)
 }
 
-export async function streamChat(messages, context, onDelta) {
-  return streamSSE('/chat', { messages, context, engine: getEnginePayload() }, onDelta)
-}
-
-export async function streamAssist(fileType, content, onDelta) {
-  return streamSSE('/assist', { file_type: fileType, content, engine: getEnginePayload() }, onDelta)
+// useEngine=false asks the backend to skip the deterministic engine for this
+// turn: no app tools, and no OSR/template run on an attached image.
+// explain=false asks it to stop after the engine result — the Reaction tab
+// shows the product first and generates prose only when asked.
+export async function streamChat(messages, context, onDelta, model = null,
+                                 surface = null, onToolEvent = null,
+                                 useEngine = true, explain = true) {
+  return streamSSE(
+    '/chat',
+    { messages, context, engine: getEnginePayload(model), surface,
+      use_engine: useEngine, explain },
+    onDelta,
+    onToolEvent,
+  )
 }

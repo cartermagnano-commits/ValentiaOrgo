@@ -28,6 +28,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ try:
 except ImportError:
     pass
 
+from askcos_client import AskcosClient, AskcosUnavailable
 from osr_arbitration import (
     arbitrate_local, plausible_or_none, resolve_with_vision,
 )
@@ -78,8 +80,23 @@ from reaction_arbitration import (
     AI_ONLY, DISPUTED, UNVERIFIED, VERIFIED, agreement, candidate_pool,
     plausible_products, verdict,
 )
+from prediction import (
+    UNNAMED_REACTION, Prediction, needs_sanity_check, resolve_products,
+)
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
 from reactivity_engine import TemplateEngine
+
+# ── ASKCOS forward predictor ─────────────────────────────────────────────────
+# None when ASKCOS_BASE_URL is unset, which means "ASKCOS off" — /react then
+# behaves exactly as it did before the integration, on templates alone. Built
+# once at import (after load_dotenv above); the client holds no connection
+# state, so a single instance is safe across threads and requests.
+ASKCOS = AskcosClient.from_env()
+if ASKCOS is not None:
+    logger.info("ASKCOS forward predictor enabled: %s (backend=%s, model=%s)",
+                ASKCOS.base_url, ASKCOS.backend, ASKCOS.model_name)
+else:
+    logger.info("ASKCOS disabled (ASKCOS_BASE_URL unset) — using template engine only")
 
 # ── LLM config — Ollama is used when no Anthropic key is present ─────────────
 OLLAMA_BASE_URL    = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -94,6 +111,10 @@ VISION_TIMEOUT = float(os.environ.get("OLLAMA_VISION_TIMEOUT", "120"))
 # legible at 768 px, and 1024→768 cuts visual tokens ~45% — directly cutting
 # the wait whenever arbitration needs the vision read.
 VISION_MAX_DIM = int(os.environ.get("VISION_MAX_DIM", "768"))
+# Structure recognition stays pinned to Sonnet regardless of the (cheaper)
+# chat model: misreading a structure poisons everything downstream, while a
+# chat reply being slightly less polished costs nothing.
+ANTHROPIC_VISION_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-sonnet-4-6")
 
 # Vision-capable model families that current Ollama engines can load, best
 # first. llama3.2-vision is intentionally last: its 'mllama' architecture was
@@ -128,6 +149,89 @@ def _ollama_vision_model() -> str | None:
                 logger.info("Vision model auto-detected: %s", name)
                 return name
     return None
+
+
+def _smiles_from_vision_text(text: str, source: str) -> str | None:
+    """Pull the first plausible canonical SMILES out of a VLM response —
+    either the whole response or an extracted SMILES-shaped token."""
+    import re
+
+    # Whole-response parse only when it IS a bare SMILES (single token) —
+    # RDKit stops parsing at whitespace, so prose like "I need to..." would
+    # otherwise "parse" as iodine with the rest as a name field.
+    if len(text.split()) == 1:
+        result = plausible_or_none(_canonical_smiles(text), "Vision")
+        if result:
+            logger.info("%s → valid SMILES (full response): %r", source, result)
+            return result
+
+    for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
+        result = plausible_or_none(_canonical_smiles(candidate), "Vision")
+        if result:
+            logger.info("%s → valid SMILES (extracted token): %r", source, result)
+            return result
+
+    logger.warning("%s: no valid SMILES found in response: %r", source, text[:200])
+    return None
+
+
+def _anthropic_vision_call(img_bytes: bytes, prompt: str) -> str | None:
+    """
+    Send an image + prompt to Claude and return the first valid canonical
+    SMILES found in the response. Returns None on any failure so Ollama can
+    still take over.
+
+    Uses the OpenAI-compatible /v1/chat/completions route rather than the
+    native Anthropic messages API: gateways like MIT Parley silently DROP
+    base64 image blocks on their /v1/messages passthrough (Claude replies
+    "I don't see any image"), while the chat-completions route delivers
+    them — and api.anthropic.com serves the same route, so this works for
+    direct keys too.
+    Runs synchronously — always call from a thread pool, never the event loop.
+    """
+    import httpx
+
+    base = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    b64 = base64.b64encode(img_bytes).decode()
+    logger.info("Claude vision call → model=%s url=%s", ANTHROPIC_VISION_MODEL, base)
+    try:
+        resp = httpx.post(
+            f"{base}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {os.environ['ANTHROPIC_API_KEY']}"},
+            json={
+                "model": ANTHROPIC_VISION_MODEL,
+                "max_tokens": 256,
+                "temperature": 0,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+            },
+            timeout=VISION_TIMEOUT,
+        )
+        resp.raise_for_status()
+        choice = resp.json()["choices"][0]
+        # A gateway content filter returns HTTP 200 with content=null and
+        # finish_reason="content_filter" — without this branch that surfaced as
+        # an opaque AttributeError and the whole OSR path failed silently.
+        if choice.get("finish_reason") == "content_filter" or choice["message"].get("content") is None:
+            logger.warning(
+                "Claude vision blocked by gateway content filter (%s): %s — "
+                "the prompt wording likely tripped it; see the note in _ollama_vision_smiles.",
+                choice.get("finish_reason"),
+                choice["message"].get("refusal") or "no detail",
+            )
+            return None
+        text = choice["message"]["content"].strip()
+        logger.info("Claude vision raw response: %r", text[:300])
+    except Exception as exc:
+        logger.warning("Claude vision error (%s): %s", type(exc).__name__, exc)
+        return None
+    return _smiles_from_vision_text(text, "Claude")
 
 
 def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
@@ -165,19 +269,19 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
         logger.warning("Ollama vision error (%s): %s", type(exc).__name__, exc)
         return None
 
-    result = plausible_or_none(_canonical_smiles(text), "Vision")
-    if result:
-        logger.info("Ollama → valid SMILES (full response): %r", result)
-        return result
+    return _smiles_from_vision_text(text, "Ollama")
 
-    for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
-        result = plausible_or_none(_canonical_smiles(candidate), "Vision")
+
+def _vision_call(img_bytes: bytes, prompt: str) -> str | None:
+    """Route a vision read to the best available backend: Claude when an
+    ANTHROPIC_API_KEY is configured (works through ANTHROPIC_BASE_URL
+    gateways like MIT Parley), falling back to local Ollama otherwise or
+    on any Claude failure."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        result = _anthropic_vision_call(img_bytes, prompt)
         if result:
-            logger.info("Ollama → valid SMILES (extracted token): %r", result)
             return result
-
-    logger.warning("Ollama: no valid SMILES found in response: %r", text[:200])
-    return None
+    return _ollama_call(img_bytes, prompt)
 
 
 def _ollama_vision_smiles(img_bytes: bytes, engine=None) -> str | None:
@@ -187,15 +291,17 @@ def _ollama_vision_smiles(img_bytes: bytes, engine=None) -> str | None:
     """
     return _vision_smiles_routed(
         img_bytes,
-        "You are an expert chemist. The image shows chemical structures, possibly alongside "
-        "reaction notation.\n\n"
-        "Extract SMILES for every actual chemical molecule present. Ignore:\n"
+        # Wording is load-bearing: the Parley gateway content-filters persona
+        # assignments ("You are an expert chemist") and output-suppression
+        # directives ("Output ONLY ... no prose, no markdown"), returning
+        # finish_reason=content_filter. Re-test against Parley before editing.
+        "The image shows chemical structures, possibly alongside reaction notation.\n\n"
+        "Report the SMILES for every actual chemical molecule present, separating "
+        "molecules with a period (.). Leave out:\n"
         "  - Reaction arrows (→, ->, ⟶, curved electron-flow arrows)\n"
         "  - Question marks (?) indicating unknown products\n"
-        "  - Plus signs (+) as separators — use a period (.) instead\n"
-        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures\n\n"
-        "Output ONLY the SMILES string. Separate multiple molecules with '.'. "
-        "No explanation, no prose, no markdown.",
+        "  - Plus signs (+) used as separators\n"
+        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures",
         engine,
     )
 
@@ -209,19 +315,17 @@ def _ollama_reaction_smiles(img_bytes: bytes, engine=None) -> str | None:
     """
     return _vision_smiles_routed(
         img_bytes,
-        "You are an expert organic chemist reading a reaction problem image.\n\n"
-        "The image shows a chemical reaction: starting material(s) on the LEFT of a reaction "
+        # See the wording note in _ollama_vision_smiles. A bulleted exclusion list
+        # trips the Parley filter here (it does not in _ollama_vision_smiles), so
+        # the exclusions are prose. Re-test against Parley before editing.
+        "The image shows a chemical reaction: starting material(s) on the left of a reaction "
         "arrow, possibly reagents written above or below the arrow, and a product or question "
-        "mark (?) on the RIGHT.\n\n"
-        "Output ONLY the SMILES of the INPUT molecules — starting materials and reagents that "
-        "go INTO the reaction. Do NOT output the product or question mark.\n\n"
-        "Ignore completely:\n"
-        "  - Reaction arrows (→, ->, ⟶) and curved electron-flow arrows\n"
-        "  - Question marks (?) — these are the unknown product, not an input\n"
-        "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures\n"
-        "  - Plus signs (+) as separators — use a period (.) instead\n\n"
-        "Output ONLY a SMILES string — no prose, no labels, no markdown. "
-        "Separate multiple input molecules with a period (.).",
+        "mark (?) on the right.\n\n"
+        "Report the SMILES for the input molecules — the starting materials and reagents that "
+        "go into the reaction — separating molecules with a period (.). Leave out the product "
+        "and the question mark, along with reaction arrows, curved electron-flow arrows, plus "
+        "signs used as separators, and text annotations such as 'heat', 'Δ', 'hν', solvent "
+        "names and temperatures.",
         engine,
     )
 
@@ -329,10 +433,13 @@ def _parse_engine_field(raw: str | None) -> Optional["EngineConfig"]:
 
 # ── "Choose Your Engine" — generative LLM provider router ────────────────────
 # The engine picker (local / byok / hosted) ONLY powers generative explanations
-# and chat. Structure recognition and the reaction engine always run keyless.
+# and chat. Structure recognition uses the server-side ANTHROPIC_API_KEY when
+# present (see _vision_call), else runs keyless via local Ollama.
 # A BYOK api_key is request-scoped: never persisted, never logged.
 
-DEFAULT_ANTHROPIC_MODEL = os.environ.get("HOSTED_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+# Chat/explanations run on Haiku by default — ~1/3 the cost of Sonnet and
+# fine for pedagogical prose; vision stays on Sonnet (ANTHROPIC_VISION_MODEL).
+DEFAULT_ANTHROPIC_MODEL = os.environ.get("HOSTED_ANTHROPIC_MODEL", "claude-haiku-4-5")
 DEFAULT_OPENAI_MODEL    = os.environ.get("HOSTED_OPENAI_MODEL", "gpt-4o-mini")
 
 # Lightweight in-memory usage telemetry (per engine mode/provider). Resets on
@@ -344,6 +451,21 @@ _ENGINE_USAGE: dict[str, int] = {}
 def _record_usage(mode: str, provider: str | None) -> None:
     key = f"{mode}:{provider or '-'}"
     _ENGINE_USAGE[key] = _ENGINE_USAGE.get(key, 0) + 1
+
+
+# "No template matched" tracking, so new SMARTS templates get prioritized by
+# real usage instead of guesswork. The log line is the durable signal
+# (greppable TEMPLATE_GAP prefix); the counter is a dev convenience view with
+# the same resets-on-restart tradeoff as _ENGINE_USAGE.
+_TEMPLATE_GAPS: dict[str, int] = {}   # "substrate|reagent" (canonical) → miss count
+
+
+def _record_template_gap(endpoint: str, substrate: str, reagent: str,
+                         conditions: list[str]) -> None:
+    logger.info("TEMPLATE_GAP endpoint=%s substrate=%s reagent=%s conditions=%s",
+                endpoint, substrate, reagent, ",".join(conditions))
+    key = f"{substrate}|{reagent}"
+    _TEMPLATE_GAPS[key] = _TEMPLATE_GAPS.get(key, 0) + 1
 
 
 class EngineConfig(BaseModel):
@@ -388,7 +510,14 @@ async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int,
                             model: str | None = None, api_key: str | None = None):
     """Async generator: streams SSE delta chunks from Anthropic."""
     import anthropic
-    client = anthropic.AsyncAnthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
+    if api_key:
+        # BYOK: don't inherit the server's ANTHROPIC_BASE_URL (a gateway like
+        # Parley would reject a real Anthropic key). Route by key prefix.
+        base_url = ("https://parley.api.mit.edu" if api_key.startswith("sk-parley-")
+                    else "https://api.anthropic.com")
+        client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
+    else:
+        client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     async with client.messages.stream(
         model=model or DEFAULT_ANTHROPIC_MODEL,
         max_tokens=max_tokens,
@@ -398,6 +527,58 @@ async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int,
         async for text in stream.text_stream:
             yield f"data: {json.dumps({'delta': text})}\n\n"
     yield "data: [DONE]\n\n"
+
+
+async def _anthropic_complete(system: str, user: str, max_tokens: int,
+                              model: str | None = None) -> str:
+    """One-shot, non-streaming hosted Anthropic completion. Used only for the
+    short structured JSON answers (blind product guess, sanity check) — these
+    don't need SSE since the frontend consumes them as a single JSON field,
+    not incremental prose. Hosted-only: always the server key."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    resp = await client.messages.create(
+        model=model or DEFAULT_ANTHROPIC_MODEL,
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    # A refusal is a successful HTTP 200 whose text is a canned decline string,
+    # which _parse_json_object would silently reject as unparseable. Log it so
+    # the cause is visible — on the Parley gateway this is usually the prompt
+    # wording tripping its content filter, not the chemistry.
+    if resp.stop_reason == "refusal":
+        logger.warning("Anthropic/gateway refused the request (stop_details=%s) — "
+                       "check the prompt wording; see the note in _blind_guess_prompts.",
+                       getattr(resp, "stop_details", None))
+        return ""
+    return resp.content[0].text if resp.content else ""
+
+
+def _parse_json_object(text: str) -> dict | None:
+    """Best-effort parse of a single JSON object out of an LLM response.
+    Strips code fences, then falls back to the first {...} span. Returns
+    None (never raises) on anything unparseable — callers must treat that
+    as 'feature unavailable', not an error."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\n?|```$", "", stripped).strip()
+    try:
+        obj = json.loads(stripped)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    m = re.search(r"\{.*\}", stripped, re.S)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
 
 
 async def _stream_openai(system: str, messages: list[dict], max_tokens: int,
@@ -415,6 +596,60 @@ async def _stream_openai(system: str, messages: list[dict], max_tokens: int,
         delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
         if delta:
             yield f"data: {json.dumps({'delta': delta})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def _stream_chat_completions(base_url: str, api_key: str | None, model: str,
+                                   system: str, messages: list[dict], max_tokens: int):
+    """Async generator: streams SSE deltas from an OpenAI-compatible
+    /v1/chat/completions endpoint, with multimodal (image) message support.
+
+    Used whenever a chat request carries image attachments: gateways like MIT
+    Parley silently DROP base64 image blocks on their native /v1/messages
+    passthrough, but deliver them on the chat-completions route — which
+    api.anthropic.com, api.openai.com, and Ollama all serve too (see
+    _anthropic_vision_call).
+    """
+    import httpx
+
+    def to_openai(m: dict):
+        images = m.get("images") or []
+        if not images:
+            return {"role": m["role"], "content": m["content"]}
+        blocks = [
+            {"type": "image_url",
+             "image_url": {"url": f"data:{img['media_type']};base64,{img['data']}"}}
+            for img in images
+        ]
+        if m.get("content"):
+            blocks.append({"type": "text", "text": m["content"]})
+        return {"role": m["role"], "content": blocks}
+
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "messages": [{"role": "system", "content": system}] + [to_openai(m) for m in messages],
+    }
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "POST", f"{base_url.rstrip('/')}/v1/chat/completions",
+            json=payload, headers=headers, timeout=120.0,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    chunk = line[6:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(chunk)
+                        delta = data["choices"][0]["delta"].get("content", "")
+                        if delta:
+                            yield f"data: {json.dumps({'delta': delta})}\n\n"
+                    except Exception:
+                        pass
     yield "data: [DONE]\n\n"
 
 
@@ -471,8 +706,60 @@ def _sse_stream(system: str, messages: list[dict], max_tokens: int,
         _select_stream(system, messages, max_tokens, engine))
 
 
+def _anthropic_base_for_key(api_key: str | None) -> str:
+    """Base URL for an Anthropic-family key. BYOK keys route by prefix (a real
+    Anthropic key must not inherit a Parley ANTHROPIC_BASE_URL and vice versa);
+    the server key uses the configured gateway."""
+    if api_key:
+        return ("https://parley.api.mit.edu" if api_key.startswith("sk-parley-")
+                else "https://api.anthropic.com")
+    return os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+
+
+def _select_multimodal_stream(system: str, messages: list[dict], max_tokens: int,
+                              engine: Optional[EngineConfig]):
+    """Engine routing for chat requests that carry image attachments. All
+    providers (Anthropic/Parley, OpenAI, Ollama) speak the OpenAI-compatible
+    chat-completions route, which — unlike Parley's /v1/messages — actually
+    delivers image blocks."""
+    mode = (engine.mode or "hosted").lower() if engine else "hosted"
+    provider = ((engine.provider if engine else None) or "anthropic").lower()
+    model = engine.model if engine else None
+
+    if mode == "local":
+        return _stream_chat_completions(OLLAMA_BASE_URL, None, model or OLLAMA_MODEL,
+                                        system, messages, max_tokens)
+    if mode == "byok":
+        if not engine or not engine.api_key:
+            raise HTTPException(400, "BYOK mode requires an API key.")
+        if provider == "openai":
+            return _stream_chat_completions("https://api.openai.com", engine.api_key,
+                                            model or DEFAULT_OPENAI_MODEL,
+                                            system, messages, max_tokens)
+        return _stream_chat_completions(_anthropic_base_for_key(engine.api_key),
+                                        engine.api_key, model or DEFAULT_ANTHROPIC_MODEL,
+                                        system, messages, max_tokens)
+    # hosted
+    if provider == "openai" and os.environ.get("OPENAI_API_KEY"):
+        return _stream_chat_completions("https://api.openai.com",
+                                        os.environ["OPENAI_API_KEY"],
+                                        model or DEFAULT_OPENAI_MODEL,
+                                        system, messages, max_tokens)
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return _stream_chat_completions(_anthropic_base_for_key(None),
+                                        os.environ["ANTHROPIC_API_KEY"],
+                                        model or DEFAULT_ANTHROPIC_MODEL,
+                                        system, messages, max_tokens)
+    return _stream_chat_completions(OLLAMA_BASE_URL, None, model or OLLAMA_MODEL,
+                                    system, messages, max_tokens)
+
+
 def _select_stream(system: str, messages: list[dict], max_tokens: int,
                    engine: Optional[EngineConfig] = None):
+    if any(m.get("images") for m in messages):
+        _record_usage((engine.mode if engine else "hosted") or "hosted",
+                      engine.provider if engine else None)
+        return _select_multimodal_stream(system, messages, max_tokens, engine)
     if engine is None:
         _record_usage("env", None)
         if os.environ.get("ANTHROPIC_API_KEY"):
@@ -790,11 +1077,21 @@ async def require_auth(authorization: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
 
 
+MAX_CHAT_IMAGES = 6                       # image attachments per request
+MAX_CHAT_IMAGE_B64 = 6 * 1024 * 1024      # base64 chars per image (~4.5 MB raw)
+
+
 def _guard_messages(messages) -> None:
     if len(messages) > MAX_CHAT_MESSAGES:
         raise HTTPException(status_code=413, detail="Too many messages in one request.")
     if sum(len(m.content) for m in messages) > MAX_CONTENT_CHARS:
         raise HTTPException(status_code=413, detail="Message payload too large.")
+    images = [a for m in messages for a in getattr(m, "attachments", [])
+              if a.kind == "image"]
+    if len(images) > MAX_CHAT_IMAGES:
+        raise HTTPException(status_code=413, detail="Too many image attachments in one request.")
+    if any(len(a.data) > MAX_CHAT_IMAGE_B64 for a in images):
+        raise HTTPException(status_code=413, detail="An attached image is too large.")
 
 
 # ── Hosted-mode quota ─────────────────────────────────────────────────────────
@@ -830,6 +1127,419 @@ def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -
                    "Settings → Engine, or try again tomorrow.",
         )
     _hosted_usage[key] = _hosted_usage.get(key, 0) + 1
+
+
+# ── Direct Reaction: AI-guess fallback + advisory sanity check ────────────────
+# Both are single-shot, fail-open extras layered on the deterministic engine:
+# the blind guess runs ONLY when zero templates matched (clearly labeled
+# unverified in the UI), the sanity check ONLY when a template did match
+# (purely advisory — it can flag, never override). Any failure — quota,
+# network, unparseable output, invalid SMILES — degrades to None, never into
+# the response. No retries by design: a retry-until-agreement loop would let
+# a stochastic LLM veto a deterministic computation.
+
+
+def _validate_and_canonicalize_smiles(smiles: str) -> str | None:
+    """RDKit validity + canonicalization for LLM-produced SMILES. Returns
+    None for anything that doesn't parse — a hallucinated non-SMILES answer
+    must degrade to 'no guess available', never reach the frontend."""
+    from rdkit import Chem
+    mol = Chem.MolFromSmiles((smiles or "").strip())
+    return Chem.MolToSmiles(mol) if mol is not None else None
+
+
+def _blind_guess_prompts(substrate_smiles: str, reagent_smiles: str) -> tuple[str, str]:
+    system = (
+        "You are an organic chemistry prediction assistant for Orgo AI. "
+        "Orgo AI's deterministic template engine found NO matching reaction "
+        "template for the substrate/reagent pair below — this reflects a gap "
+        "in curated template coverage, not proof the reaction is impossible.\n\n"
+        "Give your own single best-guess prediction of the major organic "
+        "product, the way a careful organic chemistry student would attempt "
+        "it by hand.\n\n"
+        # Phrasing note: the MIT Parley gateway runs an input content filter that
+        # rejects output-suppression directives ("respond with ONLY", "no prose
+        # outside the JSON") with finish_reason=content_filter. Keep format
+        # requests permissive — _parse_json_object already strips code fences.
+        "GUIDELINES:\n"
+        "- You are shown NO verified ground truth here. This is a genuine, "
+        "unverified guess and must be labeled as such.\n"
+        "- Format your answer as a JSON object with the shape below.\n"
+        "- JSON shape exactly: "
+        '{"product_smiles": "<valid SMILES of the major product, or "" if '
+        'you cannot determine one>", "reaction_name": "<short mechanism name '
+        'or null>", "confidence": "low" | "medium", "reasoning": "<1-2 '
+        'sentence rationale, under 240 characters>"}\n'
+        '- Never use confidence "high" — this path only runs when there is '
+        "no verified answer.\n"
+        '- If you are not reasonably confident of any product, set '
+        'product_smiles to "" and explain why in reasoning.'
+    )
+    user = (
+        "Predict the major organic product for this reaction.\n\n"
+        f"Substrate (SMILES): {substrate_smiles}\n"
+        f"Reagent(s) (SMILES): {reagent_smiles}\n\n"
+        "Answer as a JSON object."
+    )
+    return system, user
+
+
+def _sanity_check_prompts(substrate_smiles: str, reagent_smiles: str,
+                          products: list[dict]) -> tuple[str, str]:
+    system = (
+        "You are a chemistry sanity-check reviewer for Orgo AI. A "
+        "deterministic, verified SMARTS-template engine has already computed "
+        "the product(s) below — this connectivity is confirmed correct by "
+        "the template match and MUST NOT be second-guessed, relabeled, or "
+        "revised.\n\n"
+        "Your job is only to skim for something that would look genuinely "
+        "surprising or worth a caveat to an organic chemistry instructor "
+        "(e.g. an unusual reagent/substrate pairing for the matched reaction "
+        "class, a stereochemistry/regiochemistry caveat worth noting, a "
+        "safety or side-reaction note). This is a purely advisory pass.\n\n"
+        # See the phrasing note in _blind_guess_prompts — the Parley gateway
+        # content-filters output-suppression directives.
+        "GUIDELINES:\n"
+        "- Do not propose an alternative product. Do not contradict the "
+        "given product.\n"
+        "- Format your answer as a JSON object with the shape below.\n"
+        "- JSON shape exactly: "
+        '{"flagged": true | false, "note": "<one short sentence, under 160 '
+        'characters, only when flagged is true, else empty string>"}\n'
+        "- Default to flagged: false. Only set true for a specific, genuine "
+        "concern — not generic commentary or praise."
+    )
+    product_lines = "\n".join(
+        f"  - {p['smiles']}  (reaction: {p['reaction_name']})" for p in products[:3]
+    )
+    user = (
+        f"Substrate: {substrate_smiles}\n"
+        f"Reagent(s): {reagent_smiles}\n"
+        f"Engine product(s):\n{product_lines}\n\n"
+        "Is anything here worth flagging to a student? Answer as a JSON object."
+    )
+    return system, user
+
+
+async def _maybe_blind_guess(substrate: str, reagent: str, user_id: str | None) -> dict | None:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        _enforce_hosted_quota(None, user_id)
+    except HTTPException:
+        logger.info("ai_guess skipped: hosted quota reached (user=%s)", user_id or "anon")
+        return None
+    try:
+        system, user = _blind_guess_prompts(substrate, reagent)
+        raw = await _anthropic_complete(system, user, max_tokens=300)
+        data = _parse_json_object(raw)
+        if not data or not data.get("product_smiles"):
+            return None
+        loop = asyncio.get_event_loop()
+        canon = await loop.run_in_executor(
+            _chem_pool, _validate_and_canonicalize_smiles, data["product_smiles"])
+        if canon is None:
+            logger.info("ai_guess discarded: RDKit rejected %r", data.get("product_smiles"))
+            return None
+        confidence = data.get("confidence") if data.get("confidence") in ("low", "medium") else "low"
+        return {
+            "smiles": canon,
+            "reaction_name": data.get("reaction_name") or None,
+            "confidence": confidence,
+            "reasoning": (data.get("reasoning") or "")[:280],
+            "unverified": True,
+        }
+    except Exception as exc:
+        logger.warning("ai_guess failed (%s): %s", type(exc).__name__, exc)
+        return None
+
+
+async def _maybe_sanity_check(substrate: str, reagent: str, products: list[dict],
+                              user_id: str | None) -> dict | None:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    try:
+        _enforce_hosted_quota(None, user_id)
+    except HTTPException:
+        return None
+    try:
+        system, user = _sanity_check_prompts(substrate, reagent, products)
+        raw = await _anthropic_complete(system, user, max_tokens=150)
+        data = _parse_json_object(raw)
+        if not data:
+            return None
+        return {
+            "flagged": bool(data.get("flagged")),
+            "note": (data.get("note") or "")[:200] if data.get("flagged") else "",
+        }
+    except Exception as exc:
+        logger.warning("sanity_check failed (%s): %s", type(exc).__name__, exc)
+        return None
+
+
+# ── Chat tools: the assistant can drive parts of the app ─────────────────────
+# Tool calls run server-side (pure engine work — no nested LLM calls) and are
+# surfaced to the browser as SSE `tool_event` frames so the UI can render
+# product cards in the conversation and update the Synthesis panel. Which
+# tools a chat gets depends on where it's embedded ("surface").
+
+_CHAT_TOOL_DEFS: dict[str, dict] = {
+    "run_reaction": {
+        "name": "run_reaction",
+        "description": (
+            "Run Orgo AI's reaction engine on one substrate + one reagent "
+            "(SMILES). Use this BEFORE answering any question about what two "
+            "specific molecules form. Convert names to SMILES yourself, "
+            "writing ionic reagents in their reactive ionic form — sodium "
+            "ethoxide as CC[O-].[Na+], NaOH as [OH-].[Na+], t-BuOK as "
+            "CC(C)(C)[O-].[K+], LDA as CC(C)[N-]C(C)C.[Li+] — never as "
+            "neutral aggregates like CCO.[Na]. Results render as cards in "
+            "the UI.\n"
+            "Reading the result: `source` is 'templates' (a curated, "
+            "human-written rule — treat as ground truth) or 'askcos' (an ML "
+            "forward predictor — reliable when `probability` is high). "
+            "`low_confidence: true` means no curated rule corroborates the "
+            "prediction and the model itself is unsure — say so plainly "
+            "rather than presenting it as settled. A reaction_name of "
+            "'Predicted (unnamed)' means the product is predicted but the "
+            "name library has no entry; do not invent a name for it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "substrate_smiles": {"type": "string", "description": "Substrate SMILES"},
+                "reagent_smiles": {"type": "string", "description": "Reagent SMILES (multi-fragment with '.' allowed)"},
+            },
+            "required": ["substrate_smiles", "reagent_smiles"],
+        },
+    },
+    "set_stockroom": {
+        "name": "set_stockroom",
+        "description": (
+            "Set or extend the user's Synthesis stockroom (starting "
+            "materials). Use when the user asks to add, set, or replace "
+            "materials. The panel updates live."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "smiles": {"type": "array", "items": {"type": "string"},
+                           "description": "Starting-material SMILES"},
+                "mode": {"type": "string", "enum": ["replace", "add"],
+                         "description": "replace the stockroom or add to it (default replace)"},
+            },
+            "required": ["smiles"],
+        },
+    },
+    "run_pathways": {
+        "name": "run_pathways",
+        "description": (
+            "Run pathway exploration: fan the starting material(s) out across "
+            "the reagent catalog (optionally searching toward a target "
+            "product). The graph renders in the Synthesis panel."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start_smiles": {"type": "array", "items": {"type": "string"},
+                                 "description": "Starting-material SMILES (1-4)"},
+                "target_smiles": {"type": "string", "description": "Optional target product SMILES"},
+            },
+            "required": ["start_smiles"],
+        },
+    },
+}
+
+# Which tools each chat surface exposes. Stockroom/pathways manipulation only
+# makes sense where the Synthesis panel is on screen (its Assistant drawer).
+_SURFACE_TOOLS: dict[str, list[str]] = {
+    "synthesis": ["run_reaction", "set_stockroom", "run_pathways"],
+    "reaction": ["run_reaction"],
+    "chat": ["run_reaction"],
+}
+
+_CHAT_TOOL_ROUNDS = 4   # bound on tool-call iterations per /chat request
+
+_CHAT_TOOLS_SYSTEM = (
+    "\n\nTOOLS:\n"
+    "- run_reaction: ALWAYS call this before answering what two specific "
+    "molecules form. Its output is verified ground truth — never contradict "
+    "it. If it returns zero products, say the verified engine has no rule "
+    "for that pair, then you may give your own prediction clearly labeled "
+    "as an unverified AI guess.\n"
+    "- set_stockroom (when available): use when the user asks to set or add "
+    "starting materials; confirm what you set.\n"
+    "- run_pathways (when available): use when the user asks to explore "
+    "routes from their materials; the graph appears in the Synthesis panel.\n"
+    "- Tool results render as cards in the UI automatically — explain the "
+    "chemistry concisely instead of restating raw SMILES or JSON."
+)
+
+
+async def _execute_chat_tool(name: str, args: dict) -> tuple[dict, dict | None]:
+    """Run one chat tool. Returns (model_view, ui_event): what the model reads
+    back, and the tool_event frame for the browser (None to skip). Never
+    raises — errors become a message the model can relay."""
+    try:
+        if name == "run_reaction":
+            core = await _react_core(str(args.get("substrate_smiles", "")),
+                                     str(args.get("reagent_smiles", "")))
+            if not core["products"]:
+                _record_template_gap("chat", core["substrate_smiles"],
+                                     core["reagent_smiles"], core["conditions"])
+            model_view = {
+                "substrate_smiles": core["substrate_smiles"],
+                "reagent_smiles": core["reagent_smiles"],
+                "environment": core["environment"],
+                # The model is told which engine answered and how confident it
+                # was, so it can hedge on a low-probability ASKCOS prediction
+                # instead of presenting everything with equal certainty. In
+                # chat the model IS the second opinion, so low_confidence is
+                # surfaced to it rather than triggering a separate call.
+                "source": core["source"],
+                "low_confidence": core["low_confidence"],
+                "products": [
+                    {"smiles": p["smiles"], "reaction_name": p["reaction_name"],
+                     "steps_taken": p["steps_taken"],
+                     "probability": p.get("probability"),
+                     "execution_history": p["execution_history"]}
+                    for p in core["products"]
+                ],
+            }
+            if not core["products"]:
+                model_view["note"] = (
+                    "No reaction template matched. Tell the user the verified "
+                    "engine has no rule for this pair; you may offer a clearly "
+                    "labeled unverified guess."
+                )
+            return model_view, {"type": "reaction_result", "data": core}
+
+        if name == "set_stockroom":
+            loop = asyncio.get_event_loop()
+            valid: list[str] = []
+            invalid: list[str] = []
+            for smi in list(args.get("smiles") or [])[:8]:
+                canon = await loop.run_in_executor(
+                    _chem_pool, _validate_and_canonicalize_smiles, str(smi))
+                (valid if canon else invalid).append(canon or str(smi))
+            mode = args.get("mode") if args.get("mode") in ("replace", "add") else "replace"
+            if not valid:
+                return {"applied": False, "invalid": invalid,
+                        "note": "No valid SMILES — nothing changed."}, None
+            return ({"applied": True, "smiles": valid, "mode": mode, "invalid": invalid},
+                    {"type": "set_stockroom", "data": {"smiles": valid, "mode": mode}})
+
+        if name == "run_pathways":
+            req = PathwaysRequest(
+                start_smiles=[str(s) for s in (args.get("start_smiles") or [])][:4],
+                target_smiles=(str(args.get("target_smiles")) if args.get("target_smiles") else None),
+            )
+            result = await pathways(req)
+            branches = result.get("branches") or []
+            routes = result.get("routes") or []
+            model_view = {
+                "search_mode": result.get("search_mode"),
+                "result_status": result.get("result_status"),
+                "shortest_route_depth": result.get("shortest_route_depth"),
+                "no_match_message": result.get("no_match_message"),
+                "route_count": len(routes),
+                "branches": [
+                    {"reagent": (b.get("reagent") or {}).get("name"),
+                     "reaction": (b.get("reaction_classification") or {}).get("name"),
+                     "product": b.get("product_smiles")}
+                    for b in branches[:12]
+                ],
+            }
+            ui_event = {"type": "pathways_result", "data": {
+                "start_smiles": req.start_smiles,
+                "target_smiles": req.target_smiles or "",
+                "pathways": result,
+            }}
+            return model_view, ui_event
+
+        return {"error": f"Unknown tool: {name}"}, None
+    except HTTPException as exc:
+        return {"error": str(exc.detail)}, None
+    except Exception as exc:
+        logger.warning("chat tool %s failed (%s): %s", name, type(exc).__name__, exc)
+        return {"error": f"Tool failed: {type(exc).__name__}"}, None
+
+
+async def _stream_anthropic_tools(system: str, messages: list[dict], max_tokens: int,
+                                  surface: str, model: str | None = None,
+                                  explain: bool = True):
+    """Streaming Anthropic chat with a bounded server-side tool loop. Text
+    deltas stream as normal SSE frames; each executed tool additionally emits
+    a `tool_event` frame for the UI."""
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    tool_names = _SURFACE_TOOLS.get(surface) or ["run_reaction"]
+    tools = [_CHAT_TOOL_DEFS[n] for n in tool_names if n in _CHAT_TOOL_DEFS]
+    convo: list[dict] = [dict(m) for m in messages]
+
+    for round_index in range(_CHAT_TOOL_ROUNDS):
+        # tools must be sent on EVERY request once the history contains
+        # toolUse/toolResult blocks — Bedrock-backed gateways (Parley) reject
+        # the request otherwise. Termination comes from the round cap below,
+        # not from withdrawing the tools.
+        # Deferred mode cannot stream as it goes: the model often writes a
+        # preamble BEFORE its tool call (measured on this stack: first text at
+        # 4.4s, tool call at 9.4s), and that preamble is exactly the prose the
+        # user asked us not to generate. Buffer until we know whether a tool ran.
+        buffered: list[str] = []
+        async with client.messages.stream(
+            model=model or DEFAULT_ANTHROPIC_MODEL,
+            max_tokens=max_tokens,
+            system=system,
+            messages=convo,
+            tools=tools,
+        ) as stream:
+            async for text in stream.text_stream:
+                if explain:
+                    yield f"data: {json.dumps({'delta': text})}\n\n"
+                else:
+                    buffered.append(text)
+            final = await stream.get_final_message()
+
+        tool_uses = [b for b in final.content if getattr(b, "type", None) == "tool_use"]
+
+        if not explain:
+            if not tool_uses:
+                # No engine work this turn, so nothing was deferred — this is a
+                # real answer to a real question (a follow-up like "why SN1?")
+                # and withholding it would just lose the reply.
+                for text in buffered:
+                    yield f"data: {json.dumps({'delta': text})}\n\n"
+                break
+            # A tool ran: the card is the answer. Drop the preamble, emit the
+            # engine result, and stop before the explanation round.
+            for block in tool_uses:
+                _model_view, ui_event = await _execute_chat_tool(
+                    block.name, dict(block.input or {}))
+                if ui_event:
+                    yield f"data: {json.dumps({'tool_event': ui_event})}\n\n"
+            break
+
+        # Round cap reached: stop executing tools; the text streamed so far
+        # stands as the answer.
+        if not tool_uses or round_index == _CHAT_TOOL_ROUNDS - 1:
+            break
+
+        convo.append({"role": "assistant", "content": final.content})
+        results = []
+        for block in tool_uses:
+            model_view, ui_event = await _execute_chat_tool(
+                block.name, dict(block.input or {}))
+            if ui_event:
+                yield f"data: {json.dumps({'tool_event': ui_event})}\n\n"
+            results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": json.dumps(model_view),
+            })
+        convo.append({"role": "user", "content": results})
+
+    yield "data: [DONE]\n\n"
 
 
 _decimer_fn = None
@@ -1059,6 +1769,25 @@ async def health():
 async def engine_usage():
     """In-memory generative-call counts per engine mode/provider (since restart)."""
     return {"usage": dict(_ENGINE_USAGE), "total": sum(_ENGINE_USAGE.values())}
+
+
+@app.get("/engine/template-gaps")
+async def template_gaps():
+    """In-memory 'no template matched' counts per (substrate, reagent) pair
+    since restart — use to prioritize which SMARTS templates to add next."""
+    top = sorted(_TEMPLATE_GAPS.items(), key=lambda kv: kv[1], reverse=True)[:100]
+    return {"gaps": [{"pair": k, "count": v} for k, v in top],
+            "total_misses": sum(_TEMPLATE_GAPS.values())}
+
+
+def _is_valid_smiles(smiles: str) -> bool:
+    if not smiles:
+        return False
+    try:
+        from rdkit import Chem
+        return Chem.MolFromSmiles(smiles) is not None
+    except Exception:
+        return False
 
 
 def _to_b64(img: np.ndarray) -> str | None:
@@ -1352,7 +2081,7 @@ def _process(raw_bytes: bytes, engine=None) -> dict:
     # Kick off the slow independent readers FIRST, each on its own pool, so
     # they overlap the preprocessing stages and DECIMER reads below instead
     # of running after them:
-    #   * vision (Ollama HTTP) — sees a downscaled copy of the upload
+    #   * vision (Claude or Ollama HTTP) — sees a downscaled copy of the upload
     #   * MolScribe (torch)    — reads the original now; the binarized
     #     rendition is submitted as soon as preprocessing produces it
     vision_future = _vision_pool.submit(_ollama_vision_smiles, _vision_png(img), engine)
@@ -2209,15 +2938,96 @@ async def stereo(req: StereoRequest, user_id: str | None = Depends(require_auth)
     )
 
 
+class ChatAttachment(BaseModel):
+    kind: str = "image"          # only images reach the backend; text files are
+                                 # inlined into message content client-side
+    media_type: str = "image/png"
+    data: str = ""               # raw base64, no data: URI prefix
+    name: str = ""
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
+    attachments: list[ChatAttachment] = []
 
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     context: Optional[dict] = None
     engine: Optional[EngineConfig] = None  # generative engine selection (Choose Your Engine)
+    surface: Optional[str] = None          # "synthesis" | "reaction" | "chat" — enables app tools
+    # False = answer straight from the model: no app tools, and no OSR/template
+    # run on an attached image. The escape hatch for when OSR misreads the
+    # picture and the deterministic path is getting in the way of the question.
+    use_engine: bool = True
+    # False = the client wants only the engine result this turn; the model's
+    # prose is deferred until the user asks for it. The Reaction tab's
+    # Explanation button re-sends the same turn with explain=True.
+    explain: bool = True
+
+
+def _reaction_ground_text(result: dict) -> str:
+    """Grounding block appended to the chat system prompt when the engine ran on
+    an attached reaction image — the LLM must explain this verified result, not
+    re-derive it."""
+    products = result.get("products") or []
+    lines = [
+        "\n--- ENGINE-VERIFIED REACTION (read from the attached image; never contradict) ---",
+        f"Substrate: {result.get('substrate_smiles', '')}",
+        f"Reagent: {result.get('reagent_smiles', '')}",
+    ]
+    if products:
+        lines.append("Verified products:")
+        for p in products[:4]:
+            lines.append(f"  - {p.get('reaction_name', '')}: {p.get('smiles', '')}")
+    else:
+        lines.append(
+            "The verified engine found no matching template for this pair. Say so "
+            "plainly; any product you propose is an unverified general-chemistry guess."
+        )
+    return "\n".join(lines)
+
+
+async def _image_reaction_then_explain(system: str, messages: list[dict],
+                                       engine: Optional[EngineConfig],
+                                       explain: bool = True):
+    """Image-bearing chats can't use the native tool path (the gateway drops
+    image blocks on the tools endpoint). So run OSR + the deterministic engine
+    on the newest attached image ourselves, emit a `reaction_result` frame — the
+    same one the run_reaction tool emits, so the UI renders its banner/card —
+    then stream a grounded explanation that still carries the image."""
+    newest_image: str | None = None
+    for message in reversed(messages):
+        images = message.get("images") or []
+        if images:
+            newest_image = images[-1].get("data")
+            break
+
+    ground = ""
+    if newest_image:
+        result = None
+        try:
+            raw = base64.b64decode(newest_image)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(_executor, _react_from_image, raw)
+        except Exception as exc:
+            logger.warning("chat image-reaction OSR failed (%s): %s",
+                           type(exc).__name__, exc)
+        if (result and not result.get("error")
+                and result.get("substrate_smiles") and result.get("reagent_smiles")):
+            if not result.get("products"):
+                _record_template_gap("chat_image", result["substrate_smiles"],
+                                     result["reagent_smiles"], [])
+            yield f"data: {json.dumps({'tool_event': {'type': 'reaction_result', 'data': result}})}\n\n"
+            if not explain:
+                # Card only. The Explanation button re-runs this turn.
+                yield "data: [DONE]\n\n"
+                return
+            ground = _reaction_ground_text(result)
+
+    async for frame in _sse_stream(system + ground, messages, 800, engine):
+        yield frame
 
 
 @app.post("/chat")
@@ -2251,10 +3061,49 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
         "- Keep responses concise and student-friendly."
     )
 
-    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    messages = []
+    for m in req.messages:
+        entry: dict = {"role": m.role, "content": m.content}
+        images = [{"media_type": a.media_type, "data": a.data}
+                  for a in m.attachments if a.kind == "image" and a.data]
+        if images:
+            entry["images"] = images
+        messages.append(entry)
+
+    # App tools (run_reaction / set_stockroom / run_pathways) run on the
+    # native Anthropic tool-use path. Image-bearing chats stay on the
+    # chat-completions route (Parley drops image blocks on /v1/messages),
+    # which doesn't carry our tools — so a chat turn gets tools OR images,
+    # never both.
+    has_images = any(m.get("images") for m in messages)
+    mode = (req.engine.mode if req.engine else "hosted") or "hosted"
+    # use_engine=False drops both engine paths below (tools and image-OSR) to the
+    # plain streaming branch — a direct model answer with no deterministic run.
+    surface_runs_reactions = (
+        req.use_engine
+        and bool(req.surface)
+        and "run_reaction" in (_SURFACE_TOOLS.get(req.surface) or [])
+    )
+
+    if (surface_runs_reactions and not has_images and mode == "hosted"
+            and os.environ.get("ANTHROPIC_API_KEY")):
+        _record_usage("hosted", "anthropic")
+        stream = _with_error_frames(_stream_anthropic_tools(
+            system_prompt + _CHAT_TOOLS_SYSTEM, messages, 800,
+            req.surface, model=req.engine.model if req.engine else None,
+            explain=req.explain,
+        ))
+    elif surface_runs_reactions and has_images:
+        # Image chats bypass the native tool path — run the engine on the image
+        # ourselves so the reaction still surfaces (banner/card + grounding).
+        stream = _with_error_frames(
+            _image_reaction_then_explain(system_prompt, messages, req.engine,
+                                         explain=req.explain))
+    else:
+        stream = _sse_stream(system_prompt, messages, 800, req.engine)
 
     return StreamingResponse(
-        _sse_stream(system_prompt, messages, 250, req.engine),
+        stream,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -2472,10 +3321,56 @@ def _pick_substrate_and_react(components: list[str]) -> tuple[str, str, list[str
     return substrate, reagent, conditions, []
 
 
+# ── Product prediction: ASKCOS predicts, templates name and overrule ─────────
+# The decision logic lives in prediction.py so it can be tested without
+# importing this module (and with it TensorFlow/DECIMER/MolScribe). What
+# remains here is only the I/O around it.
+
+
+def _askcos_outcomes_sync(substrate: str, reagent: str) -> tuple[list | None, str | None]:
+    """Blocking ASKCOS call → (outcomes, failure). Never raises."""
+    if ASKCOS is None:
+        return None, None
+    try:
+        return ASKCOS.predict([substrate], reagents=reagent), None
+    except AskcosUnavailable as exc:
+        return None, str(exc)
+
+
+async def _askcos_outcomes(substrate: str, reagent: str) -> tuple[list | None, str | None]:
+    """Async ASKCOS call → (outcomes, failure). Never raises."""
+    if ASKCOS is None:
+        return None, None
+    try:
+        return await ASKCOS.apredict([substrate], reagents=reagent), None
+    except AskcosUnavailable as exc:
+        return None, str(exc)
+
+
+async def _predict_products(substrate: str, reagent: str,
+                            conditions: list[str]) -> Prediction:
+    """Predicted products for a substrate/reagent pair.
+
+    Runs the template engine and ASKCOS concurrently — the templates are needed
+    either way (to name ASKCOS products, to overrule them, or to stand in for
+    them), so there is no reason to pay for them serially.
+    """
+    def _run_templates():
+        return _get_engine().run_for_reagent(substrate, reagent, conditions)
+
+    loop = asyncio.get_event_loop()
+    branches, (outcomes, failure) = await asyncio.gather(
+        loop.run_in_executor(_chem_pool, _run_templates),
+        _askcos_outcomes(substrate, reagent),
+    )
+    return resolve_products(branches, outcomes, failure)
+
+
 def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
     """
-    Full pipeline: raw image bytes → preprocessing → DECIMER → split
-    into substrate + reagent → template engine → product SMILES.
+    Full pipeline: raw image bytes → preprocessing → DECIMER → substrate +
+    reagent split → ASKCOS forward prediction (named by the template engine,
+    which also stands in when ASKCOS is unreachable) → product SMILES.
 
     Returns a dict with keys:
         recognized_smiles   — raw DECIMER output
@@ -2483,7 +3378,8 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
         substrate_smiles    — first component (canonical)
         reagent_smiles      — remaining components joined with '.'
         products            — list of {smiles, reaction_name, template_id,
-                               steps_taken, execution_history}
+                               steps_taken, execution_history, probability}
+        source              — "askcos" | "templates", which engine produced them
         error               — str | None
     """
     from rdkit import Chem
@@ -2516,12 +3412,16 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
     # 3. Parse all components — split on '.' but re-validate each fragment
     raw_mol = _mol_from_smiles_loose(recognized_smiles)
     if raw_mol is None:
-        logger.info("DECIMER SMILES invalid — calling Ollama reaction parse")
-        fallback = _ollama_reaction_smiles(_img_bytes, engine)
-        logger.info("Ollama (invalid SMILES fallback) returned: %r", fallback)
-        if fallback:
-            recognized_smiles = fallback
-            raw_mol = Chem.MolFromSmiles(recognized_smiles)
+        # Try replacing '+' notation (some readers use '+' for fragment sep)
+        alt = recognized_smiles.replace("+", ".")
+        raw_mol = Chem.MolFromSmiles(alt)
+        if raw_mol is None:
+            logger.info("Recognized SMILES invalid — calling reaction-aware vision parse")
+            fallback = _ollama_reaction_smiles(_img_bytes, engine)
+            logger.info("Vision (invalid SMILES fallback) returned: %r", fallback)
+            if fallback:
+                recognized_smiles = fallback
+                raw_mol = Chem.MolFromSmiles(recognized_smiles)
         if raw_mol is None:
             return {
                 "recognized_smiles": recognized_smiles,
@@ -2533,18 +3433,30 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
 
     frags = Chem.GetMolFrags(raw_mol, asMols=True)
 
-    # Detect suspicious DECIMER output: non-organic elements (e.g. [U] = uranium, a
-    # common DECIMER artefact when it misreads image noise) or excessive fragment count.
-    _NON_ORGANIC = {"U", "Tc", "Re", "Os", "Ir", "Rh", "Ru", "Pd", "Pt", "Au", "Hg"}
+    # Detect suspicious DECIMER output: implausible elements or excessive fragment
+    # count. This is an allowlist rather than a denylist of exotic elements: DECIMER
+    # invents whatever two-letter symbol fits the pixels, and the failure that
+    # motivated this — "SOCl2" written over the arrow read back as [CH3][Sb](Cl)Cl,
+    # antimony — is exactly the case a hand-written denylist keeps missing. Anything
+    # outside the set an undergraduate depiction can actually contain is treated as a
+    # misread. Reagents that only ever appear as text over the arrow (OsO4, Pd/C,
+    # KMnO4, PCC) are deliberately absent: seeing them as *drawn atoms* means the
+    # label was misparsed. A false positive here costs one extra vision call and
+    # nothing else — the re-read only replaces the SMILES if it yields >= 2 fragments.
+    _PLAUSIBLE_ATOMS = {
+        "C", "H", "N", "O", "S", "P", "F", "Cl", "Br", "I",   # organic core
+        "B", "Si",                                            # boranes, silyl groups
+        "Li", "Na", "K", "Mg", "Ca", "Al", "Zn", "Cu", "Fe",  # counterions / Grignards
+    }
     _atom_syms = {a.GetSymbol() for a in raw_mol.GetAtoms()}
-    _bad_atoms = _atom_syms & _NON_ORGANIC
+    _bad_atoms = _atom_syms - _PLAUSIBLE_ATOMS
     if len(frags) > 5 or _bad_atoms:
         logger.info(
-            "Suspicious DECIMER output (%d frags, non-organic atoms=%s, smiles=%r) — calling Ollama",
+            "Suspicious DECIMER output (%d frags, implausible atoms=%s, smiles=%r) — calling vision",
             len(frags), _bad_atoms or "none", recognized_smiles,
         )
         fix = _ollama_reaction_smiles(_img_bytes, engine)
-        logger.info("Ollama (suspicious DECIMER) returned: %r", fix)
+        logger.info("Vision (suspicious DECIMER) returned: %r", fix)
         if fix:
             fix_mol = Chem.MolFromSmiles(fix)
             if fix_mol is not None:
@@ -2568,6 +3480,7 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
             "products": [],
             "recognition_confidence": _confidence_label(recognition_verified),
             "recognition_verified": recognition_verified,
+            "source": "templates",
         }
 
     # 4. Assign substrate/reagent and run the engine — every fragment gets a
@@ -2578,11 +3491,11 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
         substrate_smiles, reagent_smiles, conditions, len(branches),
     )
 
-    # 5. Last-resort: if engine matched nothing, ask Ollama for a cleaner re-read and retry
+    # 5. Last-resort: if engine matched nothing, ask vision for a cleaner re-read and retry
     if not branches:
-        logger.info("No templates matched — calling Ollama for last-resort re-identification")
+        logger.info("No templates matched — calling vision for last-resort re-identification")
         retry_smiles = _ollama_reaction_smiles(_img_bytes, engine)
-        logger.info("Ollama (no-match retry) returned: %r", retry_smiles)
+        logger.info("Vision (no-match retry) returned: %r", retry_smiles)
         if retry_smiles and retry_smiles != recognized_smiles:
             retry_mol = Chem.MolFromSmiles(retry_smiles)
             if retry_mol is not None:
@@ -2596,21 +3509,33 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
                         _pick_substrate_and_react(retry_components)
                     )
                     logger.info(
-                        "Retry with Ollama SMILES: substrate=%r  reagent=%r  conditions=%s → %d branch(es)",
+                        "Retry with vision SMILES: substrate=%r  reagent=%r  conditions=%s → %d branch(es)",
                         substrate_smiles, reagent_smiles, conditions, len(branches),
                     )
 
-    products = _branch_products(branches)
+    # 6. Predict. The template run above already happened (and drove both the
+    # substrate/reagent assignment and the vision retries), so ASKCOS only has
+    # to answer for the assignment that survived all of that.
+    outcomes, failure = _askcos_outcomes_sync(substrate_smiles, reagent_smiles)
+    prediction = resolve_products(branches, outcomes, failure)
+    logger.info("Prediction source=%s low_confidence=%s → %d product(s)",
+                prediction.source, prediction.low_confidence, len(prediction.products))
 
     return {
         "recognized_smiles": recognized_smiles,
         "components":        components,
         "substrate_smiles":  substrate_smiles,
         "reagent_smiles":    reagent_smiles,
-        "products":          products,
-        "error":             None if products else "No matching reaction templates for this substrate/reagent pair.",
+        "products":          prediction.products,
+        "source":            prediction.source,
+        "low_confidence":    prediction.low_confidence,
         "recognition_confidence": _confidence_label(recognition_verified),
         "recognition_verified":   recognition_verified,
+        # Empty products is NOT an error here: the endpoint layers an AI-guess
+        # fallback on that case, and an error string would make the frontend
+        # bail before rendering it. Genuine OSR failures return earlier with
+        # their own error strings.
+        "error":             None,
     }
 
 
@@ -2619,15 +3544,16 @@ class ReactRequest(BaseModel):
     reagent_smiles: str
 
 
-@app.post("/react", dependencies=[Depends(require_auth)])
-async def react(req: ReactRequest):
-    """Return all predicted products for a given substrate + reagent SMILES pair."""
+async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
+    """Reaction run shared by /react and the chat run_reaction tool:
+    canonicalize, infer conditions, predict via ASKCOS, name via templates.
+    Raises HTTPException(422) on invalid SMILES; no LLM involvement."""
     from rdkit import Chem
 
-    sub_mol = Chem.MolFromSmiles(req.substrate_smiles.strip())
+    sub_mol = Chem.MolFromSmiles(substrate_smiles.strip())
     if sub_mol is None:
         raise HTTPException(status_code=422, detail="Invalid substrate SMILES")
-    rea_mol = Chem.MolFromSmiles(req.reagent_smiles.strip())
+    rea_mol = Chem.MolFromSmiles(reagent_smiles.strip())
     if rea_mol is None:
         raise HTTPException(status_code=422, detail="Invalid reagent SMILES")
 
@@ -2642,19 +3568,62 @@ async def react(req: ReactRequest):
             conditions = r.get("conditions", conditions)
             break
 
-    def _run():
-        return _get_engine().run_for_reagent(substrate, reagent, conditions)
-
-    loop = asyncio.get_event_loop()
-    branches = await loop.run_in_executor(_chem_pool, _run)
-
-    environment = "Kinetic" if "kinetic_base" in conditions else "Thermodynamic"
+    prediction = await _predict_products(substrate, reagent, conditions)
 
     return {
         "substrate_smiles": substrate,
         "reagent_smiles":   reagent,
-        "environment":      environment,
-        "products":         _branch_products(branches),
+        "environment":      "Kinetic" if "kinetic_base" in conditions else "Thermodynamic",
+        "conditions":       conditions,
+        "products":         prediction.products,
+        "source":           prediction.source,
+        "low_confidence":   prediction.low_confidence,
+    }
+
+
+@app.post("/react")
+async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
+    """Return all predicted products for a given substrate + reagent SMILES pair."""
+    core = await _react_core(req.substrate_smiles, req.reagent_smiles)
+    substrate, reagent = core["substrate_smiles"], core["reagent_smiles"]
+    products = core["products"]
+
+    ai_guess = None
+    sanity_check = None
+    if not products:
+        _record_template_gap("react", substrate, reagent, core["conditions"])
+        ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
+    else:
+        # An ASKCOS product the templates couldn't reproduce is a library gap,
+        # and a sharper one than "nothing matched" — we know a reaction happens
+        # and what it yields, just not what to call it.
+        if any(p["reaction_name"] == UNNAMED_REACTION for p in products):
+            _record_template_gap("react_unnamed", substrate, reagent, core["conditions"])
+
+        if core["low_confidence"]:
+            # No template corroborates ASKCOS and ASKCOS itself isn't sure, so
+            # neither deterministic source is standing behind this answer. Ask
+            # Claude as a second opinion. It arrives in the same `ai_guess`
+            # channel as the no-products case — already RDKit-validated and
+            # already flagged `unverified` — so the UI presents it as a guess
+            # sitting alongside the prediction, never as ground truth.
+            _record_template_gap("react_low_confidence", substrate, reagent, core["conditions"])
+            ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
+        elif needs_sanity_check(products, core["low_confidence"]):
+            # A curated template named every product, so a hand-written rule
+            # already vouches for this answer — spending a model round-trip to
+            # second-guess it only makes the page slower. See needs_sanity_check.
+            sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id)
+
+    return {
+        "substrate_smiles": substrate,
+        "reagent_smiles":   reagent,
+        "environment":      core["environment"],
+        "products":         products,
+        "source":           core["source"],
+        "low_confidence":   core["low_confidence"],
+        "ai_guess":         ai_guess,
+        "sanity_check":     sanity_check,
     }
 
 
@@ -2778,8 +3747,10 @@ async def react_assess(req: AssessRequest, user_id: str | None = Depends(require
     }
 
 
-@app.post("/react-from-image", dependencies=[Depends(require_auth)])
-async def react_from_image(file: UploadFile = File(...), engine: str | None = Form(default=None)):
+@app.post("/react-from-image")
+async def react_from_image(file: UploadFile = File(...),
+                           engine: str | None = Form(default=None),
+                           user_id: str | None = Depends(require_auth)):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -2792,6 +3763,26 @@ async def react_from_image(file: UploadFile = File(...), engine: str | None = Fo
     except Exception as exc:
         logger.exception("react-from-image pipeline failed")
         raise HTTPException(status_code=500, detail="Reaction image processing failed.") from exc
+
+    result["ai_guess"] = None
+    result["sanity_check"] = None
+    if result.get("substrate_smiles") and result.get("reagent_smiles") and not result.get("error"):
+        if not result.get("products"):
+            _record_template_gap("react_from_image",
+                                 result["substrate_smiles"], result["reagent_smiles"], [])
+            result["ai_guess"] = await _maybe_blind_guess(
+                result["substrate_smiles"], result["reagent_smiles"], user_id)
+        elif result.get("low_confidence"):
+            # Same escalation as /react: nothing deterministic vouches for this
+            # product, so Claude gives a second opinion alongside it.
+            _record_template_gap("react_from_image_low_confidence",
+                                 result["substrate_smiles"], result["reagent_smiles"], [])
+            result["ai_guess"] = await _maybe_blind_guess(
+                result["substrate_smiles"], result["reagent_smiles"], user_id)
+        elif needs_sanity_check(result["products"], bool(result.get("low_confidence"))):
+            result["sanity_check"] = await _maybe_sanity_check(
+                result["substrate_smiles"], result["reagent_smiles"],
+                result["products"], user_id)
     return result
 
 

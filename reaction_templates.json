@@ -527,6 +527,429 @@
       ],
       "provenance": "March, J. 'Advanced Organic Chemistry' 5th ed. Ring-opening saponification of a lactone: hydroxide attacks the carbonyl, the ring C-O bond breaks, giving a single open-chain hydroxy-carboxylate. Product atoms grouped as ONE component — writing them as two fragments duplicates the ring remnant into both.",
       "enabled": true
+    },
+    {
+      "id": "nitrile_hydration_amide",
+      "name": "Nitrile hydration: nitrile → primary amide",
+      "smarts": "[NX1:1]#[CX2:2][#6:3].[OX2H2]>>[NX3H2:1][CX3:2](=[OX1])[#6:3]",
+      "conditions": [
+        "protic",
+        "acid"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "nitrile_reduction_lah",
+      "name": "LiAlH4 reduction: nitrile → primary amine",
+      "smarts": "[NX1:1]#[CX2:2][#6:3].[AlH4-]>>[NX3H2:1][CX4H2:2][#6:3]",
+      "conditions": [
+        "hydride"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "nitrile_grignard_ketone",
+      "name": "Nitrile + Grignard → ketimine",
+      "smarts": "[NX1:1]#[CX2:2][#6:3].[#6:4][Mg]>>[#6:4][CX3:2](=[NX2H:1])[#6:3]",
+      "conditions": [
+        "carbanion"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "amide_hydrolysis_acid",
+      "name": "Amide hydrolysis: amide → carboxylic acid",
+      "smarts": "[NX3H2:1][CX3:2](=[OX1:3])[#6:4].[OX2H2]>>[OX2H][CX3:2](=[OX1:3])[#6:4]",
+      "conditions": [
+        "acid",
+        "protic"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "amide_reduction_lah",
+      "name": "LiAlH4 reduction: amide → amine",
+      "smarts": "[NX3:1][CX3:2](=[OX1])[#6:3].[AlH4-]>>[NX3:1][CX4H2:2][#6:3]",
+      "conditions": [
+        "hydride"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "carboxylic_acid_reduction_lah",
+      "name": "LiAlH4 reduction: carboxylic acid → primary alcohol",
+      "smarts": "[OX2H][CX3:2](=[OX1:3])[#6:4].[AlH4-]>>[OX2H:3][CX4H2:2][#6:4]",
+      "conditions": [
+        "hydride"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "ester_reduction_lah",
+      "name": "LiAlH4 reduction: ester → primary alcohol",
+      "smarts": "[#6:1][OX2:2][CX3:3](=[OX1:4])[#6:5].[AlH4-]>>[#6:1][OX2H:2].[OX2H:4][CX4H2:3][#6:5]",
+      "conditions": [
+        "hydride"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "acid_chloride_hydrolysis",
+      "name": "Acyl chloride hydrolysis → carboxylic acid",
+      "smarts": "[Cl:1][CX3:2](=[OX1:3])[#6:4].[OX2H2]>>[OX2H][CX3:2](=[OX1:3])[#6:4]",
+      "conditions": [
+        "protic",
+        "hydroxide"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "acid_chloride_amine",
+      "name": "Acyl chloride + amine → amide (Schotten-Baumann)",
+      "smarts": "[Cl][CX3:2](=[OX1:3])[#6:4].[NX3;H2,H1;!$(NC=O):5]>>[N:5][CX3:2](=[OX1:3])[#6:4]",
+      "conditions": [
+        "amine_nucleophile"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "acid_chloride_alcohol",
+      "name": "Acyl chloride + alcohol → ester",
+      "smarts": "[Cl][CX3:2](=[OX1:3])[#6:4].[OX2H:5][#6:6]>>[O:5]([#6:6])[CX3:2](=[OX1:3])[#6:4]",
+      "conditions": [
+        "alkoxide",
+        "protic"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "fischer_esterification",
+      "name": "Fischer esterification: acid + alcohol → ester",
+      "smarts": "[OX2H][CX3:2](=[OX1:3])[#6:4].[OX2H:5][CX4:6]>>[O:5]([CX4:6])[CX3:2](=[OX1:3])[#6:4]",
+      "conditions": [
+        "alkoxide",
+        "protic"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "ester_transesterification",
+      "name": "Transesterification: ester + alkoxide → new ester",
+      "smarts": "[#6:1][OX2:2][CX3:3](=[OX1:4])[#6:5].[OX1H0-:6][#6:7]>>[#6:7][O;+0:6][CX3:3](=[OX1:4])[#6:5]",
+      "conditions": [
+        "alkoxide"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "aldehyde_oxidation",
+      "name": "Oxidation: aldehyde → carboxylic acid",
+      "smarts": "[CX3H1:1](=[OX1:2])[#6:3]>>[OX2H][CX3:1](=[OX1:2])[#6:3]",
+      "conditions": [
+        "oxidant"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "primary_alcohol_oxidation_strong",
+      "name": "Strong oxidation: primary alcohol → carboxylic acid",
+      "smarts": "[CX4H2:1]([OX2H:2])[#6:3]>>[C:1](=[O:2])([OX2H])[#6:3]",
+      "conditions": [
+        "oxidant"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "secondary_alcohol_oxidation",
+      "name": "Oxidation: secondary alcohol → ketone",
+      "smarts": "[CX4H1:1]([OX2H:2])([#6:3])[#6:4]>>[CX3:1](=[O:2])([#6:3])[#6:4]",
+      "conditions": [
+        "oxidant"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "primary_alcohol_oxidation_mild",
+      "name": "Mild oxidation (PCC): primary alcohol → aldehyde",
+      "smarts": "[CX4H2:1]([OX2H:2])[#6:3]>>[CX3H1:1](=[O:2])[#6:3]",
+      "conditions": [
+        "mild_oxidant"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "alkene_hydration_markovnikov",
+      "name": "Acid-catalyzed hydration (Markovnikov)",
+      "smarts": "[CH2:1]=[CX3:2][#6:3].[OX2H2]>>[CH3:1][CX4:2]([OX2H])[#6:3]",
+      "conditions": [
+        "acid",
+        "protic"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "alkene_hydrogenation",
+      "name": "Catalytic hydrogenation: alkene → alkane",
+      "smarts": "[CX3:1]=[CX3:2]>>[CX4:1]-[CX4:2]",
+      "conditions": [
+        "hydrogenation"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "alkyne_hydrogenation_full",
+      "name": "Catalytic hydrogenation: alkyne → alkane",
+      "smarts": "[CX2:1]#[CX2:2]>>[CX4:1]-[CX4:2]",
+      "conditions": [
+        "hydrogenation"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "alkyne_lindlar",
+      "name": "Lindlar reduction: alkyne → cis-alkene",
+      "smarts": "[CX2:1]#[CX2:2]>>[CX3:1]=[CX3:2]",
+      "conditions": [
+        "lindlar"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "alkene_epoxidation",
+      "name": "Epoxidation (mCPBA): alkene → epoxide",
+      "smarts": "[CX3:1]=[CX3:2]>>[C:1]1[O][C:2]1",
+      "conditions": [
+        "peracid"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "alkene_dihydroxylation",
+      "name": "syn-Dihydroxylation (OsO4): alkene → vicinal diol",
+      "smarts": "[CX3:1]=[CX3:2]>>[C:1]([OX2H])[C:2][OX2H]",
+      "conditions": [
+        "dihydroxylation"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "nitro_reduction",
+      "name": "Reduction: nitroarene → aniline",
+      "smarts": "[#6:1][N+:2](=[O:3])[O-:4]>>[#6:1][N;H2;+0:2]",
+      "conditions": [
+        "hydrogenation",
+        "hydride"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "imine_formation",
+      "name": "Condensation: ketone/aldehyde + primary amine → imine",
+      "smarts": "[CX3:1]=[OX1:2].[NX3H2:3][#6:4]>>[CX3:1]=[NX2:3][#6:4]",
+      "conditions": [
+        "amine_nucleophile"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "cyanohydrin_formation",
+      "name": "Cyanohydrin formation: carbonyl + HCN",
+      "smarts": "[CX3:1]=[OX1:2].[C-:3]#[NX1:4]>>[C:1]([OX2H:2])[C;+0:3]#[N;+0:4]",
+      "conditions": [
+        "cyanide"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "wittig_olefination",
+      "name": "Wittig: carbonyl + ylide → alkene",
+      "smarts": "[CX3:1]=[OX1:2].[C-:3][P+]>>[C:1]=[C;+0:3]",
+      "conditions": [
+        "ylide"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "sn2_amine",
+      "name": "SN2: alkyl halide + amine → amine",
+      "smarts": "[CX4:1][Br,Cl,I].[NX3;H2,H1:2][#6:3]>>[C:1][N:2][#6:3]",
+      "conditions": [
+        "amine_nucleophile"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "sn2_cyanide",
+      "name": "SN2: alkyl halide + cyanide → nitrile",
+      "smarts": "[CX4:1][Br,Cl,I].[C-:2]#[NX1:3]>>[C:1][C;+0:2]#[N;+0:3]",
+      "conditions": [
+        "cyanide"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "sn2_azide",
+      "name": "SN2: alkyl halide + azide → alkyl azide",
+      "smarts": "[CX4:1][Br,Cl,I].[N-:2]=[N+:3]=[N-:4]>>[C:1][N;+0:2]=[N+:3]=[N-:4]",
+      "conditions": [
+        "azide"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "alcohol_to_halide_hbr",
+      "name": "Alcohol + HBr → alkyl bromide",
+      "smarts": "[CX4:1][OX2H].[Br:2]>>[C:1][Br:2]",
+      "conditions": [
+        "hbr"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "friedel_crafts_acylation",
+      "name": "Friedel-Crafts acylation: arene + acyl chloride → aryl ketone",
+      "smarts": "[cH:1]1[c:2][c:3][c:4][c:5][c:6]1.[Cl][CX3:7]=[OX1:8]>>[c:1]1([CX3:7]=[OX1:8])[c:2][c:3][c:4][c:5][c:6]1",
+      "conditions": [],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true,
+      "coupling": true
+    },
+    {
+      "id": "aromatic_nitration",
+      "name": "Aromatic nitration: arene → nitroarene",
+      "smarts": "[cH:1]1[c;!$(c[N+](=O)[O-]):2][c;!$(c[N+](=O)[O-]):3][c;!$(c[N+](=O)[O-]):4][c;!$(c[N+](=O)[O-]):5][c;!$(c[N+](=O)[O-]):6]1.[OX2H][N+:8](=[O:9])[O-:10]>>[c:1]1([N+:8](=[O:9])[O-:10])[c:2][c:3][c:4][c:5][c:6]1",
+      "conditions": [
+        "nitration"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "aromatic_bromination",
+      "name": "Aromatic bromination (Br2/FeBr3): arene → aryl bromide",
+      "smarts": "[cH:1]1[c:2][c:3][c:4][c:5][c:6]1.[Br:7][Br]>>[c:1]1([Br:7])[c:2][c:3][c:4][c:5][c:6]1",
+      "conditions": [
+        "halogenation"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Standard undergraduate organic transformation (Clayden, 'Organic Chemistry' 2nd ed.; Carey & Sundberg, 'Advanced Organic Chemistry'). SMARTS authored for Orgo AI and mechanically verified: fires on the documented substrate giving the expected product, and passes all four gates in validate_templates.py (schema, SMARTS well-formedness, condition wiring, atom conservation).",
+      "enabled": true
+    },
+    {
+      "id": "imine_hydrolysis",
+      "name": "Imine hydrolysis: imine + water → carbonyl",
+      "smarts": "[CX3:1]=[NX2:2][#1,#6]>>[CX3:1]=[OX1]",
+      "conditions": [
+        "protic",
+        "acid"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Completes the Grignard/nitrile and imine-condensation routes: the carbonyl oxygen is introduced here at aqueous workup rather than fabricated in the addition step.",
+      "enabled": true
+    },
+    {
+      "id": "aromatic_chlorination",
+      "name": "Aromatic chlorination (Cl2/AlCl3): arene → aryl chloride",
+      "smarts": "[cH:1]1[c:2][c:3][c:4][c:5][c:6]1.[Cl:7][Cl]>>[c:1]1([Cl:7])[c:2][c:3][c:4][c:5][c:6]1",
+      "conditions": [
+        "halogenation"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Chlorine drawn from Cl2 so the halogen cannot be conjured.",
+      "enabled": true
+    },
+    {
+      "id": "hemiacetal_formation",
+      "name": "Hemiacetal formation: aldehyde + alcohol → hemiacetal",
+      "smarts": "[CX3H1:1](=[OX1:2])[#6:3].[OX2H:4][CX4:5]>>[#6:3][CX4H1:1]([OH:2])[O;H0:4][CX4:5]",
+      "conditions": [
+        "alkoxide",
+        "protic"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Acetal formation is split into its two real steps: a one-equivalent SMARTS that wrote both alkoxy groups duplicated the alcohol's carbons out of nothing. The engine reaches the acetal by chaining.",
+      "enabled": true
+    },
+    {
+      "id": "acetal_from_hemiacetal",
+      "name": "Acetal formation: hemiacetal + alcohol → acetal",
+      "smarts": "[CX4H1:1]([OX2H:2])([OX2:3][#6:4])[#6:7].[OX2H:5][CX4:6]>>[CX4H1:1]([O;H0:3][#6:4])([O;H0:5][CX4:6])[#6:7]",
+      "conditions": [
+        "alkoxide",
+        "protic"
+      ],
+      "provenance": "Batch 1 (curriculum expansion). Acetal formation is split into its two real steps: a one-equivalent SMARTS that wrote both alkoxy groups duplicated the alcohol's carbons out of nothing. The engine reaches the acetal by chaining.",
+      "enabled": true
+    },
+    {
+      "id": "socl2_alcohol_to_chloride",
+      "name": "SOCl2: alcohol → alkyl chloride",
+      "smarts": "[CX4:1][OX2H].[Cl:2][SX3](=[OX1])[Cl]>>[C:1][Cl:2]",
+      "conditions": [
+        "hcl",
+        "chlorinating_agent"
+      ],
+      "provenance": "Batch 2 (alcohol activation). Clayden, 'Organic Chemistry' 2nd ed., ch. 15; Carey & Sundberg part B. Thionyl chloride converts an alcohol to the alkyl chloride via the chlorosulfite ester, with SO2 and HCl as byproducts. The reagent side of the SMARTS matches the full S(=O)Cl2 skeleton rather than a bare Cl: _infer_conditions collapses SOCl2, TsCl and HCl to the same 'hcl' tag, so the condition list cannot distinguish them and the skeleton match is what keeps HCl from firing this template. Carries the 'hcl' tag as well as 'chlorinating_agent' so the photo/OSR path — which only ever sees inferred tags — still reaches it.",
+      "enabled": true
+    },
+    {
+      "id": "socl2_acid_to_acyl_chloride",
+      "name": "SOCl2: carboxylic acid → acyl chloride",
+      "smarts": "[CX3:1](=[OX1:2])[OX2H].[Cl:3][SX3](=[OX1])[Cl]>>[C:1](=[O:2])[Cl:3]",
+      "conditions": [
+        "hcl",
+        "chlorinating_agent"
+      ],
+      "provenance": "Batch 2 (alcohol activation). Clayden, 'Organic Chemistry' 2nd ed., ch. 10. The other canonical SOCl2 transform, and the one that feeds the existing acid_chloride_amine / acid_chloride_alcohol / friedel_crafts_acylation templates, so acids now chain through to amides, esters and aryl ketones. [OX2H] on an sp2 carbonyl carbon restricts it to the free acid — esters and amides have no O-H and do not match.",
+      "enabled": true
+    },
+    {
+      "id": "pbr3_alcohol_to_bromide",
+      "name": "PBr3: alcohol → alkyl bromide",
+      "smarts": "[CX4:1][OX2H].[Br:2][PX3]([Br])[Br]>>[C:1][Br:2]",
+      "conditions": [
+        "hbr",
+        "brominating_agent"
+      ],
+      "provenance": "Batch 2 (alcohol activation). Clayden, 'Organic Chemistry' 2nd ed., ch. 15. Phosphorus tribromide converts an alcohol to the alkyl bromide without the carbocation rearrangement that plagues the HBr route. Same skeleton-matching rationale as socl2_alcohol_to_chloride: PBr3 infers the bare 'hbr' tag, so the PX3(Br)(Br)Br match is what separates it from HBr itself.",
+      "enabled": true
+    },
+    {
+      "id": "tscl_alcohol_to_tosylate",
+      "name": "TsCl: alcohol → tosylate",
+      "smarts": "[CX4:1][OX2H:2].[Cl][SX4:3](=[OX1:4])(=[OX1:5])[c:6]>>[C:1][O;H0:2][S:3](=[O:4])(=[O:5])[c:6]",
+      "conditions": [
+        "hcl",
+        "sulfonylating_agent"
+      ],
+      "provenance": "Batch 2 (alcohol activation). Clayden, 'Organic Chemistry' 2nd ed., ch. 15. Tosylation converts the alcohol's bad leaving group into a good one with retention at carbon (the C-O bond is never broken). The alcohol oxygen is mapped and carried into the product as [O;H0] so RDKit drops its hydrogen; leaving it unconstrained inherits the reactant H count and fails sanitization.",
+      "enabled": true
     }
   ]
 }
