@@ -1,9 +1,11 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Camera, FileText, FlaskConical, Network, Paperclip, Sparkles, X, Zap } from 'lucide-react'
 import type { ChatAttachment, ChatContent, ChatMessage, ChatToolResult } from '../types'
 import { STRENGTH, loadPreferredModel, savePreferredModel } from '../../lib/engine'
+import { normalizeAssistantFormatting } from '../../lib/assistant-format'
 import { reactFromImage, streamChat } from '../api'
 import StructureView from '../components/StructureView'
 import ReactionBanner from '../components/ReactionBanner'
@@ -102,23 +104,22 @@ function toApiMessages(history: ChatMessage[]) {
   return live.slice().reverse().map(message => toApiMessage(message, budget)).reverse()
 }
 
-// Newest engine reaction across the thread's tool results (for the banner's
-// initial state when a saved reaction session is reopened).
-function findLatestReaction(history: ChatMessage[]): Record<string, unknown> | null {
-  for (let i = history.length - 1; i >= 0; i--) {
-    const hit = history[i].toolResults?.slice().reverse().find(t => t.type === 'reaction_result')
-    if (hit) return hit.data
-  }
-  return null
-}
-
 // Cards for tools the assistant ran mid-reply: engine reaction results,
 // stockroom updates, pathway analyses.
-function ToolResultCards({ results }: { results: ChatToolResult[] }) {
+function ToolResultCards({
+  results,
+  fullReaction = false,
+}: {
+  results: ChatToolResult[]
+  fullReaction?: boolean
+}) {
   return (
     <>
       {results.map((result, index) => {
         if (result.type === 'reaction_result') {
+          if (fullReaction) {
+            return <ReactionBanner key={index} reaction={result.data} />
+          }
           const data = result.data as {
             substrate_smiles?: string; reagent_smiles?: string; environment?: string
             products?: Array<{ smiles: string; reaction_name: string; steps_taken?: number }>
@@ -189,6 +190,85 @@ function ToolResultCards({ results }: { results: ChatToolResult[] }) {
   )
 }
 
+// Small, dependency-free Markdown renderer for assistant prose. Model output
+// is untrusted text and remains escaped by React; only a focused set of
+// presentation markers is interpreted so explanations read like normal UI
+// instead of exposing raw #, ** and backtick syntax.
+function inlineMarkdown(text: string): ReactNode[] {
+  const tokens = text.split(/(\*\*.+?\*\*|`.+?`)/g).filter(Boolean)
+  return tokens.map((token, index) => {
+    if (token.startsWith('**') && token.endsWith('**')) {
+      return <strong key={index}>{token.slice(2, -2)}</strong>
+    }
+    if (token.startsWith('`') && token.endsWith('`')) {
+      return <code key={index}>{token.slice(1, -1)}</code>
+    }
+    return token
+  })
+}
+
+function AssistantMessageContent({ content }: { content: string }) {
+  if (!content) return null
+  const lines = normalizeAssistantFormatting(content).replace(/\r\n?/g, '\n').split('\n')
+  const blocks: ReactNode[] = []
+  let index = 0
+
+  while (index < lines.length) {
+    const line = lines[index].trim()
+    if (!line) {
+      index += 1
+      continue
+    }
+
+    const heading = /^(#{1,4})\s+(.+)$/.exec(line)
+    if (heading) {
+      blocks.push(<h3 key={`h-${index}`}>{inlineMarkdown(heading[2])}</h3>)
+      index += 1
+      continue
+    }
+
+    if (/^[-*]\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\s*[-*]\s+/, '').trim())
+        index += 1
+      }
+      blocks.push(
+        <ul key={`ul-${index}`}>
+          {items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}
+        </ul>,
+      )
+      continue
+    }
+
+    if (/^\d+[.)]\s+/.test(line)) {
+      const items: string[] = []
+      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\s*\d+[.)]\s+/, '').trim())
+        index += 1
+      }
+      blocks.push(
+        <ol key={`ol-${index}`}>
+          {items.map((item, itemIndex) => <li key={itemIndex}>{inlineMarkdown(item)}</li>)}
+        </ol>,
+      )
+      continue
+    }
+
+    const paragraph = [line]
+    index += 1
+    while (index < lines.length) {
+      const next = lines[index].trim()
+      if (!next || /^(#{1,4})\s+/.test(next) || /^[-*]\s+/.test(next) || /^\d+[.)]\s+/.test(next)) break
+      paragraph.push(next)
+      index += 1
+    }
+    blocks.push(<p key={`p-${index}`}>{inlineMarkdown(paragraph.join(' '))}</p>)
+  }
+
+  return <div className="chat-message-content">{blocks}</div>
+}
+
 // Claude-style chat: a full-height conversation with drag-and-drop / paste /
 // picker file attachments, streaming replies from /chat, autosaved by the
 // workspace after each exchange. With a `surface`, the assistant can also
@@ -227,23 +307,20 @@ export default function ChatPanel({
 }) {
   const data = content
   const messages: ChatMessage[] = Array.isArray(data.messages) ? data.messages : []
-  // The full-reaction banner shows wherever the engine can run mid-conversation:
-  // the Reaction tab and general Chat (both expose the run_reaction tool).
-  const showReactionBanner = surface === 'reaction' || surface === 'chat'
-  // Every named surface unlocks app tools server-side, so every named surface
-  // has an engine worth bypassing. A surface-less chat already streams straight
-  // from the model and needs no toggle.
+  // Every named surface unlocks ASKCOS-backed app tools server-side. A
+  // surface-less chat already streams straight from the API and needs no toggle.
   const canBypassEngine = Boolean(surface)
   const [input, setInput] = useState('')
   const [pending, setPending] = useState<ChatAttachment[]>([])
   const [streaming, setStreaming] = useState(false)
+  const [explainingId, setExplainingId] = useState<string | null>(null)
   const [photoReading, setPhotoReading] = useState(false)
   const [dragDepth, setDragDepth] = useState(0)
   const [model, setModel] = useState(STRENGTH.anthropic[0].model)
-  // Engine on: the backend may run templates/OSR for this turn and the answer is
-  // grounded in verified output. Engine off ("Direct"): the question goes
-  // straight to the model. Per-turn and never persisted — the deterministic
-  // path is the product, so every new conversation starts back on it.
+  // ASKCOS on: the backend may run prediction/templates/OSR for this turn and
+  // ground the answer in verified output. API mode sends the question straight
+  // to the selected model. Per-turn and never persisted, so every conversation
+  // starts back on ASKCOS.
   const [useEngine, setUseEngine] = useState(true)
   const bottomRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -254,11 +331,6 @@ export default function ChatPanel({
   // Most recent engine reaction seen in this conversation (tool call or photo
   // read) — sent as grounding context on follow-up questions.
   const lastReactionRef = useRef<Record<string, unknown> | null>(null)
-  // Same reaction, as render state for the Reaction-tab banner. Seeded from
-  // history so a reopened session shows its last reaction immediately.
-  const [latestReaction, setLatestReaction] = useState<Record<string, unknown> | null>(
-    () => (showReactionBanner ? findLatestReaction(messages) : null),
-  )
   const { notify } = useToast()
 
   useEffect(() => {
@@ -330,16 +402,35 @@ export default function ChatPanel({
       && Boolean(message.toolResults?.some(result => result.type === 'reaction_result'))
   }
 
-  // Re-run the turn that produced this bubble, this time asking for the prose.
-  // The bubble itself is excluded from the replayed history — it is the message
-  // being filled in, and an empty assistant message is rejected by the API —
-  // while `targetId` keeps everything after it untouched.
+  // Explain the reaction result already stored in this bubble. Do not replay
+  // its photo or ask ASKCOS to predict the same reaction again: the verified
+  // result is sufficient grounding, and bypassing that repeated work turns a
+  // slow image-recognition round trip into one ordinary model response.
   async function explainMessage(message: ChatMessage) {
     if (streaming || saving) return
-    const index = messages.findIndex(entry => entry.id === message.id)
-    if (index < 0) return
-    await streamReply(messages.slice(0, index), message.toolResults ?? [],
-                      undefined, true, message.id)
+    const reaction = message.toolResults?.find(result => result.type === 'reaction_result')
+    if (!reaction) return
+    const explanationHistory: ChatMessage[] = [{
+      id: `msg_${Date.now()}_explain_request`,
+      role: 'user',
+      content: 'Explain the verified reaction outcome for a student. Use a short title and three compact points: transformation, reagent role, and likely mechanism. Use plain Unicode chemistry notation such as HNO₃, NO₂⁺, and →. Never use LaTeX, MathJax, dollar signs, backslash commands, Markdown tables, or raw SMILES.',
+      createdAt: new Date().toISOString(),
+    }]
+    setExplainingId(message.id)
+    try {
+      await streamReply(
+        explanationHistory,
+        message.toolResults ?? [],
+        reactionContextFrom(reaction.data),
+        true,
+        message.id,
+        // The result is already computed. Stream a grounded explanation without
+        // re-entering the reaction tools or image-recognition pipeline.
+        false,
+      )
+    } finally {
+      setExplainingId(null)
+    }
   }
 
   // Stream one assistant reply for `history`, collecting tool events into the
@@ -355,7 +446,11 @@ export default function ChatPanel({
     // appending a new one — the Explanation button filling in a bubble that
     // already holds its engine card, without disturbing anything after it.
     targetId?: string,
+    // Explanation requests reuse a finished reaction result and therefore
+    // explicitly bypass another engine/tool run.
+    useEngineOverride?: boolean,
   ) {
+    const requestUseEngine = useEngineOverride ?? useEngine
     const assistantId = targetId ?? `msg_${Date.now()}_reply`
     const toolResults: ChatToolResult[] = [...seedToolResults]
     const withReply = (replyText: string): ChatContent => (
@@ -386,33 +481,37 @@ export default function ChatPanel({
     try {
       await streamChat(
         toApiMessages(history),
-        // Direct mode sends no grounding either: the context block is a previous
-        // engine result, and when that result came from a bad OSR read it is
-        // exactly what the user is trying to get away from.
-        useEngine
-          ? (contextOverride !== undefined ? contextOverride : (context ?? lastReactionRef.current))
-          : null,
+        // An explicit context override is trusted even when tools are bypassed:
+        // this is how Explanation reuses the verified result without rerunning
+        // image recognition. Ordinary API mode still drops prior engine context.
+        contextOverride !== undefined
+          ? contextOverride
+          : (requestUseEngine ? (context ?? lastReactionRef.current) : null),
         (delta: string) => {
           acc += delta
           onChange(withReply(acc))
         },
-        model,
+        // ASKCOS is the default reaction mode. The saved API model only applies
+        // after the lightning-bolt override is selected for this prompt.
+        requestUseEngine ? null : model,
         surface,
         (event: ChatToolResult) => {
           toolResults.push(event)
           if (event.type === 'reaction_result') {
             lastReactionRef.current = reactionContextFrom(event.data)
-            setLatestReaction(event.data)
           }
           if (onUiEvent && (event.type === 'set_stockroom' || event.type === 'pathways_result')) {
             onUiEvent(event)
           }
           onChange(withReply(acc))
         },
-        useEngine,
+        requestUseEngine,
         explain,
       )
-      if (!acc && !toolResults.length) {
+      // A normal reaction turn may intentionally return only a tool card. An
+      // Explanation turn already has that seeded card, so it must produce new
+      // prose rather than treating the old result as a successful response.
+      if (!acc && (Boolean(targetId) || !toolResults.length)) {
         throw new Error('The AI engine returned no response. Try again in a moment.')
       }
       await onSave(withReply(acc))
@@ -469,7 +568,6 @@ export default function ChatPanel({
       // Still recorded as grounding for follow-up questions — we're deferring
       // the explanation, not forgetting the reaction.
       lastReactionRef.current = reactionContextFrom(result)
-      setLatestReaction(result)
       setPhotoReading(false)
       // Post the engine result as its own bubble with no prose. It matches
       // canExplain(), so the Explanation button appears on it automatically.
@@ -517,8 +615,6 @@ export default function ChatPanel({
         </div>
       )}
 
-      {showReactionBanner && <ReactionBanner reaction={latestReaction} />}
-
       <div className="chat-messages chat-messages-full">
         {!messages.length && (
           <div className="chat-empty-state">
@@ -547,8 +643,15 @@ export default function ChatPanel({
                 <FileText size={12} /> {att.name}
               </span>
             ))}
-            {message.toolResults?.length ? <ToolResultCards results={message.toolResults} /> : null}
-            {message.content}
+            {message.toolResults?.length ? (
+              <ToolResultCards
+                results={message.toolResults}
+                fullReaction={surface === 'reaction'}
+              />
+            ) : null}
+            {message.role === 'assistant'
+              ? <AssistantMessageContent content={message.content} />
+              : message.content}
             {canExplain(message) && (
               <button
                 type="button"
@@ -556,8 +659,11 @@ export default function ChatPanel({
                 onClick={() => void explainMessage(message)}
                 disabled={streaming || saving}
               >
-                <Sparkles size={13} />
-                Explanation
+                {explainingId === message.id ? (
+                  <><span className="spinner chat-explain-spinner" /> Explaining…</>
+                ) : (
+                  <><Sparkles size={13} /> Explanation</>
+                )}
               </button>
             )}
           </div>
@@ -575,8 +681,8 @@ export default function ChatPanel({
       <div className="chat-composer">
         {canBypassEngine && !useEngine && (
           <div className="chat-direct-notice">
-            Direct — answering from the model alone. No structure recognition, no
-            verified product.
+            API model — answering from the selected model alone. No ASKCOS
+            prediction or verified product.
           </div>
         )}
         {pending.length > 0 && (
@@ -617,7 +723,7 @@ export default function ChatPanel({
               className="chat-attach-button"
               title={useEngine
                 ? 'Photograph a reaction — structures are recognized and run through the engine'
-                : 'Photo reading needs the engine — switch off Direct to use it'}
+                : 'Photo reading needs ASKCOS — turn off the API model to use it'}
               aria-label="Upload reaction photo"
               disabled={!useEngine}
               onClick={() => photoInputRef.current?.click()}
@@ -626,18 +732,21 @@ export default function ChatPanel({
             </button>
           )}
           {canBypassEngine && (
-            <button
-              type="button"
-              className={`chat-attach-button chat-direct-toggle${useEngine ? '' : ' is-active'}`}
-              title={useEngine
-                ? 'Engine on — verified templates run first, answers stay grounded in them. Click to ask the model directly instead.'
-                : 'Direct — this question goes straight to the model: no structure recognition, no templates, no verified product. Click to turn the engine back on.'}
-              aria-label="Ask the model directly, bypassing the engine"
-              aria-pressed={!useEngine}
-              onClick={() => setUseEngine(prev => !prev)}
-            >
-              <Zap size={16} />
-            </button>
+            <>
+              {useEngine && <span className="chat-engine-label">ASKCOS</span>}
+              <button
+                type="button"
+                className={`chat-attach-button chat-direct-toggle${useEngine ? '' : ' is-active'}`}
+                title={useEngine
+                  ? 'Use an API model for this prompt instead of ASKCOS'
+                  : 'API model selected — click to return to ASKCOS'}
+                aria-label={useEngine ? 'Choose an API model' : 'Return to ASKCOS'}
+                aria-pressed={!useEngine}
+                onClick={() => setUseEngine(prev => !prev)}
+              >
+                <Zap size={16} />
+              </button>
+            </>
           )}
           <textarea
             ref={inputRef}
@@ -654,17 +763,20 @@ export default function ChatPanel({
               }
             }}
           />
-          <select
-            className="chat-model-select"
-            aria-label="AI model"
-            value={model}
-            onChange={event => selectModel(event.target.value)}
-            title={STRENGTH.anthropic.find(s => s.model === model)?.cost}
-          >
-            {STRENGTH.anthropic.map(stop => (
-              <option key={stop.model} value={stop.model}>{stop.label}</option>
-            ))}
-          </select>
+          {canBypassEngine && !useEngine && (
+            <select
+              className="chat-model-select"
+              aria-label="API model"
+              value={model}
+              onChange={event => selectModel(event.target.value)}
+              title={STRENGTH.anthropic.find(s => s.model === model)?.cost}
+              autoFocus
+            >
+              {STRENGTH.anthropic.map(stop => (
+                <option key={stop.model} value={stop.model}>{stop.label}</option>
+              ))}
+            </select>
+          )}
           <button
             className="btn-primary"
             style={{ alignSelf: 'flex-end', padding: '8px 14px' }}

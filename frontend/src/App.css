@@ -3619,8 +3619,8 @@ header h1 {
   background: transparent;
 }
 
-/* Direct toggle: lit amber while the engine is bypassed, so an unverified
-   answer is never one the composer looked neutral about. */
+/* API override: ASKCOS is the normal mode; the bolt lights up only while a
+   direct API model is selected for the prompt. */
 .chat-direct-toggle.is-active,
 .chat-direct-toggle.is-active:hover {
   color: var(--warning);
@@ -3637,6 +3637,18 @@ header h1 {
   background: rgba(154, 106, 24, 0.08);
   border: 1px solid rgba(154, 106, 24, 0.22);
   border-radius: 8px;
+}
+
+.chat-engine-label {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
 }
 
 .claude-chat .chat-model-select {
@@ -4780,7 +4792,58 @@ header h1 {
 .chat-explain-btn:hover:not(:disabled) { background: var(--card); }
 .chat-explain-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* ── Reaction tab: full-reaction banner (drawn structures, no SMILES) ── */
+.chat-explain-spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+
+.chat-message-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  white-space: normal;
+}
+
+.chat-tool-card + .chat-message-content,
+.reaction-banner + .chat-message-content {
+  margin-top: 12px;
+}
+
+.chat-message-content h3 {
+  margin: 4px 0 1px;
+  font-size: 15px;
+  line-height: 1.35;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+}
+
+.chat-message-content p {
+  margin: 0;
+}
+
+.chat-message-content ul,
+.chat-message-content ol {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.chat-message-content li {
+  padding-left: 2px;
+}
+
+.chat-message-content code {
+  padding: 1px 5px;
+  font-size: 0.9em;
+  color: var(--accent2);
+  background: var(--surface-2);
+  border-radius: 5px;
+}
+
+/* ── Reaction tab: per-prompt reaction result (drawn structures, no SMILES) ── */
 .reaction-banner {
   flex-shrink: 0;
   width: 100%;
@@ -4793,11 +4856,24 @@ header h1 {
   box-shadow: var(--shadow-sm);
 }
 
+/* A reaction stays in the assistant turn that belongs to the user's prompt;
+   it no longer occupies a persistent slot above the scrolling transcript. */
+.chat-bubble .reaction-banner {
+  margin: 0;
+}
+
 .reaction-banner-flow {
-  display: flex;
+  display: grid;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+}
+
+.reaction-banner-flow.with-reagent {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.reaction-banner-flow.without-reagent {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
 }
 
 .reaction-banner-op {
@@ -4806,10 +4882,31 @@ header h1 {
 }
 
 .reaction-banner-mol {
-  padding: 2px;
+  width: 100%;
+  min-width: 0;
+  aspect-ratio: 3 / 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
   background: #fdfdfb;
   border: 1px solid var(--border);
   border-radius: 10px;
+}
+
+.reaction-banner-mol .structure-view,
+.reaction-banner-side-mol .structure-view {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.reaction-banner-mol .structure-view svg,
+.reaction-banner-side-mol .structure-view svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .reaction-banner-mol.primary {
@@ -4884,10 +4981,40 @@ header h1 {
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 6px;
+  flex: 1 1 180px;
+  max-width: 260px;
+  padding: 8px;
   background: #fdfdfb;
   border: 1px solid var(--border);
   border-radius: 10px;
+}
+
+.reaction-banner-side-structure {
+  width: 100%;
+  aspect-ratio: 3 / 2;
+}
+
+@media (max-width: 700px) {
+  .reaction-banner {
+    padding: 10px;
+  }
+
+  .reaction-banner-flow {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: stretch;
+  }
+
+  .reaction-banner-mol {
+    max-height: 220px;
+  }
+
+  .reaction-banner-op {
+    justify-self: center;
+  }
+
+  .reaction-banner-arrow {
+    transform: rotate(90deg);
+  }
 }
 
 .reaction-banner-side-name {

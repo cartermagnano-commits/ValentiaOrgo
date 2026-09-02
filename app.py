@@ -125,6 +125,24 @@ _VISION_MODEL_CANDIDATES = [
 ]
 _vision_model_cache: str | None = None
 
+# Vision models sometimes transcribe familiar reagent labels as molecular
+# formulae rather than SMILES. RDKit correctly rejects strings such as HNO3,
+# but throwing the entire multi-component read away then prevents ASKCOS from
+# ever seeing an otherwise-correct reaction. Expand only exact dot-delimited
+# components, keeping the normalization narrow and chemistry-explicit.
+_VISION_FORMULA_ALIASES = {
+    "HNO3": "O=[N+]([O-])O",
+    "H2SO4": "O=S(=O)(O)O",
+    "HNO3/H2SO4": "O=[N+]([O-])O.O=S(=O)(O)O",
+}
+
+
+def _expand_vision_formula_aliases(candidate: str) -> str:
+    parts: list[str] = []
+    for component in candidate.split("."):
+        parts.extend(_VISION_FORMULA_ALIASES.get(component, component).split("."))
+    return ".".join(parts)
+
 
 def _ollama_vision_model() -> str | None:
     """Resolve the vision model to use: env override, else the best installed
@@ -160,13 +178,15 @@ def _smiles_from_vision_text(text: str, source: str) -> str | None:
     # RDKit stops parsing at whitespace, so prose like "I need to..." would
     # otherwise "parse" as iodine with the rest as a name field.
     if len(text.split()) == 1:
-        result = plausible_or_none(_canonical_smiles(text), "Vision")
+        result = plausible_or_none(
+            _canonical_smiles(_expand_vision_formula_aliases(text)), "Vision")
         if result:
             logger.info("%s → valid SMILES (full response): %r", source, result)
             return result
 
     for candidate in re.findall(r"[A-Za-z0-9@+\-\[\]()/\\=#%\.]{6,}", text):
-        result = plausible_or_none(_canonical_smiles(candidate), "Vision")
+        result = plausible_or_none(
+            _canonical_smiles(_expand_vision_formula_aliases(candidate)), "Vision")
         if result:
             logger.info("%s → valid SMILES (extracted token): %r", source, result)
             return result
@@ -377,14 +397,9 @@ def _cloud_vision_smiles(img_bytes: bytes, prompt: str, provider: str,
         return None
 
     logger.info("Cloud vision (%s) raw response: %r", provider, text[:300])
-    result = plausible_or_none(_canonical_smiles(text), "CloudVision")
-    if result:
-        return result
-    for candidate in _SMILES_TOKEN.findall(text):
-        result = plausible_or_none(_canonical_smiles(candidate), "CloudVision")
-        if result:
-            return result
-    return None
+    # Keep every cloud/provider path on the same parser. In particular, this
+    # expands formula-style reagent labels (HNO3, H2SO4) before RDKit validation.
+    return _smiles_from_vision_text(text, "CloudVision")
 
 
 def _vision_smiles_routed(img_bytes: bytes, prompt: str,
@@ -3010,7 +3025,12 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
         try:
             raw = base64.b64decode(newest_image)
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(_executor, _react_from_image, raw)
+            # Preserve the request's engine selection all the way through OSR.
+            # Without this argument, hosted/Parley vision is silently skipped
+            # and image chats fall back to local Ollama even when a working
+            # server-side key is configured.
+            result = await loop.run_in_executor(
+                _executor, _react_from_image, raw, engine)
         except Exception as exc:
             logger.warning("chat image-reaction OSR failed (%s): %s",
                            type(exc).__name__, exc)
@@ -3039,8 +3059,13 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
         lines = ["\n--- Currently displayed reaction ---"]
         if req.context.get("substrate_smiles"):
             lines.append(f"Starting material: {req.context['substrate_smiles']}")
-        if req.context.get("reagent_name"):
-            lines.append(f"Reagent: {req.context['reagent_name']} ({req.context.get('reagent_smiles','')})")
+        if req.context.get("reagent_name") or req.context.get("reagent_smiles"):
+            reagent_name = req.context.get("reagent_name")
+            reagent_smiles = req.context.get("reagent_smiles", "")
+            lines.append(
+                f"Reagent: {reagent_name} ({reagent_smiles})"
+                if reagent_name else f"Reagent SMILES: {reagent_smiles}"
+            )
         if req.context.get("reaction_name"):
             lines.append(f"Reaction: {req.context['reaction_name']}")
         if req.context.get("product_smiles"):
@@ -3058,6 +3083,8 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
         "Do NOT override or re-derive the engine's product, mechanism, or reaction type.\n"
         "- Distinguish clearly between 'the engine computed X' and 'in general chemistry, Y is also possible'.\n"
         "- For questions outside the displayed reaction, draw on chemistry knowledge but flag uncertainty.\n"
+        "- Use plain Unicode chemistry notation (for example HNO₃, NO₂⁺, and →). "
+        "Never emit LaTeX, MathJax, dollar-delimited math, or backslash commands.\n"
         "- Keep responses concise and student-friendly."
     )
 

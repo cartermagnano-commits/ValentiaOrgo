@@ -45,10 +45,10 @@ export default function SettingsPage({
       </div>
 
       <section className="settings-section">
-        <h2>Default model</h2>
+        <h2>Preferred API model</h2>
         <p className="settings-blurb">
-          Which Claude model new conversations start on. You can still switch model
-          per message from the composer.
+          Conversations start with ASKCOS. This is the model selected when you click
+          the lightning bolt in the prompt composer, and you can change it per prompt.
         </p>
         <div className="model-options">
           {STRENGTH.anthropic.map(stop => (

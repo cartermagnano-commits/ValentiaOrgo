@@ -31,6 +31,56 @@ parsed = app._parse_engine_field('{"mode":"hosted","provider":"anthropic"}')
 check("engine field: mode parsed", parsed.mode, "hosted")
 check("engine field: provider parsed", parsed.provider, "anthropic")
 
+# Vision may return textbook reagent formulae inside an otherwise-valid SMILES
+# mixture. They must be expanded before RDKit validation so the whole reaction
+# reaches ASKCOS rather than collapsing to the lone organic substrate.
+check(
+    "vision formula aliases: nitrating mixture becomes valid SMILES",
+    app._smiles_from_vision_text("c1ccccc1.HNO3.H2SO4", "TestVision"),
+    "O=S(=O)(O)O.O=[N+]([O-])O.c1ccccc1",
+)
+check(
+    "vision formula aliases: slash notation expands both acids",
+    app._smiles_from_vision_text("c1ccccc1.HNO3/H2SO4", "TestVision"),
+    "O=S(=O)(O)O.O=[N+]([O-])O.c1ccccc1",
+)
+
+# The Reaction tab uses _cloud_vision_smiles, not the legacy Claude helper.
+# Stub the SDK response to prove the active provider route uses the same
+# formula-normalizing parser without making a network request.
+import anthropic  # noqa: E402
+
+
+class _FakeTextBlock:
+    type = "text"
+    text = "c1ccccc1.HNO3.H2SO4"
+
+
+class _FakeVisionResponse:
+    content = [_FakeTextBlock()]
+
+
+class _FakeMessages:
+    @staticmethod
+    def create(**kwargs):
+        return _FakeVisionResponse()
+
+
+class _FakeAnthropicClient:
+    messages = _FakeMessages()
+
+
+orig_anthropic_client = anthropic.Anthropic
+try:
+    anthropic.Anthropic = lambda **kwargs: _FakeAnthropicClient()
+    check(
+        "cloud vision route normalizes formula-style reagents",
+        app._cloud_vision_smiles(b"image", "prompt", "anthropic", None, "sk-test"),
+        "O=S(=O)(O)O.O=[N+]([O-])O.c1ccccc1",
+    )
+finally:
+    anthropic.Anthropic = orig_anthropic_client
+
 # ── provider selection: which backend does the router reach for? ─────────────
 calls = []
 
@@ -136,6 +186,41 @@ try:
     check("multi-reader: total failure → unverified", verified, None)
 finally:
     app._decimer_read, app._molscribe_read, app._ollama_vision_smiles = orig_dec, orig_ms, orig_vis
+
+# ── image chat preserves the selected vision engine ─────────────────────────
+import asyncio  # noqa: E402
+import base64  # noqa: E402
+
+captured_engines = []
+orig_react_from_image, orig_sse_stream = app._react_from_image, app._sse_stream
+
+
+def fake_react_from_image(raw, engine=None):
+    captured_engines.append(engine)
+    return {"error": "synthetic unreadable image", "products": []}
+
+
+async def fake_sse_stream(*args, **kwargs):
+    yield "data: [DONE]\n\n"
+
+
+async def drain_image_chat(engine):
+    image = base64.b64encode(b"synthetic-image").decode()
+    messages = [{"role": "user", "content": "read this",
+                 "images": [{"media_type": "image/png", "data": image}]}]
+    return [frame async for frame in app._image_reaction_then_explain(
+        "system", messages, engine, explain=False)]
+
+
+try:
+    app._react_from_image = fake_react_from_image
+    app._sse_stream = fake_sse_stream
+    selected_engine = app.EngineConfig(mode="hosted", provider="anthropic")
+    asyncio.run(drain_image_chat(selected_engine))
+    check("image chat forwards hosted engine into OSR",
+          captured_engines[0] if captured_engines else None, selected_engine)
+finally:
+    app._react_from_image, app._sse_stream = orig_react_from_image, orig_sse_stream
 
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

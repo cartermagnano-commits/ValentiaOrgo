@@ -14,8 +14,10 @@ type ReactionData = {
   products?: ReactionProduct[]
 }
 
-const MOL_W = 128
-const MOL_H = 92
+// High-resolution source render. CSS owns the visible dimensions so each SVG
+// fits its responsive panel instead of being clipped by a fixed pixel window.
+const DRAW_W = 360
+const DRAW_H = 240
 
 // Full-reaction banner for the Reaction tab: draws substrate (+ reagent) → primary
 // product as structures, with a button to reveal side reactions (the other
@@ -32,22 +34,22 @@ export default function ReactionBanner({ reaction }: { reaction: Record<string, 
 
   return (
     <div className="reaction-banner">
-      <div className="reaction-banner-flow">
+      <div className={`reaction-banner-flow ${r.reagent_smiles ? 'with-reagent' : 'without-reagent'}`}>
         <div className="reaction-banner-mol">
-          <StructureView smiles={r.substrate_smiles} width={MOL_W} height={MOL_H} />
+          <StructureView smiles={r.substrate_smiles} width={DRAW_W} height={DRAW_H} fit />
         </div>
         {r.reagent_smiles && (
           <>
-            <Plus size={15} className="reaction-banner-op" />
+            <Plus size={17} className="reaction-banner-op reaction-banner-plus" />
             <div className="reaction-banner-mol">
-              <StructureView smiles={r.reagent_smiles} width={MOL_W} height={MOL_H} />
+              <StructureView smiles={r.reagent_smiles} width={DRAW_W} height={DRAW_H} fit />
             </div>
           </>
         )}
-        <ArrowRight size={18} className="reaction-banner-op" />
+        <ArrowRight size={20} className="reaction-banner-op reaction-banner-arrow" />
         {primary ? (
           <div className="reaction-banner-mol primary">
-            <StructureView smiles={primary.smiles} width={MOL_W} height={MOL_H} />
+            <StructureView smiles={primary.smiles} width={DRAW_W} height={DRAW_H} fit />
           </div>
         ) : (
           <div className="reaction-banner-nomatch">No verified product</div>
@@ -77,7 +79,9 @@ export default function ReactionBanner({ reaction }: { reaction: Record<string, 
         <div className="reaction-banner-side">
           {sideProducts.map((product, index) => (
             <div key={index} className="reaction-banner-side-mol">
-              <StructureView smiles={product.smiles} width={104} height={76} />
+              <div className="reaction-banner-side-structure">
+                <StructureView smiles={product.smiles} width={DRAW_W} height={DRAW_H} fit />
+              </div>
               <span className="reaction-banner-side-name">{product.reaction_name}</span>
             </div>
           ))}
