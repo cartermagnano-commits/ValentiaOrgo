@@ -1,14 +1,17 @@
-// Generative engine selection — hosted only. Every AI call runs on the
-// server-side key configured in the backend .env (the Parley gateway);
-// there is nothing for users to configure.
+// Generative engine selection — BYOK. Every AI call runs on a key the user
+// pastes into Settings; the deployed backend has no server-side key at all.
+// The key lives in this browser's localStorage and rides along with each
+// request, never persisted server-side (see EngineConfig in app.py).
 //
-// Only the *generative* explanation/chat features use this. Structure
-// recognition and the reaction engine always run free & keyless.
+// Only the *generative* features use this — explanations, chat, and (since
+// local OSR is no longer deployed) structure recognition. The reaction engine
+// and pathway search are deterministic and run free & keyless.
 
 export interface EnginePayload {
-  mode: 'hosted'
+  mode: 'byok'
   provider: 'anthropic'
   model?: string | null
+  api_key?: string
 }
 
 export interface StrengthStop {
@@ -44,8 +47,36 @@ export function savePreferredModel(model: string): void {
   try { window.localStorage.setItem(MODEL_KEY, model) } catch { /* preference is best-effort */ }
 }
 
+// The user's own API key. A Parley gateway key (sk-parley-…) or a real
+// Anthropic key both work — the backend routes by prefix. Stored per-browser,
+// never sent anywhere but our own backend.
+const API_KEY_KEY = 'orgo.engine.apiKey'
+
+export function loadApiKey(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    return window.localStorage.getItem(API_KEY_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export function saveApiKey(key: string): void {
+  try {
+    const trimmed = key.trim()
+    if (trimmed) window.localStorage.setItem(API_KEY_KEY, trimmed)
+    else window.localStorage.removeItem(API_KEY_KEY)
+  } catch { /* storage unavailable — the key just won't persist */ }
+}
+
 // The object attached to /explain, /stereo, and /chat request bodies.
-// Without a model the server's HOSTED_ANTHROPIC_MODEL decides what runs.
+// Without a model the server's default decides what runs.
 export function getEnginePayload(modelOverride?: string | null): EnginePayload {
-  return { mode: 'hosted', provider: 'anthropic', ...(modelOverride ? { model: modelOverride } : {}) }
+  const key = loadApiKey()
+  return {
+    mode: 'byok',
+    provider: 'anthropic',
+    ...(modelOverride ? { model: modelOverride } : {}),
+    ...(key ? { api_key: key } : {}),
+  }
 }

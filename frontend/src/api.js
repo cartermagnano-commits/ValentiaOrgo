@@ -1,4 +1,4 @@
-import { getEnginePayload } from '../lib/engine'
+import { getEnginePayload, loadApiKey } from '../lib/engine'
 
 const BASE = ''  // same-origin; Next.js rewrites (next.config.mjs) proxy to the FastAPI backend
 
@@ -18,6 +18,8 @@ async function post(path, body) {
 export async function analyzeImage(file) {
   const form = new FormData()
   form.append('file', file)
+  const apiKey = loadApiKey()
+  if (apiKey) form.append('api_key', apiKey)
   const res = await fetch(BASE + '/analyze', {
     method: 'POST',
     body: form,
@@ -42,12 +44,18 @@ export async function verifyAnalysis(token) {
 }
 
 export async function reactDirect(substrateSMILES, reagentSMILES) {
-  return post('/react', { substrate_smiles: substrateSMILES, reagent_smiles: reagentSMILES })
+  return post('/react', {
+    substrate_smiles: substrateSMILES,
+    reagent_smiles: reagentSMILES,
+    engine: getEnginePayload(),
+  })
 }
 
 export async function reactFromImage(file) {
   const form = new FormData()
   form.append('file', file)
+  const apiKey = loadApiKey()
+  if (apiKey) form.append('api_key', apiKey)
   const res = await fetch(BASE + '/react-from-image', {
     method: 'POST',
     body: form,
