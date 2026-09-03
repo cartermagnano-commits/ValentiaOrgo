@@ -1,37 +1,8 @@
-const apiBase = process.env.NEXT_PUBLIC_ORGO_API_BASE_URL ?? 'http://127.0.0.1:8000'
-
-const apiPaths = [
-  'analyze',
-  'predict',
-  'structure',
-  'molfile',
-  'pathways',
-  'explain',
-  'stereo',
-  'chat',
-  'assist',
-  'react',
-  'react-from-image',
-  'engine/ollama-status',
-  'engine/usage',
-  'health',
-]
+// API proxying lives in middleware.ts, NOT here: rewrites() cannot add the
+// x-orgo-proxy-secret request header the backend requires. The matcher in
+// middleware.ts is the path allowlist that used to live in this file.
 
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  async rewrites() {
-    return [
-      ...apiPaths.map(path => ({
-        source: `/${path}`,
-        destination: `${apiBase}/${path}`,
-      })),
-      // Deferred image-recognition verification (dynamic token segment)
-      {
-        source: '/analyze/verify/:token',
-        destination: `${apiBase}/analyze/verify/:token`,
-      },
-    ]
-  },
-}
+const nextConfig = {}
 
 export default nextConfig
