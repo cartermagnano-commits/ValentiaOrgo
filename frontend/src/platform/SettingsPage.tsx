@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Download, ShieldCheck, Trash2 } from 'lucide-react'
-import { STRENGTH, loadPreferredModel, savePreferredModel } from '../../lib/engine'
+import { STRENGTH, loadApiKey, loadPreferredModel, saveApiKey, savePreferredModel } from '../../lib/engine'
 import type { Project, Session } from '../../lib/sessions'
 
 export default function SettingsPage({
@@ -15,6 +15,19 @@ export default function SettingsPage({
   onClearAll: () => void
 }) {
   const [model, setModel] = useState(() => loadPreferredModel())
+
+  const [apiKey, setApiKey] = useState('')
+  const [keySaved, setKeySaved] = useState(false)
+
+  // localStorage is unavailable during SSR, so read it after mount.
+  useEffect(() => { setApiKey(loadApiKey()) }, [])
+
+  function commitKey(next: string) {
+    setApiKey(next)
+    saveApiKey(next)
+    setKeySaved(true)
+    window.setTimeout(() => setKeySaved(false), 1800)
+  }
 
   function pick(next: string) {
     setModel(next)
@@ -43,6 +56,38 @@ export default function SettingsPage({
       <div className="page-head">
         <h1 className="page-title">Settings</h1>
       </div>
+
+      <section className="settings-section">
+        <h2>API key</h2>
+        <p className="settings-blurb">
+          AI features — explanations, chat, and reading structures from photos —
+          run on your own key. Paste an MIT Parley key (<code>sk-parley-…</code>)
+          or an Anthropic key; we route it to the right place automatically.
+        </p>
+        <div className="settings-row">
+          <input
+            type="password"
+            className="settings-input"
+            value={apiKey}
+            placeholder="sk-parley-…"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={e => setApiKey(e.target.value)}
+            onBlur={e => commitKey(e.target.value)}
+            aria-label="Your API key"
+          />
+          <button className="btn-quiet" onClick={() => commitKey(apiKey)}>
+            Save
+          </button>
+        </div>
+        <div className="settings-note">
+          {keySaved
+            ? 'Saved.'
+            : apiKey
+              ? 'Stored in this browser only. Sent with each request, never saved on our server.'
+              : 'Without a key, drawing structures and predicting reactions still work — they run on the deterministic engine, no AI needed.'}
+        </div>
+      </section>
 
       <section className="settings-section">
         <h2>Default model</h2>

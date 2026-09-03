@@ -4976,3 +4976,20 @@ header h1 {
   margin: 0;
   height: 16px;
 }
+
+.settings-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.55rem 0.7rem;
+  font-family: inherit;
+  font-size: 0.9rem;
+  color: inherit;
+  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.15));
+  border-radius: 6px;
+}
+
+.settings-input:focus {
+  outline: 2px solid var(--accent, #4a6cf7);
+  outline-offset: 1px;
+}
