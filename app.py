@@ -74,6 +74,10 @@ from prediction import (
     UNNAMED_REACTION, Prediction, needs_sanity_check, resolve_products,
 )
 from preprocessing import denoise, deskew, normalize_binarize, perspective_correct
+from proxy_auth import (
+    LOOPBACK_IPS, PROXY_SECRET_HEADER, proxy_authorized, resolve_client_ip,
+    secret_matches,
+)
 from reactivity_engine import TemplateEngine
 
 # ── ASKCOS forward predictor ─────────────────────────────────────────────────
@@ -715,30 +719,52 @@ RATE_LIMIT_LIGHT_MAX = 600
 RATE_LIMIT_WINDOW = 60.0        # seconds
 _rate_buckets: dict[str, deque] = {}
 
-_LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost"}
+# Shared secret proving a request came from our own Next.js proxy. Unset
+# means the check is off — the keyless local-development default.
+ORGO_PROXY_SECRET = os.environ.get("ORGO_PROXY_SECRET") or None
 
 
-def _client_ip(request) -> str:
-    """Best-effort real client IP.
+def _client_ip(request, secret_ok: bool) -> str:
+    """Best-effort real client IP, for rate-limit bucketing.
 
-    All browser traffic arrives through the Next.js rewrite proxy, so
-    request.client.host is the proxy's address for every user — keying the
-    limiter on it collapses all clients into ONE shared bucket. Next.js sets
-    X-Forwarded-For with the real client; trust it only when the direct peer
-    is loopback (our own proxy), so a remote caller can't spoof the header
-    to dodge the limit.
+    Browser traffic arrives through the Next.js proxy, so request.client.host
+    is the proxy's address for every user — keying the limiter on it collapses
+    all clients into ONE shared bucket. The proxy sets X-Forwarded-For with the
+    real client; we may believe it when the peer is loopback (proxy on this
+    machine) or the request carried a valid ORGO_PROXY_SECRET (proxy on
+    Vercel). A remote caller with neither cannot spoof the header to dodge the
+    limit.
+
+    Note `secret_ok`, NOT "authorized": with no secret configured every request
+    is authorized, and dev binds 0.0.0.0 (start.bat), so authorization would
+    hand any LAN host a spoofable bucket.
     """
     peer = request.client.host if request.client else "unknown"
-    if peer in _LOOPBACK_IPS:
-        fwd = request.headers.get("x-forwarded-for", "")
-        if fwd:
-            return fwd.split(",")[0].strip() or peer
-    return peer
+    trusted = secret_ok or peer in LOOPBACK_IPS
+    return resolve_client_ip(peer, request.headers.get("x-forwarded-for"), trusted)
 
 
 @app.middleware("http")
 async def _rate_limit(request, call_next):
     path = request.url.path
+
+    # Access control before anything else: without the shared secret this
+    # request did not come through our proxy. /health is exempt — Railway's
+    # healthcheck probes the backend directly and carries no header.
+    #
+    # Two flags, deliberately: `authorized` may be true because no secret is
+    # configured or because the path is exempt, neither of which says anything
+    # about WHO sent the request. Only `secret_ok` does, so only it may unlock
+    # X-Forwarded-For below.
+    provided = request.headers.get(PROXY_SECRET_HEADER)
+    secret_ok = secret_matches(provided, ORGO_PROXY_SECRET)
+    authorized = proxy_authorized(provided, ORGO_PROXY_SECRET, path)
+    if not authorized:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "This API is reachable only through the Orgo AI app."},
+        )
+
     # /analyze/verify/{token} holds a server connection for minutes while it
     # waits on the vision model — it must count against the heavy budget too.
     if path in RATE_LIMIT_HEAVY or path.startswith("/analyze/verify/"):
@@ -748,7 +774,7 @@ async def _rate_limit(request, call_next):
     else:
         return await call_next(request)
 
-    key = f"{tier}:{_client_ip(request)}"
+    key = f"{tier}:{_client_ip(request, secret_ok)}"
     now = time.monotonic()
     bucket = _rate_buckets.setdefault(key, deque())
     while bucket and now - bucket[0] > RATE_LIMIT_WINDOW:
