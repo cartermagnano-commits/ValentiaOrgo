@@ -6,8 +6,9 @@ interactive branching reaction pathways with mechanism explanations powered by C
 ## Architecture
 
 Two processes: a **Next.js web app** (port 3000, the UI) and a **FastAPI backend**
-(port 8000, the chemistry API). Next.js proxies the API routes to FastAPI via rewrites
-in `frontend/next.config.mjs`.
+(port 8000, the chemistry API). Next.js proxies the API routes to FastAPI via
+`frontend/middleware.ts`, which also attaches the shared-secret header the backend
+requires.
 
 ```
 Next.js app (port 3000)  ──proxy──►  FastAPI API (port 8000)
@@ -28,10 +29,11 @@ Prediction layer (no LLM):
     reaction_templates.json — all reaction SMARTS + names (the only place names live)
     prediction.py           — decides which of the two answers wins
 
-Explanation layer (LLM) — hosted only:
-    Every generative call (explain / stereo / assist / chat) runs on the server-side
-    key configured in the backend .env. There is nothing for the user to configure.
-    The chat composer offers a per-prompt strength pick (Haiku / Sonnet / Opus).
+Explanation layer (LLM) — BYOK:
+    Every generative call (explain / stereo / assist / chat) runs on a key the user
+    pastes into Settings (stored in the browser's localStorage) — there is no
+    server-side key. The chat composer offers a per-prompt strength pick
+    (Haiku / Sonnet / Opus).
     The LLM explains engine output; it never re-derives chemistry or names reactions.
 ```
 
@@ -39,9 +41,11 @@ The web app has **no accounts and no cloud**: your work (sessions, and the proje
 that group them) is saved in the browser's `localStorage`. Nothing to set up, nothing
 to log into.
 
-> The backend still *contains* optional Supabase-token auth and Ollama/BYOK engine
+> The backend still *contains* optional Supabase-token auth and Ollama engine
 > machinery for self-hosted deployments (see "Production mode"), but the shipped
-> web app does not exercise them — it is keyless and hosted-only.
+> web app does not exercise them. AI features are **BYOK**: the user pastes their
+> own Anthropic (or MIT Parley) key into Settings, and it is used per-request and
+> never stored server-side.
 
 ## Requirements
 
@@ -54,8 +58,11 @@ to log into.
 ### 1. Python dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-osr.txt
 ```
+
+The second file holds the local OSR readers (DECIMER, MolScribe, torch). They are
+optional — without them, reading structures from images uses the vision model instead.
 
 First run downloads DECIMER model weights (~500 MB, one-time).
 
@@ -69,27 +76,21 @@ pip install -r requirements.lock
 ### 2. API key (required for AI explanations, stereo notes, and chat)
 
 The generative features (explanation panel, stereochemistry notes, and chat) run on
-the **server-side** Claude key. Structure recognition and the deterministic reaction
-engine work without any key.
+a key you paste into the app's **Settings** — this is **BYOK**; the backend keeps no
+server-side key. Structure recognition and the deterministic reaction engine work
+without any key.
 
 **Steps:**
 
 1. Go to [console.anthropic.com](https://console.anthropic.com) and create an account
 2. Navigate to **API Keys** and generate a key (starts with `sk-ant-`)
 3. Add billing — the API is pay-per-use (explanations cost fractions of a cent each)
-4. Create a `.env` file in the project root:
+4. Start the app (see below), open **Settings**, and paste the key in. It is saved in
+   this browser's `localStorage` (`orgo.engine.apiKey`) and sent with each request,
+   never stored on the server.
 
-```
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-```
-
-To route through a gateway instead (e.g. an MIT Parley key, `sk-parley-v1-...`), set
-`ANTHROPIC_BASE_URL` as well — see `.env.example` for all optional overrides
-(`HOSTED_ANTHROPIC_MODEL` for chat/explanations, `ANTHROPIC_VISION_MODEL` for
-structure recognition).
-
-> **Never commit `.env`** — it is listed in `.gitignore`. If you accidentally expose a key,
-> rotate it immediately in the Anthropic console.
+An MIT Parley gateway key (`sk-parley-...`) works the same way — the backend routes it
+to the Parley gateway instead of `api.anthropic.com` by its prefix (`byok.py`).
 
 Without a key the app still works: structure recognition, the pathway graph, and the
 reaction engine run as usual; only the generative text panels report that the key is
@@ -107,8 +108,9 @@ in its own window, and runs the **Next.js web app on :3000** in the current wind
 Open **http://localhost:3000** on your computer or
 **http://\<your-LAN-IP\>:3000** on an iPhone on the same Wi-Fi.
 
-There is nothing to configure in the UI — pick a model strength per message in the chat
-composer if you like; structure recognition and the reaction engine need no key at all.
+Paste your API key into **Settings** to enable the generative features, and pick a
+model strength per message in the chat composer if you like; structure recognition
+and the reaction engine need no key at all.
 
 ### Development mode
 
@@ -198,8 +200,8 @@ and expose no user data.
 
 Streaming endpoints accept an optional `engine` object (`{mode, provider, model, api_key}`)
 selecting the generative provider. The shipped UI always sends
-`{mode:'hosted', provider:'anthropic', model?}`; `api_key` (BYOK) is supported by the
-backend for self-hosting and, if sent, is used per-request and never stored or logged.
+`{mode:'byok', provider:'anthropic', model?, api_key}`, with `api_key` read from the
+user's Settings; it is used per-request and never stored or logged by the backend.
 
 ## Adding reagents
 
@@ -252,14 +254,18 @@ Orgo AI/
 ├── test_prediction.py      ← engine-arbitration suite (run before prediction.py edits)
 ├── diagnose_templates.py   ← firing matrix / dead-template diagnostic
 ├── test_osr.py             ← OSR / arbitration tests
-├── requirements.txt
+├── requirements.txt        ← lean runtime deps (installed on Railway)
+├── requirements-osr.txt    ← local OSR readers (DECIMER, MolScribe, torch) — dev only
+├── railway.json            ← Railway start command + healthcheck
+├── byok.py                 ← routes a BYOK key by prefix (Parley gateway vs. Anthropic)
+├── proxy_auth.py           ← verifies the frontend's shared-secret header
 ├── .env.example            ← server-side keys + optional prod/auth and engine overrides
 ├── start.bat               ← starts FastAPI (:8000) + Next.js (:3000) for dev
 ├── start-prod.bat          ← production launcher (see "Production mode")
 ├── supabase/schema.sql     ← optional Supabase schema for self-hosted prod auth
 └── frontend/               ← Next.js app (App Router, TypeScript)
     ├── app/                 ← single route: page.tsx → the Workspace
-    ├── lib/                 ← sessions (localStorage store), engine (hosted payload),
+    ├── lib/                 ← sessions (localStorage store), engine (BYOK payload),
     │                          exports, clipboard
     └── src/
         ├── api.js           ← calls the FastAPI backend (attaches the engine config)

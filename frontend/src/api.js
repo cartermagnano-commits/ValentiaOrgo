@@ -1,6 +1,6 @@
 import { getEnginePayload, loadApiKey } from '../lib/engine'
 
-const BASE = ''  // same-origin; Next.js rewrites (next.config.mjs) proxy to the FastAPI backend
+const BASE = ''  // same-origin; frontend/middleware.ts proxies to the FastAPI backend
 
 async function post(path, body) {
   const res = await fetch(BASE + path, {

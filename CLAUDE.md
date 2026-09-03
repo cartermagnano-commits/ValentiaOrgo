@@ -14,9 +14,9 @@ Next.js web app (:3000)  ──proxy──►  FastAPI backend (:8000)
   single-page workspace                chemistry API + OSR + LLM streaming
 ```
 
-Next.js proxies a fixed allowlist of API paths to FastAPI via `rewrites()` in
-`frontend/next.config.mjs`. If you add a backend route the frontend must call
-directly, add it to `apiPaths` there too.
+Next.js proxies a fixed allowlist of API paths to FastAPI via `frontend/middleware.ts`
+(which also attaches the `ORGO_PROXY_SECRET` header). If you add a backend route the
+frontend must call directly, add it to the `matcher` allowlist there too.
 
 ## Commands
 
@@ -109,6 +109,9 @@ over changing engine logic.
   deskew, denoise, binarize) → DECIMER + MolScribe reads → `osr_arbitration.py` picks
   the best SMILES, with optional vision-model (Anthropic/Ollama) round-trip verification.
   Models are lazy-loaded and warmed once (`_load_decimer`/`_load_molscribe`).
+  **The local readers are optional** — they live in `requirements-osr.txt` and are not
+  installed on Railway. Without them `arbitrate_local` returns its "nothing local"
+  verdict and the vision model is the sole reader.
 - **LLM streaming**: `_select_stream` / `_sse_stream` dispatch to Anthropic, OpenAI,
   OpenAI-compatible (chat-completions), or Ollama backends and stream SSE. An optional
   per-request `EngineConfig` (`{mode, provider, model, api_key}`) selects the provider;
@@ -152,9 +155,12 @@ this, but `SUPABASE_SETUP.md` still describes the older multi-route Supabase log
   no Supabase in the frontend at all.
 - Three tools in the workspace: **Synthesis** (reagent routes), **Reaction** (predict
   products from typed molecules or a photo), **Chat**.
-- Engine is effectively **hosted-only** from the UI: `lib/engine.ts` sends
-  `{mode:'hosted', provider:'anthropic'}` with a per-prompt model pick
-  (Haiku / Sonnet / Opus — `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-8`).
+- Engine is **BYOK**: `lib/engine.ts` sends `{mode:'byok', provider:'anthropic',
+  api_key}` with the key the user pastes into Settings (stored in localStorage
+  under `orgo.engine.apiKey`), plus a per-prompt model pick (Haiku / Sonnet /
+  Opus — `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-8`). The
+  backend routes the key by prefix: `sk-parley-*` to the MIT Parley gateway,
+  anything else to `api.anthropic.com` (`byok.py`).
 - `src/api.js` calls the backend; `src/components/` holds the chemistry UI
   (`PathwayExplorer`, `PathwayGraph` via `@xyflow/react`, `StructureView`, `MoleculeInput`).
 
@@ -173,6 +179,27 @@ just no longer exercises most of it.
   `HOSTED_ANTHROPIC_MODEL` (default `claude-haiku-4-5`) and `ANTHROPIC_VISION_MODEL`
   (default `claude-sonnet-4-6`) tune the models. `ANTHROPIC_BASE_URL` supports gateway
   keys (e.g. MIT Parley). See `.env.example`. Never commit `.env`.
+
+## Split deployment (Railway + Vercel)
+
+Backend on Railway, frontend on Vercel. `railway.json` supplies the start command
+(`uvicorn app:app --host 0.0.0.0 --port $PORT`, one worker) and `/health` as the
+healthcheck.
+
+Railway installs `requirements.txt` only — the lean runtime. `requirements-osr.txt`
+(DECIMER, MolScribe, torch) is for local development: together they pull ~7 GB and
+blow the image limit, and without them recognition degrades to a vision API call,
+which `osr_arbitration` already treats as a first-class path.
+
+`ORGO_PROXY_SECRET` must match on both hosts. `frontend/middleware.ts` attaches it to
+every proxied request; the backend rejects anything without it (403) and uses the same
+signal to decide whether `X-Forwarded-For` can be trusted for rate-limit bucketing.
+`/health` is exempt — Railway's healthcheck probes the backend directly. Leave the
+variable unset locally and everything behaves as before.
+
+**Do not set `ANTHROPIC_API_KEY` on Railway.** Every AI call runs on the user's own
+key. The API has no per-user auth: the proxy secret authenticates the frontend, not
+individual people.
 
 ## LLM / model notes
 
