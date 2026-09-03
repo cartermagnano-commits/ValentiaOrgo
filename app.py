@@ -47,7 +47,7 @@ if not _arb_logger.handlers:
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image
@@ -67,6 +67,7 @@ except ImportError:
     pass
 
 from askcos_client import AskcosClient, AskcosUnavailable
+from byok import anthropic_base_url
 from osr_arbitration import (
     arbitrate_local, plausible_or_none, resolve_with_vision,
 )
@@ -169,7 +170,8 @@ def _smiles_from_vision_text(text: str, source: str) -> str | None:
     return None
 
 
-def _anthropic_vision_call(img_bytes: bytes, prompt: str) -> str | None:
+def _anthropic_vision_call(img_bytes: bytes, prompt: str,
+                           api_key: str | None = None) -> str | None:
     """
     Send an image + prompt to Claude and return the first valid canonical
     SMILES found in the response. Returns None on any failure so Ollama can
@@ -182,16 +184,20 @@ def _anthropic_vision_call(img_bytes: bytes, prompt: str) -> str | None:
     them — and api.anthropic.com serves the same route, so this works for
     direct keys too.
     Runs synchronously — always call from a thread pool, never the event loop.
+    A BYOK api_key, when supplied, routes the request and never gets logged.
     """
     import httpx
 
-    base = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    # A BYOK key routes by its own prefix and never inherits the server's
+    # gateway (Parley rejects a real Anthropic key, and vice versa).
+    base = anthropic_base_url(api_key, os.environ.get("ANTHROPIC_BASE_URL"))
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
     b64 = base64.b64encode(img_bytes).decode()
     logger.info("Claude vision call → model=%s url=%s", ANTHROPIC_VISION_MODEL, base)
     try:
         resp = httpx.post(
             f"{base}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {os.environ['ANTHROPIC_API_KEY']}"},
+            headers={"Authorization": f"Bearer {key}"},
             json={
                 "model": ANTHROPIC_VISION_MODEL,
                 "max_tokens": 256,
@@ -266,19 +272,20 @@ def _ollama_call(img_bytes: bytes, prompt: str) -> str | None:
     return _smiles_from_vision_text(text, "Ollama")
 
 
-def _vision_call(img_bytes: bytes, prompt: str) -> str | None:
-    """Route a vision read to the best available backend: Claude when an
-    ANTHROPIC_API_KEY is configured (works through ANTHROPIC_BASE_URL
-    gateways like MIT Parley), falling back to local Ollama otherwise or
-    on any Claude failure."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        result = _anthropic_vision_call(img_bytes, prompt)
+def _vision_call(img_bytes: bytes, prompt: str,
+                 api_key: str | None = None) -> str | None:
+    """Route a vision read to the best available backend: Claude when a key is
+    available — the caller's BYOK key first, else a server-side
+    ANTHROPIC_API_KEY (which may point at a gateway like MIT Parley) — falling
+    back to local Ollama otherwise or on any Claude failure."""
+    if api_key or os.environ.get("ANTHROPIC_API_KEY"):
+        result = _anthropic_vision_call(img_bytes, prompt, api_key)
         if result:
             return result
     return _ollama_call(img_bytes, prompt)
 
 
-def _vision_smiles(img_bytes: bytes) -> str | None:
+def _vision_smiles(img_bytes: bytes, api_key: str | None = None) -> str | None:
     """
     Extract all molecule SMILES from an image, ignoring reaction notation.
     Used by the /analyze pipeline as a DECIMER fallback.
@@ -296,10 +303,11 @@ def _vision_smiles(img_bytes: bytes) -> str | None:
         "  - Question marks (?) indicating unknown products\n"
         "  - Plus signs (+) used as separators\n"
         "  - Text annotations: 'heat', 'Δ', 'hν', solvent names, temperatures",
+        api_key,
     )
 
 
-def _vision_reaction_smiles(img_bytes: bytes) -> str | None:
+def _vision_reaction_smiles(img_bytes: bytes, api_key: str | None = None) -> str | None:
     """
     Extract only the INPUT molecules (starting materials + reagents) from a reaction image.
     Understands that arrows show reaction direction and question marks indicate the unknown
@@ -319,6 +327,7 @@ def _vision_reaction_smiles(img_bytes: bytes) -> str | None:
         "and the question mark, along with reaction arrows, curved electron-flow arrows, plus "
         "signs used as separators, and text annotations such as 'heat', 'Δ', 'hν', solvent "
         "names and temperatures.",
+        api_key,
     )
 
 
@@ -1744,7 +1753,7 @@ def _molscribe_read(arr: np.ndarray) -> str | None:
         return None
 
 
-def _process(raw_bytes: bytes) -> dict:
+def _process(raw_bytes: bytes, api_key: str | None = None) -> dict:
     try:
         pil = Image.open(io.BytesIO(raw_bytes))
         try:
@@ -1778,7 +1787,7 @@ def _process(raw_bytes: bytes) -> dict:
     #   * vision (Claude or Ollama HTTP) — sees a downscaled copy of the upload
     #   * MolScribe (torch)    — reads the original now; the binarized
     #     rendition is submitted as soon as preprocessing produces it
-    vision_future = _vision_pool.submit(_vision_smiles, _vision_png(img))
+    vision_future = _vision_pool.submit(_vision_smiles, _vision_png(img), api_key)
     ms_orig_future = _molscribe_pool.submit(_molscribe_read, img)
 
     current = img.copy()
@@ -1958,7 +1967,8 @@ def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/analyze", dependencies=[Depends(require_auth)])
-async def analyze(file: UploadFile = File(...)):
+async def analyze(file: UploadFile = File(...),
+                  api_key: str | None = Form(default=None)):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -1966,7 +1976,7 @@ async def analyze(file: UploadFile = File(...)):
         raise HTTPException(status_code=413, detail="Image too large (max 8 MB).")
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(_executor, _process, contents)
+        result = await loop.run_in_executor(_executor, _process, contents, api_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -2725,6 +2735,7 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
     on the newest attached image ourselves, emit a `reaction_result` frame — the
     same one the run_reaction tool emits, so the UI renders its banner/card —
     then stream a grounded explanation that still carries the image."""
+    vision_key = engine.api_key if engine else None
     newest_image: str | None = None
     for message in reversed(messages):
         images = message.get("images") or []
@@ -2738,7 +2749,7 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
         try:
             raw = base64.b64decode(newest_image)
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(_executor, _react_from_image, raw)
+            result = await loop.run_in_executor(_executor, _react_from_image, raw, vision_key)
         except Exception as exc:
             logger.warning("chat image-reaction OSR failed (%s): %s",
                            type(exc).__name__, exc)
@@ -3046,7 +3057,7 @@ async def _predict_products(substrate: str, reagent: str,
     return resolve_products(branches, outcomes, failure)
 
 
-def _react_from_image(raw_bytes: bytes) -> dict:
+def _react_from_image(raw_bytes: bytes, api_key: str | None = None) -> dict:
     """
     Full pipeline: raw image bytes → preprocessing → DECIMER → substrate +
     reagent split → ASKCOS forward prediction (named by the template engine,
@@ -3117,7 +3128,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
 
     if not recognized_smiles:
         logger.info("DECIMER returned nothing — calling vision reaction parse")
-        recognized_smiles = _vision_reaction_smiles(_img_bytes)
+        recognized_smiles = _vision_reaction_smiles(_img_bytes, api_key)
         logger.info("Vision (empty DECIMER fallback) returned: %r", recognized_smiles)
     if not recognized_smiles:
         return {"error": "No structure recognized in the image.", "products": []}
@@ -3130,7 +3141,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
         raw_mol = Chem.MolFromSmiles(alt)
         if raw_mol is None:
             logger.info("DECIMER SMILES invalid — calling vision reaction parse")
-            fallback = _vision_reaction_smiles(_img_bytes)
+            fallback = _vision_reaction_smiles(_img_bytes, api_key)
             logger.info("Vision (invalid SMILES fallback) returned: %r", fallback)
             if fallback:
                 recognized_smiles = fallback
@@ -3166,7 +3177,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
             "Suspicious DECIMER output (%d frags, implausible atoms=%s, smiles=%r) — calling vision",
             len(frags), _bad_atoms or "none", recognized_smiles,
         )
-        fix = _vision_reaction_smiles(_img_bytes)
+        fix = _vision_reaction_smiles(_img_bytes, api_key)
         logger.info("Vision (suspicious DECIMER) returned: %r", fix)
         if fix:
             fix_mol = Chem.MolFromSmiles(fix)
@@ -3203,7 +3214,7 @@ def _react_from_image(raw_bytes: bytes) -> dict:
     # 5. Last-resort: if engine matched nothing, ask vision for a cleaner re-read and retry
     if not branches:
         logger.info("No templates matched — calling vision for last-resort re-identification")
-        retry_smiles = _vision_reaction_smiles(_img_bytes)
+        retry_smiles = _vision_reaction_smiles(_img_bytes, api_key)
         logger.info("Vision (no-match retry) returned: %r", retry_smiles)
         if retry_smiles and retry_smiles != recognized_smiles:
             retry_mol = Chem.MolFromSmiles(retry_smiles)
@@ -3336,6 +3347,7 @@ async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
 
 @app.post("/react-from-image")
 async def react_from_image(file: UploadFile = File(...),
+                           api_key: str | None = Form(default=None),
                            user_id: str | None = Depends(require_auth)):
     contents = await file.read()
     if not contents:
@@ -3344,7 +3356,7 @@ async def react_from_image(file: UploadFile = File(...),
         raise HTTPException(status_code=413, detail="Image too large (max 8 MB).")
     loop = asyncio.get_event_loop()
     try:
-        result = await loop.run_in_executor(_executor, _react_from_image, contents)
+        result = await loop.run_in_executor(_executor, _react_from_image, contents, api_key)
     except Exception as exc:
         logger.exception("react-from-image pipeline failed")
         raise HTTPException(status_code=500, detail="Reaction image processing failed.") from exc
