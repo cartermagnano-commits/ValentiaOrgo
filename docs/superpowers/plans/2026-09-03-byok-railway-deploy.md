@@ -333,7 +333,9 @@ Holds both halves of the trust decision: whether a request came from our proxy, 
 - Test: `test_proxy_auth.py`
 
 **Interfaces:**
-- Produces: `proxy_authorized(header_value, expected_secret, path) -> bool`, `resolve_client_ip(peer, forwarded, trusted) -> str`, `LOOPBACK_IPS: set[str]`, `PROXY_SECRET_HEADER: str`, `EXEMPT_PATHS: frozenset[str]`. Task 4 imports all of them.
+- Produces: `secret_matches(header_value, expected_secret) -> bool`, `proxy_authorized(header_value, expected_secret, path) -> bool`, `resolve_client_ip(peer, forwarded, trusted) -> str`, `LOOPBACK_IPS: set[str]`, `PROXY_SECRET_HEADER: str`, `EXEMPT_PATHS: frozenset[str]`. Task 4 imports all of them.
+
+**Why two functions and not one:** "may this request proceed" and "may I believe this request's `X-Forwarded-For`" are different questions with different answers. An unset secret authorizes everything, and `/health` is authorized with no header at all — but neither is a reason to trust a forwarded IP. Collapsing them would let any LAN host spoof its way into a fresh rate-limit bucket whenever the secret is unset, which is exactly what `start.bat`'s `--host 0.0.0.0` exposes. `secret_matches` is the narrow question; `proxy_authorized` is built on top of it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -364,7 +366,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
 
 from proxy_auth import (
     EXEMPT_PATHS, LOOPBACK_IPS, PROXY_SECRET_HEADER,
-    proxy_authorized, resolve_client_ip,
+    proxy_authorized, resolve_client_ip, secret_matches,
 )
 
 failures: list[str] = []
@@ -380,6 +382,25 @@ def check(name: str, ok: bool, detail: str = ""):
         failures.append(name)
         print(f"  FAIL  {name}  {detail}")
 
+
+print("\nsecret_matches — did this request carry a valid secret?\n")
+
+# The narrow question. Never true without a configured secret, so an unset
+# ORGO_PROXY_SECRET can never be read as "trust this caller's forwarded IP".
+check("a matching header matches",
+      secret_matches("s3cret", "s3cret") is True)
+
+check("a wrong header does not match",
+      secret_matches("wrong", "s3cret") is False)
+
+check("a missing header does not match",
+      secret_matches(None, "s3cret") is False)
+
+check("nothing matches when no secret is configured",
+      secret_matches("anything", None) is False)
+
+check("nothing matches when the configured secret is empty",
+      secret_matches("anything", "") is False)
 
 print("\nproxy_authorized — access control\n")
 
@@ -512,21 +533,32 @@ EXEMPT_PATHS = frozenset({"/health"})
 LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost"}
 
 
+def secret_matches(header_value: str | None, expected_secret: str | None) -> bool:
+    """True only when a secret is configured AND this request carried it.
+
+    The narrow question, kept separate from proxy_authorized on purpose: an
+    unset secret authorizes every request but proves nothing about who sent
+    it, so it must never be read as grounds to trust a forwarded IP.
+    """
+    if not expected_secret or not header_value:
+        return False
+    return hmac.compare_digest(header_value, expected_secret)
+
+
 def proxy_authorized(header_value: str | None, expected_secret: str | None,
                      path: str) -> bool:
     """True when this request may proceed.
 
     An unset `expected_secret` disables the check entirely — that is the
     keyless local-development path, and the backend must never lock itself
-    out by default.
+    out by default. /health is exempt because Railway's healthcheck probes
+    the backend directly and carries no proxy header.
     """
     if not expected_secret:
         return True
     if path in EXEMPT_PATHS:
         return True
-    if not header_value:
-        return False
-    return hmac.compare_digest(header_value, expected_secret)
+    return secret_matches(header_value, expected_secret)
 
 
 def resolve_client_ip(peer: str, forwarded: str | None, trusted: bool) -> str:
@@ -547,7 +579,7 @@ def resolve_client_ip(peer: str, forwarded: str | None, trusted: bool) -> str:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `python test_proxy_auth.py`
-Expected: `21 passed, 0 failed`, exit 0
+Expected: `26 passed, 0 failed`, exit 0
 
 - [ ] **Step 5: Commit**
 
@@ -580,6 +612,7 @@ Add to the import block near `from prediction import (...)` at `app.py:73`:
 ```python
 from proxy_auth import (
     LOOPBACK_IPS, PROXY_SECRET_HEADER, proxy_authorized, resolve_client_ip,
+    secret_matches,
 )
 ```
 
@@ -596,19 +629,23 @@ ORGO_PROXY_SECRET = os.environ.get("ORGO_PROXY_SECRET") or None
 Delete `_LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost"}` at `app.py:718` (it now lives in `proxy_auth`) and replace the whole `_client_ip` function at `app.py:721-737` with:
 
 ```python
-def _client_ip(request, trusted: bool) -> str:
+def _client_ip(request, secret_ok: bool) -> str:
     """Best-effort real client IP, for rate-limit bucketing.
 
     Browser traffic arrives through the Next.js proxy, so request.client.host
     is the proxy's address for every user — keying the limiter on it collapses
     all clients into ONE shared bucket. The proxy sets X-Forwarded-For with the
-    real client; `trusted` says we may believe it, which holds when the peer is
-    loopback (proxy on this machine) or the request carried a valid
-    ORGO_PROXY_SECRET (proxy on Vercel). A remote caller with neither cannot
-    spoof the header to dodge the limit.
+    real client; we may believe it when the peer is loopback (proxy on this
+    machine) or the request carried a valid ORGO_PROXY_SECRET (proxy on
+    Vercel). A remote caller with neither cannot spoof the header to dodge the
+    limit.
+
+    Note `secret_ok`, NOT "authorized": with no secret configured every request
+    is authorized, and dev binds 0.0.0.0 (start.bat), so authorization would
+    hand any LAN host a spoofable bucket.
     """
     peer = request.client.host if request.client else "unknown"
-    trusted = trusted or peer in LOOPBACK_IPS
+    trusted = secret_ok or peer in LOOPBACK_IPS
     return resolve_client_ip(peer, request.headers.get("x-forwarded-for"), trusted)
 ```
 
@@ -624,8 +661,14 @@ async def _rate_limit(request, call_next):
     # Access control before anything else: without the shared secret this
     # request did not come through our proxy. /health is exempt — Railway's
     # healthcheck probes the backend directly and carries no header.
-    authorized = proxy_authorized(
-        request.headers.get(PROXY_SECRET_HEADER), ORGO_PROXY_SECRET, path)
+    #
+    # Two flags, deliberately: `authorized` may be true because no secret is
+    # configured or because the path is exempt, neither of which says anything
+    # about WHO sent the request. Only `secret_ok` does, so only it may unlock
+    # X-Forwarded-For below.
+    provided = request.headers.get(PROXY_SECRET_HEADER)
+    secret_ok = secret_matches(provided, ORGO_PROXY_SECRET)
+    authorized = proxy_authorized(provided, ORGO_PROXY_SECRET, path)
     if not authorized:
         return JSONResponse(
             status_code=403,
@@ -641,7 +684,7 @@ async def _rate_limit(request, call_next):
     else:
         return await call_next(request)
 
-    key = f"{tier}:{_client_ip(request, authorized)}"
+    key = f"{tier}:{_client_ip(request, secret_ok)}"
 ```
 
 Leave the rest of the function (bucket trimming, the 429, `call_next`) exactly as it is.
@@ -1230,9 +1273,13 @@ export function middleware(request: NextRequest) {
   return NextResponse.rewrite(url, { request: { headers } })
 }
 
-// Every backend path the app calls. Keep in sync with apiPaths in
-// next.config.mjs. /structure and /molfile are loaded via <img src> but still
-// travel through this proxy, so they need the header like any other path.
+// Every backend path the app calls — the same allowlist that used to live in
+// next.config.mjs as apiPaths, moved here verbatim. Deliberately explicit
+// rather than a wildcard: this list IS the public API surface, and a deploy
+// change should not silently widen it. Add a path here when the backend gains
+// a route the browser must reach. /structure and /molfile are loaded via
+// <img src> but still travel through this proxy, so they need the header like
+// any other path.
 export const config = {
   matcher: [
     '/analyze',
@@ -1246,9 +1293,9 @@ export const config = {
     '/chat',
     '/assist',
     '/react',
-    '/react/assess',
     '/react-from-image',
-    '/engine/:path*',
+    '/engine/ollama-status',
+    '/engine/usage',
     '/health',
   ],
 }
