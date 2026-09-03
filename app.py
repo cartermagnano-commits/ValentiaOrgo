@@ -430,13 +430,19 @@ async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int,
 
 
 async def _anthropic_complete(system: str, user: str, max_tokens: int,
-                              model: str | None = None) -> str:
-    """One-shot, non-streaming hosted Anthropic completion. Used only for the
+                              model: str | None = None,
+                              api_key: str | None = None) -> str:
+    """One-shot, non-streaming Anthropic completion. Used only for the
     short structured JSON answers (blind product guess, sanity check) — these
     don't need SSE since the frontend consumes them as a single JSON field,
-    not incremental prose. Hosted-only: always the server key."""
+    not incremental prose. Uses the caller's BYOK key when given, else the
+    server key."""
     import anthropic
-    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    key = api_key or os.environ["ANTHROPIC_API_KEY"]
+    client = anthropic.AsyncAnthropic(
+        api_key=key,
+        base_url=anthropic_base_url(api_key, os.environ.get("ANTHROPIC_BASE_URL")),
+    )
     resp = await client.messages.create(
         model=model or DEFAULT_ANTHROPIC_MODEL,
         max_tokens=max_tokens,
@@ -1027,8 +1033,9 @@ def _sanity_check_prompts(substrate_smiles: str, reagent_smiles: str,
     return system, user
 
 
-async def _maybe_blind_guess(substrate: str, reagent: str, user_id: str | None) -> dict | None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+async def _maybe_blind_guess(substrate: str, reagent: str, user_id: str | None,
+                             api_key: str | None = None) -> dict | None:
+    if not (api_key or os.environ.get("ANTHROPIC_API_KEY")):
         return None
     try:
         _enforce_hosted_quota(None, user_id)
@@ -1037,7 +1044,7 @@ async def _maybe_blind_guess(substrate: str, reagent: str, user_id: str | None) 
         return None
     try:
         system, user = _blind_guess_prompts(substrate, reagent)
-        raw = await _anthropic_complete(system, user, max_tokens=300)
+        raw = await _anthropic_complete(system, user, max_tokens=300, api_key=api_key)
         data = _parse_json_object(raw)
         if not data or not data.get("product_smiles"):
             return None
@@ -1061,8 +1068,9 @@ async def _maybe_blind_guess(substrate: str, reagent: str, user_id: str | None) 
 
 
 async def _maybe_sanity_check(substrate: str, reagent: str, products: list[dict],
-                              user_id: str | None) -> dict | None:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+                              user_id: str | None,
+                              api_key: str | None = None) -> dict | None:
+    if not (api_key or os.environ.get("ANTHROPIC_API_KEY")):
         return None
     try:
         _enforce_hosted_quota(None, user_id)
@@ -1070,7 +1078,7 @@ async def _maybe_sanity_check(substrate: str, reagent: str, products: list[dict]
         return None
     try:
         system, user = _sanity_check_prompts(substrate, reagent, products)
-        raw = await _anthropic_complete(system, user, max_tokens=150)
+        raw = await _anthropic_complete(system, user, max_tokens=150, api_key=api_key)
         data = _parse_json_object(raw)
         if not data:
             return None
@@ -1273,12 +1281,17 @@ async def _execute_chat_tool(name: str, args: dict) -> tuple[dict, dict | None]:
 
 async def _stream_anthropic_tools(system: str, messages: list[dict], max_tokens: int,
                                   surface: str, model: str | None = None,
-                                  explain: bool = True):
+                                  explain: bool = True,
+                                  api_key: str | None = None):
     """Streaming Anthropic chat with a bounded server-side tool loop. Text
     deltas stream as normal SSE frames; each executed tool additionally emits
     a `tool_event` frame for the UI."""
     import anthropic
-    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    key = api_key or os.environ["ANTHROPIC_API_KEY"]
+    client = anthropic.AsyncAnthropic(
+        api_key=key,
+        base_url=anthropic_base_url(api_key, os.environ.get("ANTHROPIC_BASE_URL")),
+    )
     tool_names = _SURFACE_TOOLS.get(surface) or ["run_reaction"]
     tools = [_CHAT_TOOL_DEFS[n] for n in tool_names if n in _CHAT_TOOL_DEFS]
     convo: list[dict] = [dict(m) for m in messages]
@@ -2824,13 +2837,15 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
         and "run_reaction" in (_SURFACE_TOOLS.get(req.surface) or [])
     )
 
-    if (surface_runs_reactions and not has_images and mode == "hosted"
-            and os.environ.get("ANTHROPIC_API_KEY")):
-        _record_usage("hosted", "anthropic")
+    byok_key = req.engine.api_key if req.engine else None
+    if (surface_runs_reactions and not has_images
+            and ((mode == "hosted" and os.environ.get("ANTHROPIC_API_KEY"))
+                 or (mode == "byok" and byok_key))):
+        _record_usage(mode, "anthropic")
         stream = _with_error_frames(_stream_anthropic_tools(
             system_prompt + _CHAT_TOOLS_SYSTEM, messages, 800,
             req.surface, model=req.engine.model if req.engine else None,
-            explain=req.explain,
+            explain=req.explain, api_key=byok_key,
         ))
     elif surface_runs_reactions and has_images:
         # Image chats bypass the native tool path — run the engine on the image
@@ -3260,6 +3275,7 @@ def _react_from_image(raw_bytes: bytes, api_key: str | None = None) -> dict:
 class ReactRequest(BaseModel):
     substrate_smiles: str
     reagent_smiles: str
+    engine: Optional[EngineConfig] = None   # BYOK key for the escalation paths
 
 
 async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
@@ -3303,6 +3319,7 @@ async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
 async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
     """Return all predicted products for a given substrate + reagent SMILES pair."""
     core = await _react_core(req.substrate_smiles, req.reagent_smiles)
+    byok_key = req.engine.api_key if req.engine else None
     substrate, reagent = core["substrate_smiles"], core["reagent_smiles"]
     products = core["products"]
 
@@ -3310,7 +3327,7 @@ async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
     sanity_check = None
     if not products:
         _record_template_gap("react", substrate, reagent, core["conditions"])
-        ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
+        ai_guess = await _maybe_blind_guess(substrate, reagent, user_id, api_key=byok_key)
     else:
         # An ASKCOS product the templates couldn't reproduce is a library gap,
         # and a sharper one than "nothing matched" — we know a reaction happens
@@ -3326,12 +3343,13 @@ async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
             # already flagged `unverified` — so the UI presents it as a guess
             # sitting alongside the prediction, never as ground truth.
             _record_template_gap("react_low_confidence", substrate, reagent, core["conditions"])
-            ai_guess = await _maybe_blind_guess(substrate, reagent, user_id)
+            ai_guess = await _maybe_blind_guess(substrate, reagent, user_id, api_key=byok_key)
         elif needs_sanity_check(products, core["low_confidence"]):
             # A curated template named every product, so a hand-written rule
             # already vouches for this answer — spending a model round-trip to
             # second-guess it only makes the page slower. See needs_sanity_check.
-            sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id)
+            sanity_check = await _maybe_sanity_check(substrate, reagent, products, user_id,
+                                                     api_key=byok_key)
 
     return {
         "substrate_smiles": substrate,
@@ -3368,18 +3386,20 @@ async def react_from_image(file: UploadFile = File(...),
             _record_template_gap("react_from_image",
                                  result["substrate_smiles"], result["reagent_smiles"], [])
             result["ai_guess"] = await _maybe_blind_guess(
-                result["substrate_smiles"], result["reagent_smiles"], user_id)
+                result["substrate_smiles"], result["reagent_smiles"], user_id,
+                api_key=api_key)
         elif result.get("low_confidence"):
             # Same escalation as /react: nothing deterministic vouches for this
             # product, so Claude gives a second opinion alongside it.
             _record_template_gap("react_from_image_low_confidence",
                                  result["substrate_smiles"], result["reagent_smiles"], [])
             result["ai_guess"] = await _maybe_blind_guess(
-                result["substrate_smiles"], result["reagent_smiles"], user_id)
+                result["substrate_smiles"], result["reagent_smiles"], user_id,
+                api_key=api_key)
         elif needs_sanity_check(result["products"], bool(result.get("low_confidence"))):
             result["sanity_check"] = await _maybe_sanity_check(
                 result["substrate_smiles"], result["reagent_smiles"],
-                result["products"], user_id)
+                result["products"], user_id, api_key=api_key)
     return result
 
 
