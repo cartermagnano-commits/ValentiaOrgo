@@ -1,0 +1,12 @@
+# Local OSR readers — DECIMER (TensorFlow) and MolScribe (torch).
+# Install ON TOP of requirements.txt for local development:
+#     pip install -r requirements.txt -r requirements-osr.txt
+# NOT installed on Railway: together these pull ~7 GB and exceed the image
+# limit. Without them _process degrades to vision-only, which osr_arbitration
+# already supports (see arbitrate_local's "nothing local" branch).
+--extra-index-url https://download.pytorch.org/whl/cpu
+decimer>=2.3.0
+MolScribe>=1.1.1
+torch>=2.0.0
+timm==0.4.12
+huggingface_hub>=0.23.0
