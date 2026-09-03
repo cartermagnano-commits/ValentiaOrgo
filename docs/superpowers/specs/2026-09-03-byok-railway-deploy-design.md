@@ -5,7 +5,8 @@
 
 ## Problem
 
-Deploying the backend to Railway fails, and two separate causes are tangled together.
+Deploying the backend to Railway fails, and several distinct causes are tangled
+together.
 
 **The build never finishes.** `requirements.txt` asks for `torch>=2.0.0` with no index
 URL, so Railway resolves the CUDA wheel and its `nvidia-*` dependencies. Combined with
@@ -27,8 +28,14 @@ Railway must run `ORGO_ENV=dev` — where `require_auth` returns `None` and ever
 is public. Shipping a server-side `ANTHROPIC_API_KEY` behind an open API means anyone
 who finds the URL can spend it.
 
-The answer to all three: **make every AI call run on a key the user supplies**, and stop
-shipping the local OSR models the image can't afford.
+Separately, splitting the two processes across hosts silently breaks rate limiting. The
+limiter trusts `X-Forwarded-For` only from a loopback peer (`app.py:721-733`), which held
+when the proxy ran on the same machine; from Vercel it does not, so every user collapses
+into one shared 60-request bucket.
+
+The answer: **make every AI call run on a key the user supplies**, stop shipping the
+local OSR models the image can't afford, and give the backend a way to tell its own proxy
+apart from the open internet.
 
 ## Decisions
 
@@ -41,6 +48,9 @@ shipping the local OSR models the image can't afford.
 | Key storage | Browser localStorage. Sent per request, never persisted or logged server-side |
 | BYOK coverage | **Every** LLM path — vision, chat tool-use, explanations, blind-guess, sanity-check |
 | Frontend/backend split | Railway (backend) + Vercel (frontend), wired by `NEXT_PUBLIC_ORGO_API_BASE_URL` |
+| Backend access control | Shared `ORGO_PROXY_SECRET` header injected by the Vercel proxy; direct callers get 403 |
+| Client-IP trust | `X-Forwarded-For` trusted when that secret is present, replacing the loopback check |
+| Proxy mechanism | `frontend/middleware.ts` — `rewrites()` cannot inject request headers |
 
 ## Architecture
 
@@ -156,10 +166,47 @@ uvicorn app:app --host 0.0.0.0 --port $PORT
 ```
 
 with `/health` as the healthcheck path. Railway runs `ORGO_ENV=dev` with no
-`ANTHROPIC_API_KEY` set. Vercel sets `NEXT_PUBLIC_ORGO_API_BASE_URL` to the Railway URL;
-because the frontend proxies server-side through `rewrites()` in `next.config.mjs`, the
-browser only ever talks to its own origin, so the hardcoded localhost CORS list at
-`app.py:685-689` stays irrelevant.
+`ANTHROPIC_API_KEY` set. Vercel sets `NEXT_PUBLIC_ORGO_API_BASE_URL` to the Railway URL
+and `ORGO_PROXY_SECRET` to match the backend. Because the frontend proxies server-side
+(via the middleware described below, which replaces the `rewrites()` rules for API
+paths), the browser only ever talks to its own origin, so the hardcoded localhost CORS
+list at `app.py:685-689` stays irrelevant.
+
+### The proxy shared secret
+
+Splitting the two processes across Vercel and Railway breaks an assumption the rate
+limiter was built on. `_client_ip` (`app.py:721-733`) trusts `X-Forwarded-For` only when
+the direct peer is loopback, because the proxy used to run on the same machine. From
+Vercel the peer is an egress IP that is never loopback, so the header is ignored and, in
+the words of its own docstring, *"keying the limiter on it collapses all clients into ONE
+shared bucket."* Sixty heavy requests per minute would then be shared across the entire
+userbase — one person uploading photos rate-limits everyone.
+
+Widening that trust unconditionally is not an option: the Railway URL is public, so any
+direct caller could spoof `X-Forwarded-For` and walk past the limiter entirely. The
+backend needs a way to distinguish *our proxy* from *the open internet*, and that is the
+same question as access control.
+
+One mechanism answers both. `ORGO_PROXY_SECRET` is set on Vercel and Railway. The proxy
+attaches it to every forwarded request; the backend requires it and treats its presence
+as the trust boundary for `X-Forwarded-For`:
+
+- **Access control.** Requests without the secret are rejected with 403. Because the
+  rewrite happens server-side on Vercel, the browser never sees the value.
+- **Rate limiting.** The secret proves the request came from our proxy, so the forwarded
+  client IP can be trusted — restoring the per-user bucketing the loopback check used to
+  provide.
+
+`rewrites()` in `next.config.mjs` **cannot** add request headers, so the API paths move
+to a `frontend/middleware.ts` that calls `NextResponse.rewrite()` with a modified request
+header set. This is the only structural change on the frontend. `/structure` and
+`/molfile` are loaded via `<img src>` but still travel through the proxy, so the
+middleware covers them like any other path.
+
+The secret is read from `process.env.ORGO_PROXY_SECRET` — deliberately not
+`NEXT_PUBLIC_`-prefixed, so it stays server-side. If it is unset the backend keeps its
+current behavior rather than locking itself out, which preserves the keyless local
+workflow described in CLAUDE.md.
 
 On Railway, `/health` reports `hosted_key_configured`, `decimer_ready` and
 `molscribe_ready` all `false` (`app.py:1528-1536`). Nothing in the frontend reads those
@@ -170,12 +217,25 @@ unmetered.
 
 ## Security
 
-**The API is unauthenticated.** `ORGO_ENV=dev` means `require_auth` returns `None` and
-every endpoint is open to anyone with the URL. Removing the server key is what makes
-that acceptable: there is no longer a credential behind the API worth stealing. What
-remains exposed is compute — ASKCOS calls and RDKit work — bounded by the existing
-`_rate_limit` middleware. Authenticating the API is deliberately out of scope here and
-should be its own piece of work before any real launch.
+**There is still no user authentication.** `ORGO_ENV=dev` means `require_auth` returns
+`None`; the proxy secret authenticates *the frontend*, not individual people, and it is
+not a substitute for Supabase. What it does is take the backend off the open internet:
+without the secret a direct caller gets 403, so the exposed surface is whoever can load
+the Vercel app rather than anyone who finds the Railway URL. Removing the server API key
+independently ensures there is no longer a credential behind the API worth stealing.
+Real per-user auth remains out of scope and should precede any public launch.
+
+**`/health` must stay exempt from the secret.** Railway's healthcheck probes the backend
+directly and carries no proxy header; requiring the secret there would fail every
+deploy. `/health` leaks only booleans about which models loaded, so exempting it is
+safe. Note this is a *different* mechanism from `require_auth`, which is a per-endpoint
+FastAPI dependency that public routes simply do not declare (`app.py:840`). The proxy
+secret is middleware and applies to every path by default, so its exemption has to be
+explicit.
+
+**The secret is a bearer credential in an env var.** Anyone who can read the Vercel
+project settings can replay requests. It is rotatable by changing the value in both
+places, and it is worth rotating if the Vercel project's access list changes.
 
 **A pasted key in localStorage is readable by any XSS on the origin.** This is the
 standard BYOK tradeoff, accepted here because a Parley key is scoped and rotatable. It
@@ -201,10 +261,18 @@ No pytest, no framework — plain scripts, matching the existing suites.
   absent key falls back to the server env var. Covers the vision, tools and completion
   paths, since all three now share the pattern.
 - **No key leakage** — assert the key never appears in emitted log records.
+- **Proxy secret** — with `ORGO_PROXY_SECRET` set, a request without the header is
+  rejected 403, a request with the wrong value is rejected, a request with the right
+  value passes, and `/health` passes with no header at all. With the variable unset,
+  every request passes, preserving the keyless local workflow.
+- **Rate-limit bucketing** — two requests carrying the secret and *different*
+  `X-Forwarded-For` values land in different buckets; two requests with the same value
+  share one. Without the secret, a spoofed `X-Forwarded-For` must not be honored.
 
 ## Out of scope
 
-- Authenticating the public API (Supabase, shared secret, or otherwise)
+- Per-user authentication (Supabase or otherwise) — the proxy secret authenticates the
+  frontend, not individual people
 - Supporting providers other than Anthropic/Parley for BYOK
 - Restoring cross-reader agreement on Railway
 - Deploying the frontend, beyond setting `NEXT_PUBLIC_ORGO_API_BASE_URL`
