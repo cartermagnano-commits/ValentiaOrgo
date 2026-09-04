@@ -2,6 +2,13 @@
 # Local OSR (DECIMER/MolScribe/torch) lives in requirements-osr.txt and is
 # OPTIONAL: without it, image recognition runs purely as a vision API call.
 # See docs/superpowers/specs/2026-09-03-byok-railway-deploy-design.md
+#
+# Railway's Nixpacks builder is pinned to Python 3.10 via ../.python-version
+# (every wheel above was verified against 3.10.0). That file must stay a bare
+# version string with no comment — Nixpacks' parser regex-matches the whole
+# trimmed file content and silently falls back to an unpinned default Python
+# if anything else (including a "#" comment) is present. 3.10 reaches
+# end-of-life in October 2026; revisit this pin before then.
 opencv-python-headless>=4.8.0
 numpy>=1.24.0
 rdkit>=2023.9.1

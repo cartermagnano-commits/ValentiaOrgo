@@ -1,4 +1,10 @@
 import { getEnginePayload, loadApiKey } from '../lib/engine'
+import { downscaleImageFile } from '../lib/imageDownscale'
+
+// Requests routed through Vercel's proxy are capped around 4.5 MB; the
+// backend's own MAX_DIM=1024 downscale means anything above this is bytes
+// the backend would immediately throw away anyway. See imageDownscale.js.
+const MAX_UPLOAD_IMAGE_DIMENSION = 1600
 
 const BASE = ''  // same-origin; frontend/middleware.ts proxies to the FastAPI backend
 
@@ -16,8 +22,9 @@ async function post(path, body) {
 }
 
 export async function analyzeImage(file) {
+  const upload = await downscaleImageFile(file, MAX_UPLOAD_IMAGE_DIMENSION)
   const form = new FormData()
-  form.append('file', file)
+  form.append('file', upload)
   const apiKey = loadApiKey()
   if (apiKey) form.append('api_key', apiKey)
   const res = await fetch(BASE + '/analyze', {
@@ -52,8 +59,9 @@ export async function reactDirect(substrateSMILES, reagentSMILES) {
 }
 
 export async function reactFromImage(file) {
+  const upload = await downscaleImageFile(file, MAX_UPLOAD_IMAGE_DIMENSION)
   const form = new FormData()
-  form.append('file', file)
+  form.append('file', upload)
   const apiKey = loadApiKey()
   if (apiKey) form.append('api_key', apiKey)
   const res = await fetch(BASE + '/react-from-image', {

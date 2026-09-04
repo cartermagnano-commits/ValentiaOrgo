@@ -3,6 +3,7 @@ import StructureView from './StructureView'
 import MolDrawer from './MolDrawer'
 import { analyzeImage, verifyAnalysis } from '../api'
 import { imageFileFromClipboard, pasteTargetIsEditable, readImageFromClipboard } from '../../lib/clipboard'
+import { hasUsableApiKey } from '../../lib/aiAvailability'
 import { Camera, ChevronUp, ClipboardPaste, Eye, Pencil, ScanLine, X, ShieldCheck, AlertTriangle } from 'lucide-react'
 
 // Page-level paste routing: when the user hits Ctrl+V without having clicked
@@ -111,6 +112,15 @@ export default function MoleculeInput({ label, value, onChange }) {
 
   async function handleFile(file) {
     if (!file) return
+    // Structure recognition is a pure vision-API call now (no local OSR
+    // models on the server) — with no key anywhere it can only ever come
+    // back empty. Fail fast with an honest message instead of a silent
+    // "could not recognize" that looks like a bad photo.
+    if (!(await hasUsableApiKey())) {
+      setError('No API key available — add one in Settings to read structures from images.')
+      setShowSmiles(true)
+      return
+    }
     const seq = ++verifySeq.current
     setLoading(true)
     setSlowHint(false)

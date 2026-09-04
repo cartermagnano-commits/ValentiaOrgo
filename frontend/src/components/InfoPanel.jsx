@@ -25,7 +25,7 @@ function NodeInfoView({ nodeData, branch, substrateSMILES }) {
       if (!stale) setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
     })
       .then(() => { if (!stale) setExplanation(prev => prev.loading
-        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.' }
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → API key.' }
         : prev) })
       .catch(e => { if (!stale) setExplanation({ text: '', loading: false, error: e.message }) })
     return () => { stale = true }
@@ -157,7 +157,7 @@ function BranchInfoView({ branch, substrateSMILES }) {
       if (!stale) setExplanation(prev => ({ text: prev.text + delta, loading: false, error: null }))
     })
       .then(() => { if (!stale) setExplanation(prev => prev.loading
-        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.' }
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → API key.' }
         : prev) })
       .catch(e => { if (!stale) setExplanation({ text: '', loading: false, error: e.message }) })
     return () => { stale = true }
@@ -170,7 +170,7 @@ function BranchInfoView({ branch, substrateSMILES }) {
       if (stereoSeq.current === seq) setStereo(prev => ({ ...prev, text: prev.text + delta, loading: false }))
     })
       .then(() => { if (stereoSeq.current === seq) setStereo(prev => prev.loading
-        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → Engine.', requested: true }
+        ? { text: '', loading: false, error: 'The AI engine returned no response. Check Settings → API key.', requested: true }
         : prev) })
       .catch(e => { if (stereoSeq.current === seq) setStereo({ text: '', loading: false, error: e.message, requested: true }) })
   }

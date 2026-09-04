@@ -333,8 +333,9 @@ def _vision_reaction_smiles(img_bytes: bytes, api_key: str | None = None) -> str
 
 # ── "Choose Your Engine" — generative LLM provider router ────────────────────
 # The engine picker (local / byok / hosted) ONLY powers generative explanations
-# and chat. Structure recognition uses the server-side ANTHROPIC_API_KEY when
-# present (see _vision_call), else runs keyless via local Ollama.
+# and chat. Structure recognition is BYOK-first: it runs on the caller's own
+# api_key (see _vision_call), falling back to the server-side ANTHROPIC_API_KEY
+# when present, else keyless via local Ollama.
 # A BYOK api_key is request-scoped: never persisted, never logged.
 
 # Chat/explanations run on Haiku by default — ~1/3 the cost of Sonnet and
@@ -410,14 +411,11 @@ async def _stream_anthropic(system: str, messages: list[dict], max_tokens: int,
                             model: str | None = None, api_key: str | None = None):
     """Async generator: streams SSE delta chunks from Anthropic."""
     import anthropic
-    if api_key:
-        # BYOK: don't inherit the server's ANTHROPIC_BASE_URL (a gateway like
-        # Parley would reject a real Anthropic key). Route by key prefix.
-        base_url = ("https://parley.api.mit.edu" if api_key.startswith("sk-parley-")
-                    else "https://api.anthropic.com")
-        client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
-    else:
-        client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    key = api_key or os.environ["ANTHROPIC_API_KEY"]
+    client = anthropic.AsyncAnthropic(
+        api_key=key,
+        base_url=anthropic_base_url(api_key, os.environ.get("ANTHROPIC_BASE_URL")),
+    )
     async with client.messages.stream(
         model=model or DEFAULT_ANTHROPIC_MODEL,
         max_tokens=max_tokens,
@@ -569,19 +567,19 @@ def _friendly_stream_error(exc: Exception) -> str:
     text = str(exc)
     if "Connect" in name or "ConnectionError" in name:
         return (
-            "The Local (Ollama) engine is not reachable. Start Ollama, or pick a "
-            "different engine under Settings → Engine."
+            "The Local (Ollama) engine is not reachable. Start Ollama, or add an "
+            "API key under Settings → API key to use Claude instead."
         )
     if "404" in text and "ollama" in text.lower() or "not found, try pulling" in text.lower():
         return (
             "The selected local model isn't installed in Ollama. "
-            "Run `ollama pull <model>` or pick another model in Settings → Engine."
+            "Run `ollama pull <model>` or pick another model in Settings → Default model."
         )
     if "authentication" in name.lower() or "401" in text:
-        return "The API key was rejected by the provider. Check your key in Settings → Engine."
+        return "The API key was rejected by the provider. Check your key in Settings → API key."
     if "rate" in name.lower() or "429" in text:
         return "The provider is rate-limiting requests. Wait a moment and try again."
-    return f"The AI engine failed mid-response ({name}). Try again or switch engines in Settings → Engine."
+    return f"The AI engine failed mid-response ({name}). Try again or update your key in Settings → API key."
 
 
 async def _with_error_frames(gen):
@@ -615,11 +613,10 @@ def _sse_stream(system: str, messages: list[dict], max_tokens: int,
 def _anthropic_base_for_key(api_key: str | None) -> str:
     """Base URL for an Anthropic-family key. BYOK keys route by prefix (a real
     Anthropic key must not inherit a Parley ANTHROPIC_BASE_URL and vice versa);
-    the server key uses the configured gateway."""
-    if api_key:
-        return ("https://parley.api.mit.edu" if api_key.startswith("sk-parley-")
-                else "https://api.anthropic.com")
-    return os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    the server key uses the configured gateway. Thin wrapper over byok's
+    single implementation of this rule (see also anthropic_base_url call
+    sites elsewhere in this module)."""
+    return anthropic_base_url(api_key, os.environ.get("ANTHROPIC_BASE_URL"))
 
 
 def _select_multimodal_stream(system: str, messages: list[dict], max_tokens: int,
@@ -935,8 +932,8 @@ def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -
     if _hosted_usage.get(key, 0) >= HOSTED_DAILY_REQUESTS:
         raise HTTPException(
             status_code=429,
-            detail="Daily hosted AI quota reached. Switch to Local or BYOK in "
-                   "Settings → Engine, or try again tomorrow.",
+            detail="Daily hosted AI quota reached. Add your own API key in "
+                   "Settings → API key, or try again tomorrow.",
         )
     _hosted_usage[key] = _hosted_usage.get(key, 0) + 1
 
@@ -1853,7 +1850,11 @@ def _process(raw_bytes: bytes, api_key: str | None = None) -> dict:
             bin_read = _decimer_read(current)
             orig_read = _decimer_read(img)
     except Exception as exc:
-        error = str(exc)
+        # Full detail goes to the log; the response stays generic so internal
+        # paths/library errors (e.g. "No module named 'DECIMER'") don't leak
+        # to callers.
+        logger.warning("Local OSR read failed (%s): %s", type(exc).__name__, exc)
+        error = "Structure recognition is temporarily unavailable."
 
     def _collect(future, label: str) -> str | None:
         """MolScribe runs concurrently on its own pool; by now it has usually

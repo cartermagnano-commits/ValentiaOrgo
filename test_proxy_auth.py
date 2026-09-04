@@ -58,6 +58,29 @@ check("nothing matches when no secret is configured",
 check("nothing matches when the configured secret is empty",
       secret_matches("anything", "") is False)
 
+# Starlette latin-1-decodes header bytes, so a header can carry raw bytes
+# 0x80-0xFF as a str containing non-ASCII characters. hmac.compare_digest
+# raises TypeError on a non-ASCII str; this must fail closed, not 500.
+try:
+    _non_ascii_ok = secret_matches("\x80\x81\x82", "s3cret") is False
+    _non_ascii_err = None
+except Exception as exc:  # pragma: no cover - the failure mode being tested
+    _non_ascii_ok = False
+    _non_ascii_err = exc
+
+check("a non-ASCII header against a configured secret is False, not a crash",
+      _non_ascii_ok, detail=repr(_non_ascii_err) if _non_ascii_err else "")
+
+try:
+    _non_ascii_secret_ok = secret_matches("s3cret", "\x80\x81\x82") is False
+    _non_ascii_secret_err = None
+except Exception as exc:  # pragma: no cover - the failure mode being tested
+    _non_ascii_secret_ok = False
+    _non_ascii_secret_err = exc
+
+check("a non-ASCII configured secret against a plain header is False, not a crash",
+      _non_ascii_secret_ok, detail=repr(_non_ascii_secret_err) if _non_ascii_secret_err else "")
+
 print("\nproxy_authorized — access control\n")
 
 check("the right secret is authorized",

@@ -81,11 +81,13 @@ export default function SettingsPage({
           </button>
         </div>
         <div className="settings-note">
-          {keySaved
-            ? 'Saved.'
-            : apiKey
-              ? 'Stored in this browser only. Sent with each request, never saved on our server.'
-              : 'Without a key, drawing structures and predicting reactions still work — they run on the deterministic engine, no AI needed.'}
+          <p>
+            {keySaved
+              ? 'Saved.'
+              : apiKey
+                ? 'Stored in this browser only. Sent with each request, never saved on our server.'
+                : 'Without a key, drawing structures and predicting reactions still work — they run on the deterministic engine, no AI needed.'}
+          </p>
         </div>
       </section>
 

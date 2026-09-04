@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Camera, FileText, FlaskConical, Network, Paperclip, Sparkles, X, Zap } from 'lucide-react'
 import type { ChatAttachment, ChatContent, ChatMessage, ChatToolResult } from '../types'
 import { STRENGTH, loadPreferredModel, savePreferredModel } from '../../lib/engine'
+import { hasUsableApiKey } from '../../lib/aiAvailability'
 import { reactFromImage, streamChat } from '../api'
 import StructureView from '../components/StructureView'
 import ReactionBanner from '../components/ReactionBanner'
@@ -447,6 +448,14 @@ export default function ChatPanel({
   // result into the thread as a card. The explanation waits for the button.
   async function handleReactionPhoto(file: File | null | undefined) {
     if (!file || streaming || saving) return
+    // Reading a reaction photo is a pure vision-API call now (no local OSR
+    // on the server) — with no key anywhere it can only come back empty.
+    // Fail fast with an honest message instead of posting a card that will
+    // just say "no structure recognized".
+    if (!(await hasUsableApiKey())) {
+      notify('Add an API key in Settings to read a reaction photo.', 'error')
+      return
+    }
     let imageAttachment: ChatAttachment | null = null
     try {
       imageAttachment = await readImageAttachment(file)

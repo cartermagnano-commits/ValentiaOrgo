@@ -42,7 +42,11 @@ def secret_matches(header_value: str | None, expected_secret: str | None) -> boo
     """
     if not expected_secret or not header_value:
         return False
-    return hmac.compare_digest(header_value, expected_secret)
+    # hmac.compare_digest raises TypeError on a non-ASCII str (Starlette
+    # latin-1-decodes header bytes, so a caller can send bytes 0x80-0xFF and
+    # hit exactly that). Bytes have no such restriction, so compare as UTF-8
+    # bytes instead — this never raises, and fails closed on any mismatch.
+    return hmac.compare_digest(header_value.encode("utf-8"), expected_secret.encode("utf-8"))
 
 
 def proxy_authorized(header_value: str | None, expected_secret: str | None,

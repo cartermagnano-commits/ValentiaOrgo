@@ -8,7 +8,10 @@
 // and pathway search are deterministic and run free & keyless.
 
 export interface EnginePayload {
-  mode: 'byok'
+  // 'byok' when a key is saved in Settings; otherwise 'hosted', so a
+  // self-hosted backend with its own server-side ANTHROPIC_API_KEY keeps
+  // working for a visitor who never pasted a key (pre-BYOK behavior).
+  mode: 'byok' | 'hosted'
   provider: 'anthropic'
   model?: string | null
   api_key?: string
@@ -74,7 +77,10 @@ export function saveApiKey(key: string): void {
 export function getEnginePayload(modelOverride?: string | null): EnginePayload {
   const key = loadApiKey()
   return {
-    mode: 'byok',
+    // Only claim BYOK when there's actually a key to send — otherwise the
+    // backend enforces BYOK's "API key required" rule even when it has a
+    // perfectly usable server-side key of its own (self-hosted deployments).
+    mode: key ? 'byok' : 'hosted',
     provider: 'anthropic',
     ...(modelOverride ? { model: modelOverride } : {}),
     ...(key ? { api_key: key } : {}),
