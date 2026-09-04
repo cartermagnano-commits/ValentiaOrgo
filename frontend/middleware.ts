@@ -10,10 +10,30 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
-const apiBase = process.env.NEXT_PUBLIC_ORGO_API_BASE_URL ?? 'http://127.0.0.1:8000'
+// Tolerate a base URL entered without a scheme ("host.up.railway.app"), which
+// is the easy mistake to make in a hosting dashboard. Without this, `new URL`
+// below throws and EVERY proxied path returns an opaque
+// MIDDLEWARE_INVOCATION_FAILED 500 with nothing naming the cause.
+function normalizeBase(raw: string | undefined): string {
+  const value = (raw ?? '').trim().replace(/\/+$/, '')
+  if (!value) return 'http://127.0.0.1:8000'
+  return /^https?:\/\//i.test(value) ? value : `https://${value}`
+}
+
+const apiBase = normalizeBase(process.env.NEXT_PUBLIC_ORGO_API_BASE_URL)
 
 export function middleware(request: NextRequest) {
-  const url = new URL(request.nextUrl.pathname + request.nextUrl.search, apiBase)
+  let url: URL
+  try {
+    url = new URL(request.nextUrl.pathname + request.nextUrl.search, apiBase)
+  } catch {
+    // A malformed NEXT_PUBLIC_ORGO_API_BASE_URL is a deploy-config error, not a
+    // request error. Say so plainly instead of crashing the edge function.
+    return NextResponse.json(
+      { detail: 'Backend URL is misconfigured. Check NEXT_PUBLIC_ORGO_API_BASE_URL.' },
+      { status: 503 },
+    )
+  }
 
   const headers = new Headers(request.headers)
   const secret = process.env.ORGO_PROXY_SECRET
