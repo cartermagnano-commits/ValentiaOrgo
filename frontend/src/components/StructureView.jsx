@@ -7,7 +7,13 @@ import { structureUrl } from '../api'
 const svgCache = new Map()
 const SVG_CACHE_MAX = 300
 
-export default function StructureView({ smiles, width = 200, height = 150, className = '' }) {
+export default function StructureView({
+  smiles,
+  width = 200,
+  height = 150,
+  className = '',
+  fit = false,
+}) {
   const [svg, setSvg] = useState(null)
   const [error, setError] = useState(false)
   const abortRef = useRef(null)
@@ -47,12 +53,17 @@ export default function StructureView({ smiles, width = 200, height = 150, class
 
   if (!smiles) return null
 
+  // `width`/`height` still control the server render resolution. `fit` only
+  // changes how that SVG occupies its parent, allowing responsive cards to
+  // size the visible panel without cropping a fixed-size child.
+  const displaySize = fit ? { width: '100%', height: '100%' } : { width, height }
+
   if (error) {
     return (
       <div className={`structure-error ${className}`} style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         color: '#8b949e', fontSize: 11, background: '#f8f9fa',
-        width, height, borderRadius: 4,
+        ...displaySize, borderRadius: 4,
       }}>
         Invalid structure
       </div>
@@ -61,7 +72,7 @@ export default function StructureView({ smiles, width = 200, height = 150, class
 
   if (!svg) {
     return (
-      <div style={{ width, height, background: '#f3f4f6', borderRadius: 4,
+      <div style={{ ...displaySize, background: '#f3f4f6', borderRadius: 4,
         display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <div className="spinner" />
       </div>
@@ -71,7 +82,7 @@ export default function StructureView({ smiles, width = 200, height = 150, class
   return (
     <div
       className={`structure-view structure-outline ${className}`.trim()}
-      style={{ width, height, overflow: 'hidden', background: '#fff', borderRadius: 4 }}
+      style={{ ...displaySize, minWidth: 0, background: '#fff', borderRadius: 4 }}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
   )

@@ -48,9 +48,12 @@ export const config = {
     '/chat',
     '/assist',
     '/react',
+    // An exact path match, so '/react' does NOT cover '/react/assess'.
+    '/react/assess',
     '/react-from-image',
     '/engine/ollama-status',
     '/engine/usage',
+    '/engine/template-gaps',
     '/health',
   ],
 }

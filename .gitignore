@@ -13,6 +13,7 @@ results/
 
 # DECIMER model cache (downloaded at runtime, ~570 MB)
 .data/
+.cache/
 
 # Secrets
 .env
@@ -43,3 +44,6 @@ Thumbs.db
 # Nested scratch repo (not a submodule)
 Image Pre-Processing/
 frontend/tsconfig.tsbuildinfo
+
+# Superpowers SDD scratch (ledger, briefs, review packages)
+.superpowers/

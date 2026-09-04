@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import StructureView from './StructureView'
-import { streamNodeExplanation, streamExplanation, streamStereo } from '../api'
+import { assessReaction, streamNodeExplanation, streamExplanation, streamStereo } from '../api'
+import { DisputePicker, VerdictBadge } from './VerdictBadge'
 import { CheckCircle2, Microscope, Atom } from 'lucide-react'
 
 // 'template' = product came deterministically from a reaction template — the
@@ -141,6 +142,8 @@ function NodeInfoView({ nodeData, branch, substrateSMILES }) {
 function BranchInfoView({ branch, substrateSMILES }) {
   const [explanation, setExplanation] = useState({ text: '', loading: false, error: null })
   const [stereo, setStereo] = useState({ text: '', loading: false, error: null, requested: false })
+  const [verdict, setVerdict] = useState(null)
+  const [verifying, setVerifying] = useState(false)
   // Bumped whenever the branch changes so an in-flight stereo stream from the
   // previous branch can't write into the freshly-reset stereo state.
   const stereoSeq = useRef(0)
@@ -162,6 +165,30 @@ function BranchInfoView({ branch, substrateSMILES }) {
       .catch(e => { if (!stale) setExplanation({ text: '', loading: false, error: e.message }) })
     return () => { stale = true }
   }, [branch?.id, substrateSMILES])
+
+  // One assess call per branch the user actually opens — verifying every
+  // branch in a pathway search would mean dozens of LLM calls per search.
+  useEffect(() => {
+    // Reset before the guards, not after: a rendered branch must never keep
+    // displaying a prior branch's verdict badge (or a stale DisputePicker) —
+    // or its spinner — just because this branch happens to lack a
+    // product/substrate/reagent. (A bail here also can't rely on a prior
+    // branch's in-flight promise to clear `verifying`: its `finally` sees
+    // `stale === true`, set by this effect's own cleanup, and skips the reset.)
+    setVerdict(null)
+    setVerifying(false)
+    if (!branch?.product_smiles) return
+    const substrate = branch.steps?.[0]?.smiles ?? substrateSMILES
+    const reagentSmiles = branch.reagent?.smiles
+    if (!substrate || !reagentSmiles) return
+    let stale = false
+    setVerifying(true)
+    assessReaction(substrate, reagentSmiles, [branch.product_smiles])
+      .then(v => { if (!stale) setVerdict(v) })
+      .catch(() => { /* best-effort; the engine result stands */ })
+      .finally(() => { if (!stale) setVerifying(false) })
+    return () => { stale = true }
+  }, [branch?.id, branch?.product_smiles, substrateSMILES])
 
   function analyzeStereo() {
     const seq = stereoSeq.current
@@ -192,9 +219,12 @@ function BranchInfoView({ branch, substrateSMILES }) {
 
       <div>
         <div className="panel-header" style={{ padding: '0 0 8px', border: 'none' }}>Reaction</div>
-        <div className="rxn-name-badge">
-          <span className={`confidence-dot ${CONF_CLASS[cls.confidence] ?? 'conf-unknown'}`} />
-          {cls.name}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div className="rxn-name-badge">
+            <span className={`confidence-dot ${CONF_CLASS[cls.confidence] ?? 'conf-unknown'}`} />
+            {cls.name}
+          </div>
+          <VerdictBadge verdict={verdict} loading={verifying} />
         </div>
       </div>
 
@@ -230,6 +260,8 @@ function BranchInfoView({ branch, substrateSMILES }) {
           <StructureView smiles={branch.product_smiles} width={300} height={130} />
         </div>
       </div>
+
+      {verdict?.status === 'disputed' && <DisputePicker verdict={verdict} />}
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
         <div className="panel-header" style={{ padding: '0 0 6px', border: 'none' }}>

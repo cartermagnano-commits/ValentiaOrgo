@@ -23,8 +23,9 @@ export interface StrengthStop {
   cost: string
 }
 
-// The chat composer's per-prompt model choices. Model ids are the current
-// production ids; update here if providers rename them.
+// API-model choices revealed by the chat composer's lightning-bolt override.
+// ASKCOS remains the default reaction mode; these ids only apply when the user
+// explicitly bypasses it for a prompt.
 export const STRENGTH: { anthropic: StrengthStop[] } = {
   anthropic: [
     { label: 'Haiku', model: 'claude-haiku-4-5', cost: '~$0.002 / reply' },
@@ -33,8 +34,8 @@ export const STRENGTH: { anthropic: StrengthStop[] } = {
   ],
 }
 
-// The composer's model pick is remembered across sessions, and Settings edits
-// the same preference — both go through here so the key stays in one place.
+// The preferred API-model pick is remembered across sessions, and Settings
+// edits the same preference — both go through here so the key stays in one place.
 const MODEL_KEY = 'orgo.chat.model'
 
 export function loadPreferredModel(): string {

@@ -1,4 +1,4 @@
-import { getEnginePayload, loadApiKey } from '../lib/engine'
+import { getEnginePayload } from '../lib/engine'
 import { downscaleImageFile } from '../lib/imageDownscale'
 
 // Requests routed through Vercel's proxy are capped around 4.5 MB; the
@@ -25,8 +25,10 @@ export async function analyzeImage(file) {
   const upload = await downscaleImageFile(file, MAX_UPLOAD_IMAGE_DIMENSION)
   const form = new FormData()
   form.append('file', upload)
-  const apiKey = loadApiKey()
-  if (apiKey) form.append('api_key', apiKey)
+  // Lets the backend arbitrate the OSR read with the user's chosen (often much
+  // faster and more accurate) vision model instead of the local VLM. The payload
+  // carries the user's BYOK key, so this is also how the key reaches the vision call.
+  form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/analyze', {
     method: 'POST',
     body: form,
@@ -58,12 +60,23 @@ export async function reactDirect(substrateSMILES, reagentSMILES) {
   })
 }
 
+// Ask the AI to independently assess a reaction the deterministic engine has
+// already answered (or failed to answer). Returns a verdict, never a
+// replacement result — see docs/superpowers/specs for the no-flip rule.
+export async function assessReaction(substrateSMILES, reagentSMILES, engineProducts) {
+  return post('/react/assess', {
+    substrate_smiles: substrateSMILES,
+    reagent_smiles: reagentSMILES,
+    engine_products: engineProducts ?? [],
+    engine: getEnginePayload(),
+  })
+}
+
 export async function reactFromImage(file) {
   const upload = await downscaleImageFile(file, MAX_UPLOAD_IMAGE_DIMENSION)
   const form = new FormData()
   form.append('file', upload)
-  const apiKey = loadApiKey()
-  if (apiKey) form.append('api_key', apiKey)
+  form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/react-from-image', {
     method: 'POST',
     body: form,
@@ -173,8 +186,8 @@ export async function streamStereo(branch, substrateSMILES, onDelta) {
   }, onDelta)
 }
 
-// useEngine=false asks the backend to skip the deterministic engine for this
-// turn: no app tools, and no OSR/template run on an attached image.
+// useEngine=false is the composer's API-model override: the backend skips the
+// ASKCOS/deterministic path for this turn, including app tools and image OSR.
 // explain=false asks it to stop after the engine result — the Reaction tab
 // shows the product first and generates prose only when asked.
 export async function streamChat(messages, context, onDelta, model = null,
