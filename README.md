@@ -135,19 +135,23 @@ Local dev runs with auth optional so the app works out of the box. **Never expos
 that configuration to a real network** — run `start-prod.bat` (or replicate what
 it does), which sets `ORGO_ENV=prod` and changes the contract:
 
-- The backend **refuses to start** unless it can verify Supabase login tokens.
-  Set one (or both) of:
-  - `SUPABASE_URL` — your project URL. Tokens are verified against the project's
-    public JWKS endpoint. This is what you want for projects created after
-    May 2025, which sign tokens with asymmetric keys (RS256/ES256/EdDSA).
-  - `SUPABASE_JWT_SECRET` — the legacy HS256 shared secret (Supabase → Project
-    Settings → API → JWT secret), for older projects that haven't migrated.
+- **Accounts are optional, turnkey, and already wired end to end.** Set both of:
+  - `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` (frontend) — the
+    web app's sign-in flow (`frontend/src/platform/AccountPage.tsx`) and every
+    Supabase read/write it does are gated by Row Level Security
+    (`supabase/schema.sql`), not by anything the backend enforces.
+  - `SUPABASE_URL` (backend) — or `SUPABASE_JWT_SECRET` for a legacy HS256
+    project — so the backend can verify a signed-in user's token and attach
+    their `user_id` to chemistry-endpoint calls (for the `usage_events` log and
+    hosted-quota keying). This does **not** gate access: `optional_auth` never
+    blocks a request — no token (or verification not configured) just means
+    anonymous, exactly like local dev. A **present but invalid** token still
+    401s, so a misconfigured verifier can't silently misattribute a signed-in
+    user's calls to someone else.
 
-  With auth enabled, every compute and AI endpoint requires a valid Supabase login
-  token. **The shipped web app does not send one** (it has no login flow), so
-  enabling prod auth requires wiring a Supabase session and attaching its bearer
-  token to the API calls in `frontend/src/api.js` — treat prod auth as a
-  self-hosting integration point, not a turnkey feature.
+  Signed-out users get exactly the pre-accounts experience (localStorage only).
+  Signed-in users get their projects/chats/settings synced to the cloud instead —
+  `frontend/src/api.js` attaches the Supabase session token automatically.
 - Hosted engine mode (server-side LLM key) is metered per user:
   `HOSTED_DAILY_REQUESTS` requests per day (default 200), 429 beyond that.
 
@@ -262,7 +266,9 @@ Orgo AI/
 ├── .env.example            ← server-side keys + optional prod/auth and engine overrides
 ├── start.bat               ← starts FastAPI (:8000) + Next.js (:3000) for dev
 ├── start-prod.bat          ← production launcher (see "Production mode")
-├── supabase/schema.sql     ← optional Supabase schema for self-hosted prod auth
+├── supabase/schema.sql     ← accounts schema (profiles/projects/chemistry_files/
+│                              usage_events, RLS) — an ongoing migration file
+│                              against the live project, not a fresh-install script
 └── frontend/               ← Next.js app (App Router, TypeScript)
     ├── app/                 ← single route: page.tsx → the Workspace
     ├── lib/                 ← sessions (localStorage store), engine (BYOK payload),
