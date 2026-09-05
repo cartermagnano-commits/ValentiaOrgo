@@ -7,11 +7,13 @@ import StructureView from './StructureView'
 // The engine reaction result (from a /chat tool call or a photo /react-from-image),
 // the same shape rendered by the inline ToolResultCards.
 type ReactionProduct = { smiles: string; reaction_name?: string; steps_taken?: number }
+type AiGuess = { smiles: string; reaction_name?: string; confidence?: string; reasoning?: string }
 type ReactionData = {
   substrate_smiles?: string
   reagent_smiles?: string
   environment?: string
   products?: ReactionProduct[]
+  ai_guess?: AiGuess | null
 }
 
 // High-resolution source render. CSS owns the visible dimensions so each SVG
@@ -31,6 +33,10 @@ export default function ReactionBanner({ reaction }: { reaction: Record<string, 
   const products = r.products ?? []
   const primary = products[0] ?? null
   const sideProducts = products.slice(1)
+  // No verified product, but the LLM's RDKit-validated blind guess (app.py
+  // `_maybe_blind_guess`) has a real structure — draw it, marked unverified,
+  // rather than falling back to plain "No verified product" text.
+  const guess = !primary ? (r.ai_guess ?? null) : null
 
   return (
     <div className="reaction-banner">
@@ -51,6 +57,10 @@ export default function ReactionBanner({ reaction }: { reaction: Record<string, 
           <div className="reaction-banner-mol primary">
             <StructureView smiles={primary.smiles} width={DRAW_W} height={DRAW_H} fit />
           </div>
+        ) : guess ? (
+          <div className="reaction-banner-mol unverified">
+            <StructureView smiles={guess.smiles} width={DRAW_W} height={DRAW_H} fit />
+          </div>
         ) : (
           <div className="reaction-banner-nomatch">No verified product</div>
         )}
@@ -59,9 +69,10 @@ export default function ReactionBanner({ reaction }: { reaction: Record<string, 
       <div className="reaction-banner-foot">
         <span className="reaction-banner-head">
           <FlaskConical size={13} />
-          {primary?.reaction_name ?? 'Reaction'}
+          {primary?.reaction_name ?? guess?.reaction_name ?? 'Reaction'}
         </span>
         {r.environment && <span className="reaction-banner-tag">{r.environment}</span>}
+        {guess && <span className="reaction-banner-tag unverified">AI guess</span>}
         {sideProducts.length > 0 && (
           <button
             type="button"

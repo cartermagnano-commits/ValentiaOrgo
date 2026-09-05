@@ -4914,6 +4914,11 @@ header h1 {
   box-shadow: 0 0 0 1px var(--primary);
 }
 
+.reaction-banner-mol.unverified {
+  border-style: dashed;
+  border-color: var(--warning);
+}
+
 .reaction-banner-nomatch {
   padding: 0 6px;
   font-size: 12px;
@@ -4947,6 +4952,11 @@ header h1 {
   padding: 1px 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
+}
+
+.reaction-banner-tag.unverified {
+  color: var(--warning);
+  border-color: var(--warning);
 }
 
 .reaction-banner-side-toggle {
