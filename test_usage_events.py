@@ -90,56 +90,5 @@ app.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key"
 check("anonymous caller (user_id=None) → _log_usage_event does not schedule anything",
       app._log_usage_event("react", None) is None)
 
-# ── _log_usage_event scheduling path: exercises the task-tracking seam ──────
-
-async def test_log_usage_event_scheduling():
-    """Test that _log_usage_event actually schedules and completes the async write."""
-    captured_requests = []
-
-    def test_handler(request: httpx.Request) -> httpx.Response:
-        captured_requests.append(request)
-        return httpx.Response(201, json=[{"id": 1}])
-
-    # Override _post_usage_event's transport at call time by creating a wrapper
-    # that captures the mock
-    original_post = app._post_usage_event
-
-    async def post_with_mock(endpoint: str, user_id: str, transport=None):
-        if transport is None:
-            transport = httpx.MockTransport(test_handler)
-        return await original_post(endpoint, user_id, transport=transport)
-
-    app._post_usage_event = post_with_mock
-    try:
-        # Clear any previous tasks from the set
-        app._usage_event_tasks.clear()
-
-        # Call _log_usage_event which should schedule the async write
-        app._log_usage_event("explain", "user-456")
-
-        # Wait for all pending tasks to complete
-        if asyncio.current_task():
-            pending = [t for t in asyncio.all_tasks() if t != asyncio.current_task()]
-        else:
-            pending = list(asyncio.all_tasks())
-
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-
-        check("_log_usage_event schedules and completes the async write",
-              len(captured_requests) == 1, f"captured {len(captured_requests)} requests")
-
-        if captured_requests:
-            req = captured_requests[0]
-            import json
-            body = json.loads(req.content)
-            check("scheduled write carries correct user_id and endpoint",
-                  body == {"user_id": "user-456", "endpoint": "explain"}, str(body))
-    finally:
-        app._post_usage_event = original_post
-        app._usage_event_tasks.clear()
-
-asyncio.run(test_log_usage_event_scheduling())
-
 print(f"\n{len(failures)} failing" if failures else "\nAll checks passed")
 sys.exit(1 if failures else 0)

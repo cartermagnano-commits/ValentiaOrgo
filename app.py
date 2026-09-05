@@ -1194,8 +1194,6 @@ def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -
 # alone) for analytics. Anonymous calls are not logged: there is no user_id
 # to attach them to.
 
-_usage_event_tasks: set[asyncio.Task] = set()
-
 
 def _log_usage_event(endpoint: str, user_id: str | None) -> None:
     """Fire-and-forget: schedules the write as a background task so a slow or
@@ -1203,9 +1201,7 @@ def _log_usage_event(endpoint: str, user_id: str | None) -> None:
     response. Never raises."""
     if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
-    task = asyncio.create_task(_post_usage_event(endpoint, user_id))
-    _usage_event_tasks.add(task)
-    task.add_done_callback(_usage_event_tasks.discard)
+    asyncio.create_task(_post_usage_event(endpoint, user_id))
 
 
 async def _post_usage_event(endpoint: str, user_id: str,
