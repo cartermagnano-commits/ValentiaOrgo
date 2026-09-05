@@ -102,6 +102,9 @@ export default function Workspace() {
   // Debounced persist: chat streaming calls updateContent per token, and
   // serializing every session to localStorage on each delta would jank the UI.
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Guards mergeAndSave's optimistic update against out-of-order cloud-store
+  // responses — only the most recently *started* save may ever land in `active`.
+  const persistGeneration = useRef(0)
 
   function updateContent(content: SessionContent) {
     const current = activeRef.current
@@ -131,7 +134,10 @@ export default function Workspace() {
     if (!current) return
     const next = { ...current, content: { ...(current.content as Record<string, unknown>), ...data } as SessionContent }
     setActive(next)
-    persistIfReal(next).then(setActive)
+    const generation = ++persistGeneration.current
+    persistIfReal(next).then(saved => {
+      if (persistGeneration.current === generation) setActive(saved)
+    })
   }
 
   // PathwayExplorer owns its state after mount, so chat-driven changes to the
