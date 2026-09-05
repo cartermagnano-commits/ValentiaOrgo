@@ -1,5 +1,6 @@
 import { getEnginePayload } from '../lib/engine'
 import { downscaleImageFile } from '../lib/imageDownscale'
+import { supabase } from '../lib/supabase'
 
 // Requests routed through Vercel's proxy are capped around 4.5 MB; the
 // backend's own MAX_DIM=1024 downscale means anything above this is bytes
@@ -8,10 +9,20 @@ const MAX_UPLOAD_IMAGE_DIMENSION = 1600
 
 const BASE = ''  // same-origin; frontend/middleware.ts proxies to the FastAPI backend
 
+// Supabase session token, when signed in — attached to every backend call so
+// optional_auth (app.py) can recognize the caller. Absent when signed out;
+// the backend then treats the request as anonymous, exactly as before
+// accounts existed.
+async function authHeaders() {
+  const { data } = await supabase.auth.getSession()
+  const token = data.session?.access_token
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 async function post(path, body) {
   const res = await fetch(BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
@@ -31,6 +42,7 @@ export async function analyzeImage(file) {
   form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/analyze', {
     method: 'POST',
+    headers: await authHeaders(),
     body: form,
   })
   if (!res.ok) {
@@ -44,7 +56,9 @@ export async function analyzeImage(file) {
 // returned confidence "verifying". Blocks server-side until the vision read
 // finishes; the token is single-use.
 export async function verifyAnalysis(token) {
-  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`)
+  const res = await fetch(`${BASE}/analyze/verify/${encodeURIComponent(token)}`, {
+    headers: await authHeaders(),
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Verification failed')
@@ -79,6 +93,7 @@ export async function reactFromImage(file) {
   form.append('engine', JSON.stringify(getEnginePayload()))
   const res = await fetch(BASE + '/react-from-image', {
     method: 'POST',
+    headers: await authHeaders(),
     body: form,
   })
   if (!res.ok) {
@@ -103,7 +118,7 @@ export async function fetchPathways(startSmilesList, targetSMILES, desiredDepth 
 async function streamSSE(path, body, onDelta, onToolEvent = null) {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify(body),
   })
   if (!res.ok) {
