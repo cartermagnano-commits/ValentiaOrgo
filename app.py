@@ -1187,6 +1187,47 @@ def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -
     _hosted_usage[key] = _hosted_usage.get(key, 0) + 1
 
 
+# ── Usage analytics log (Supabase) ────────────────────────────────────────────
+# Separate from _enforce_hosted_quota above: that meters ONLY hosted-mode
+# generative calls against the daily cap. This logs every chemistry-endpoint
+# call from a SIGNED-IN user (any engine mode, including BYOK and templates
+# alone) for analytics. Anonymous calls are not logged: there is no user_id
+# to attach them to.
+
+
+def _log_usage_event(endpoint: str, user_id: str | None) -> None:
+    """Fire-and-forget: schedules the write as a background task so a slow or
+    unreachable Supabase project can never add latency to the caller's actual
+    response. Never raises."""
+    if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    asyncio.create_task(_post_usage_event(endpoint, user_id))
+
+
+async def _post_usage_event(endpoint: str, user_id: str,
+                            transport: "httpx.BaseTransport | None" = None) -> None:
+    """The actual write. `transport` is a test seam only (see
+    test_usage_events.py) — production calls always leave it None. Uses
+    SUPABASE_SERVICE_ROLE_KEY, which bypasses Row Level Security, so this is
+    the one path in the app allowed to write usage_events; it must never be
+    logged or exposed to a client."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0, transport=transport) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL.rstrip('/')}/rest/v1/usage_events",
+                json={"user_id": user_id, "endpoint": endpoint},
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+    except Exception:
+        logger.warning("usage_events log failed for endpoint=%s", endpoint, exc_info=True)
+
+
 # ── Direct Reaction: AI-guess fallback + advisory sanity check ────────────────
 # Both are single-shot, fail-open extras layered on the deterministic engine:
 # the blind guess runs ONLY when zero templates matched (clearly labeled
@@ -2307,8 +2348,10 @@ def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.post("/analyze", dependencies=[Depends(optional_auth)])
-async def analyze(file: UploadFile = File(...), engine: str | None = Form(default=None)):
+@app.post("/analyze")
+async def analyze(file: UploadFile = File(...), engine: str | None = Form(default=None),
+                  user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("analyze", user_id)
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -2758,8 +2801,9 @@ def _bfs_convergent(
     }
 
 
-@app.post("/pathways", dependencies=[Depends(optional_auth)])
-async def pathways(req: PathwaysRequest):
+@app.post("/pathways")
+async def pathways(req: PathwaysRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("pathways", user_id)
     from rdkit import Chem
 
     # ── Resolve starting materials (support legacy single-substrate field) ─────
@@ -2898,6 +2942,7 @@ class ExplainRequest(BaseModel):
 
 @app.post("/explain")
 async def explain(req: ExplainRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("explain", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     if len(req.execution_history) > MAX_HISTORY_LINES:
         raise HTTPException(status_code=413, detail="Execution history too large.")
@@ -2974,6 +3019,7 @@ async def stereo(req: StereoRequest, user_id: str | None = Depends(optional_auth
     stereo/regio outcome of the engine's product — it must not propose a
     different product structure.
     """
+    _log_usage_event("stereo", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     system_prompt = (
         "You are an organic chemistry stereochemistry specialist for Orgo AI.\n"
@@ -3107,6 +3153,7 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
 
 @app.post("/chat")
 async def chat(req: ChatRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("chat", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     _guard_messages(req.messages)
     context_block = ""
@@ -3333,6 +3380,7 @@ def _assist_prompts(file_type: str, content: dict, ground: str = "") -> tuple[st
 
 @app.post("/assist")
 async def assist(req: AssistRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("assist", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     content = req.content or {}
     ground = ""
@@ -3669,6 +3717,7 @@ async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
 @app.post("/react")
 async def react(req: ReactRequest, user_id: str | None = Depends(optional_auth)):
     """Return all predicted products for a given substrate + reagent SMILES pair."""
+    _log_usage_event("react", user_id)
     core = await _react_core(req.substrate_smiles, req.reagent_smiles)
     byok_key = req.engine.api_key if req.engine else None
     substrate, reagent = core["substrate_smiles"], core["reagent_smiles"]
@@ -3751,6 +3800,7 @@ async def react_assess(req: AssessRequest, user_id: str | None = Depends(optiona
     same endpoint serves /react, a selected pathway branch, and
     /react-from-image — and a page reload can re-ask without server state.
     """
+    _log_usage_event("react/assess", user_id)
     _enforce_hosted_quota(req.engine, user_id)
 
     substrate = _canonical_smiles(req.substrate_smiles.strip())
@@ -3838,6 +3888,7 @@ async def react_assess(req: AssessRequest, user_id: str | None = Depends(optiona
 async def react_from_image(file: UploadFile = File(...),
                            engine: str | None = Form(default=None),
                            user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("react-from-image", user_id)
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
