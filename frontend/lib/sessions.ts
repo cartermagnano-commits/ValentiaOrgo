@@ -145,7 +145,7 @@ export function createSession(tool: Tool, projectId?: string | null): Session {
 
 // Which page the shell is showing. 'tool' is the workspace itself (a chat,
 // reaction or synthesis session); the rest are nav-rail destinations.
-export type View = 'tool' | 'chats' | 'projects' | 'project' | 'settings'
+export type View = 'tool' | 'chats' | 'projects' | 'project' | 'settings' | 'account'
 
 export type UiState = {
   sessionId: string | null
@@ -157,7 +157,7 @@ export type UiState = {
 }
 
 const TOOLS: Tool[] = ['synthesis', 'direct_reaction', 'chat']
-const VIEWS: View[] = ['tool', 'chats', 'projects', 'project', 'settings']
+const VIEWS: View[] = ['tool', 'chats', 'projects', 'project', 'settings', 'account']
 
 export function loadUiState(): UiState | null {
   if (typeof window === 'undefined') return null

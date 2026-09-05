@@ -145,14 +145,36 @@ transformations your name library is missing.
 
 ## Frontend (`frontend/`, Next.js App Router + TypeScript)
 
-**The frontend is a single-page, localStorage-only workspace.** README.md now matches
-this, but `SUPABASE_SETUP.md` still describes the older multi-route Supabase login flow
-(kept only as a self-hosted prod-auth reference). Trust the code:
+**The frontend is a single-page workspace where accounts are OPTIONAL.** Signed out, it
+behaves exactly as it always has — localStorage only, no network persistence. Signed in,
+the same UI reads and writes Supabase instead, so projects/chats/settings follow the
+user across browsers. `SUPABASE_SETUP.md` still describes an older multi-route login
+flow; there are no such routes. Trust the code:
 
 - Entry is `app/page.tsx` → `src/platform/Workspace.tsx`. There are **no** `/login`,
-  `/signup`, `/dashboard`, or `/projects/[id]` routes despite what the docs say.
-- Projects and sessions persist in **localStorage** (`lib/sessions.ts`) — no accounts,
-  no Supabase in the frontend at all.
+  `/signup`, `/dashboard`, or `/projects/[id]` routes despite what the docs say. Sign-in
+  is a page *inside* the workspace (`src/platform/AccountPage.tsx`, the `account` view).
+- **One `SessionStore` interface, two implementations** (`lib/sessionStore.ts`):
+  `lib/localSessionStore.ts` (localStorage, via `lib/sessions.ts`) and
+  `lib/cloudSessionStore.ts` (Supabase `projects` + `chemistry_files`).
+  `lib/auth.tsx`'s `AuthProvider` picks one on `user` and hands it to `Workspace.tsx`
+  through `useAuth()`; **no component knows which one it got.** Add persistence by
+  extending the interface and both implementations, never by importing Supabase into UI.
+  `store` is memoized on `user?.id` — Supabase re-emits `SIGNED_IN` on every tab-focus,
+  and an unstable identity would re-run Workspace's hydration effect and clobber
+  unsaved work.
+- The browser talks to Supabase **directly** (`lib/supabase.ts`, anon key), not through
+  the FastAPI proxy. Row Level Security in `supabase/schema.sql` is the entire access
+  boundary — verified by `test_supabase_rls.py`. `supabase/schema.sql` is applied by
+  hand to a live database and is an **ongoing migration file**: `create table if not
+  exists` no-ops there, so any column/constraint change needs its own explicit `alter`.
+- On first sign-in, `lib/migrate.ts` uploads this browser's local work into the account
+  (local data is left untouched). It is resumable — a partial id map is kept in
+  localStorage so a failed attempt never duplicates projects on retry. Hydration in
+  `Workspace.tsx` is gated on `useAuth().migrating` so a half-migrated account is never
+  read.
+- Engine model preference syncs through `lib/cloudSettings.ts` (`user_settings`); the
+  BYOK **API key never leaves the browser** and is never written to Supabase.
 - Three tools in the workspace: **Synthesis** (reagent routes), **Reaction** (predict
   products from typed molecules or a photo), **Chat**.
 - Engine is **BYOK**: `lib/engine.ts` sends `{mode:'byok', provider:'anthropic',
@@ -161,20 +183,33 @@ this, but `SUPABASE_SETUP.md` still describes the older multi-route Supabase log
   Opus — `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-8`). The
   backend routes the key by prefix: `sk-parley-*` to the MIT Parley gateway,
   anything else to `api.anthropic.com` (`byok.py`).
-- `src/api.js` calls the backend; `src/components/` holds the chemistry UI
-  (`PathwayExplorer`, `PathwayGraph` via `@xyflow/react`, `StructureView`, `MoleculeInput`).
+- `src/api.js` calls the backend, attaching the Supabase access token as
+  `Authorization: Bearer …` when one exists (anonymous otherwise — see `optional_auth`
+  below); `src/components/` holds the chemistry UI (`PathwayExplorer`, `PathwayGraph`
+  via `@xyflow/react`, `StructureView`, `MoleculeInput`).
 
-The backend still contains the full Supabase-auth + Ollama/BYOK machinery; the frontend
-just no longer exercises most of it.
+The backend still contains the full Ollama/BYOK machinery the frontend doesn't exercise;
+its Supabase half is now live on both sides.
 
 ## Production & auth (`ORGO_ENV=prod`)
 
-- In dev, auth is **off** by default (`require_auth` returns `None`), so everything works
-  keyless out of the box. Never expose that config to a real network.
+- **Auth is per-request optional, not per-deployment.** `optional_auth` never blocks a
+  request: no `Authorization` header (or verification not configured) means anonymous
+  `user_id=None`, exactly as before accounts existed. A **present** token is verified,
+  and a present-but-invalid one 401s — silently downgrading a rejected token to anonymous
+  would let a broken verification path misattribute a signed-in user's calls. The old
+  `require_auth` (all-or-nothing per deployment) and the prod-mandatory startup guard are
+  both gone; `ORGO_ENV=prod` no longer refuses to boot without a verification method.
 - Setting `SUPABASE_URL` (JWKS verification, RS256/ES256/EdDSA — projects since May 2025)
-  or `SUPABASE_JWT_SECRET` (legacy HS256) enables auth — and in prod the backend
-  **refuses to start** without one. `/health`, `/engine/*`, `/structure`, `/molfile`
-  stay public (the last two are loaded via `<img src>` and can't carry an auth header).
+  or `SUPABASE_JWT_SECRET` (legacy HS256) is what makes `AUTH_ENABLED` true and lets
+  tokens resolve to a real user id — used for hosted-quota keying and the `usage_events`
+  analytics log. A project mid-migration can set both; the token's `alg` header picks the
+  path. `/health`, `/engine/*`, `/structure`, `/molfile` carry no auth dependency at all
+  (the last two are loaded via `<img src>` and can't send a header).
+- `SUPABASE_SERVICE_ROLE_KEY` is backend-only and bypasses RLS. It is used for exactly
+  one thing — `_post_usage_event` writing to `usage_events` — and must never be sent to
+  the client or logged. Everything else the browser does against Supabase goes through
+  the anon key under RLS.
 - LLM keys: `ANTHROPIC_API_KEY` (+ optional `OPENAI_API_KEY`) enable Hosted mode.
   `HOSTED_ANTHROPIC_MODEL` (default `claude-haiku-4-5`) and `ANTHROPIC_VISION_MODEL`
   (default `claude-sonnet-4-6`) tune the models. `ANTHROPIC_BASE_URL` supports gateway

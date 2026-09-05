@@ -2,7 +2,7 @@
 
 import {
   Archive, Beaker, FlaskConical, MessagesSquare, Network,
-  PanelLeft, Plus, Settings,
+  PanelLeft, Plus, Settings, User,
 } from 'lucide-react'
 import type { View } from '../../lib/sessions'
 import type { Tool } from '../types'
@@ -95,6 +95,15 @@ export default function NavRail({
           onClick={() => onView('settings')}
         >
           <Settings size={19} />
+        </button>
+        <button
+          className={`rail-btn${view === 'account' ? ' active' : ''}`}
+          data-label="Account"
+          aria-label="Account"
+          aria-current={view === 'account' ? 'page' : undefined}
+          onClick={() => onView('account')}
+        >
+          <User size={19} />
         </button>
       </div>
 

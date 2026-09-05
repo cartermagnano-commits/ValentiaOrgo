@@ -19,6 +19,7 @@ results/
 .env
 .env.*
 !frontend/.env.placeholder
+!frontend/.env.example
 frontend/.env.local
 frontend/.env*.local
 

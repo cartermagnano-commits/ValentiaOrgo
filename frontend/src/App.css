@@ -3661,11 +3661,32 @@ header h1 {
 /* ── App shell: icon rail + optional recents panel + one main surface ────── */
 
 .app-shell {
+  position: relative;
   display: flex;
   height: 100vh;
   background: var(--bg);
   overflow: hidden;
 }
+
+/* Sessions/projects failed to load (Supabase down, RLS misconfigured, offline).
+   Floats over the workspace rather than displacing it, so the nav rail stays
+   reachable and the user can still get to Account and sign out. */
+.hydrate-error {
+  position: absolute;
+  z-index: 40;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(660px, calc(100% - 84px));
+}
+
+.hydrate-error .settings-note {
+  background: var(--card);
+  border-color: var(--danger);
+  box-shadow: var(--shadow-md);
+}
+
+.hydrate-error .settings-note svg { color: var(--danger); }
 
 .nav-rail {
   flex: none;

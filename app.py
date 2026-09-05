@@ -1047,10 +1047,13 @@ async def _rate_limit(request, call_next):
     return await call_next(request)
 
 
-# Optional Supabase JWT auth. Enabled when either verification method is
-# configured; disabled otherwise so local dev works out of the box. When
-# enabled, protected endpoints require a valid Supabase access token (the
-# frontend attaches `Authorization: Bearer <token>` to all API calls).
+# Supabase JWT auth — OPTIONAL per request, not gated on deployment mode.
+# Verifies a token when the caller presents one (real user_id, used for
+# hosted-quota keying and the usage_events analytics log — see
+# _log_usage_event below); a caller with no token is anonymous, exactly as
+# before accounts existed. This is what lets signed-in and guest use
+# coexist — see optional_auth() below and
+# docs/superpowers/specs/2026-09-04-user-profiles-design.md.
 #
 #   SUPABASE_JWT_SECRET — legacy shared-secret projects (HS256).
 #   SUPABASE_URL / SUPABASE_JWKS_URL — projects on JWT signing keys, the
@@ -1059,27 +1062,27 @@ async def _rate_limit(request, call_next):
 #     same value the frontend uses as NEXT_PUBLIC_SUPABASE_URL.
 #
 # A project mid-migration can set both; the token's alg header picks the path.
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
 SUPABASE_JWKS_URL = os.environ.get("SUPABASE_JWKS_URL") or (
-    f"{os.environ['SUPABASE_URL'].rstrip('/')}/auth/v1/.well-known/jwks.json"
-    if os.environ.get("SUPABASE_URL") else None
+    f"{SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json" if SUPABASE_URL else None
 )
 AUTH_ENABLED = bool(SUPABASE_JWT_SECRET or SUPABASE_JWKS_URL)
 
-# Deployment mode. "dev" (default) keeps auth optional for local use. "prod"
-# refuses to start without a token-verification method, so the API can never
-# reach a real network with auth silently disabled — the failure is at boot,
-# not after someone finds the open endpoint.
+# Backend-only credential, used ONLY to write to usage_events (see
+# _post_usage_event) — it bypasses Row Level Security, so it must never be
+# sent to the client or logged. Everything else the frontend does against
+# Supabase (profiles/projects/chemistry_files/user_settings) goes through
+# the client-side anon key instead, guarded by RLS in supabase/schema.sql.
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+# Deployment mode. Historically "prod" refused to boot without a
+# token-verification method configured; that guard is gone now that no
+# endpoint mandates a token (optional_auth degrades to anonymous instead of
+# rejecting). ORGO_ENV is kept for anything else that wants to distinguish
+# environments.
 ORGO_ENV = os.environ.get("ORGO_ENV", "dev").lower()
 IS_PROD = ORGO_ENV in ("prod", "production")
-if IS_PROD and not AUTH_ENABLED:
-    raise RuntimeError(
-        "ORGO_ENV=prod requires a way to verify Supabase tokens: set SUPABASE_URL "
-        "(project URL — tokens verified via its public JWKS; Supabase default "
-        "since May 2025) and/or SUPABASE_JWT_SECRET (legacy HS256 shared secret). "
-        "Without one, every endpoint would be unauthenticated. Set one, or run "
-        "with ORGO_ENV=dev for local development."
-    )
 
 _jwks_client = None
 
@@ -1117,11 +1120,15 @@ def _verify_token(token: str) -> str | None:
     return payload.get("sub")
 
 
-async def require_auth(authorization: str = Header(default="")):
-    if not AUTH_ENABLED:
-        return None  # auth disabled (dev)
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
+async def optional_auth(authorization: str = Header(default="")):
+    """Verify a Supabase access token when one is presented; anonymous
+    (None) when absent — regardless of whether verification is configured.
+    A PRESENT-but-invalid token still 401s: silently downgrading a rejected
+    token to anonymous would let a broken verification path misattribute a
+    signed-in user's calls to "anon" without anyone noticing.
+    """
+    if not AUTH_ENABLED or not authorization.startswith("Bearer "):
+        return None
     try:
         return await asyncio.to_thread(_verify_token, authorization[7:])
     except Exception as exc:
@@ -1178,6 +1185,51 @@ def _enforce_hosted_quota(engine: Optional[EngineConfig], user_id: str | None) -
                    "Settings → API key, or try again tomorrow.",
         )
     _hosted_usage[key] = _hosted_usage.get(key, 0) + 1
+
+
+# ── Usage analytics log (Supabase) ────────────────────────────────────────────
+# Separate from _enforce_hosted_quota above: that meters ONLY hosted-mode
+# generative calls against the daily cap. This logs every chemistry-endpoint
+# call from a SIGNED-IN user (any engine mode, including BYOK and templates
+# alone) for analytics. Anonymous calls are not logged: there is no user_id
+# to attach them to.
+
+_usage_event_tasks: set[asyncio.Task] = set()
+
+
+def _log_usage_event(endpoint: str, user_id: str | None) -> None:
+    """Fire-and-forget: schedules the write as a background task so a slow or
+    unreachable Supabase project can never add latency to the caller's actual
+    response. Never raises."""
+    if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    task = asyncio.create_task(_post_usage_event(endpoint, user_id))
+    _usage_event_tasks.add(task)
+    task.add_done_callback(_usage_event_tasks.discard)
+
+
+async def _post_usage_event(endpoint: str, user_id: str,
+                            transport: "httpx.BaseTransport | None" = None) -> None:
+    """The actual write. `transport` is a test seam only (see
+    test_usage_events.py) — production calls always leave it None. Uses
+    SUPABASE_SERVICE_ROLE_KEY, which bypasses Row Level Security, so this is
+    the one path in the app allowed to write usage_events; it must never be
+    logged or exposed to a client."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0, transport=transport) as client:
+            resp = await client.post(
+                f"{SUPABASE_URL.rstrip('/')}/rest/v1/usage_events",
+                json={"user_id": user_id, "endpoint": endpoint},
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+    except Exception:
+        logger.warning("usage_events log failed for endpoint=%s", endpoint, exc_info=True)
 
 
 # ── Direct Reaction: AI-guess fallback + advisory sanity check ────────────────
@@ -2300,8 +2352,10 @@ def _run_all_pathways_for_reagent(substrate: str, reagent: dict) -> list[dict]:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.post("/analyze", dependencies=[Depends(require_auth)])
-async def analyze(file: UploadFile = File(...), engine: str | None = Form(default=None)):
+@app.post("/analyze")
+async def analyze(file: UploadFile = File(...), engine: str | None = Form(default=None),
+                  user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("analyze", user_id)
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
@@ -2349,7 +2403,7 @@ async def analyze(file: UploadFile = File(...), engine: str | None = Form(defaul
     return result
 
 
-@app.get("/analyze/verify/{token}", dependencies=[Depends(require_auth)])
+@app.get("/analyze/verify/{token}", dependencies=[Depends(optional_auth)])
 async def analyze_verify(token: str):
     """
     Collect the deferred vision verification for a prior /analyze response.
@@ -2751,8 +2805,9 @@ def _bfs_convergent(
     }
 
 
-@app.post("/pathways", dependencies=[Depends(require_auth)])
-async def pathways(req: PathwaysRequest):
+@app.post("/pathways")
+async def pathways(req: PathwaysRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("pathways", user_id)
     from rdkit import Chem
 
     # ── Resolve starting materials (support legacy single-substrate field) ─────
@@ -2890,7 +2945,8 @@ class ExplainRequest(BaseModel):
 
 
 @app.post("/explain")
-async def explain(req: ExplainRequest, user_id: str | None = Depends(require_auth)):
+async def explain(req: ExplainRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("explain", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     if len(req.execution_history) > MAX_HISTORY_LINES:
         raise HTTPException(status_code=413, detail="Execution history too large.")
@@ -2959,7 +3015,7 @@ class StereoRequest(BaseModel):
 
 
 @app.post("/stereo")
-async def stereo(req: StereoRequest, user_id: str | None = Depends(require_auth)):
+async def stereo(req: StereoRequest, user_id: str | None = Depends(optional_auth)):
     """Opt-in stereo/regiochemistry annotation pass.
 
     The deterministic SMARTS engine owns connectivity but cannot express
@@ -2967,6 +3023,7 @@ async def stereo(req: StereoRequest, user_id: str | None = Depends(require_auth)
     stereo/regio outcome of the engine's product — it must not propose a
     different product structure.
     """
+    _log_usage_event("stereo", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     system_prompt = (
         "You are an organic chemistry stereochemistry specialist for Orgo AI.\n"
@@ -3099,7 +3156,8 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
 
 
 @app.post("/chat")
-async def chat(req: ChatRequest, user_id: str | None = Depends(require_auth)):
+async def chat(req: ChatRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("chat", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     _guard_messages(req.messages)
     context_block = ""
@@ -3325,7 +3383,8 @@ def _assist_prompts(file_type: str, content: dict, ground: str = "") -> tuple[st
 
 
 @app.post("/assist")
-async def assist(req: AssistRequest, user_id: str | None = Depends(require_auth)):
+async def assist(req: AssistRequest, user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("assist", user_id)
     _enforce_hosted_quota(req.engine, user_id)
     content = req.content or {}
     ground = ""
@@ -3683,8 +3742,9 @@ async def _react_core(substrate_smiles: str, reagent_smiles: str) -> dict:
 
 
 @app.post("/react")
-async def react(req: ReactRequest, user_id: str | None = Depends(require_auth)):
+async def react(req: ReactRequest, user_id: str | None = Depends(optional_auth)):
     """Return all predicted products for a given substrate + reagent SMILES pair."""
+    _log_usage_event("react", user_id)
     core = await _react_core(req.substrate_smiles, req.reagent_smiles)
     byok_key = req.engine.api_key if req.engine else None
     substrate, reagent = core["substrate_smiles"], core["reagent_smiles"]
@@ -3760,13 +3820,14 @@ class AssessRequest(BaseModel):
 
 
 @app.post("/react/assess")
-async def react_assess(req: AssessRequest, user_id: str | None = Depends(require_auth)):
+async def react_assess(req: AssessRequest, user_id: str | None = Depends(optional_auth)):
     """Return the joint AI/deterministic verdict for one reaction.
 
     Stateless by design: the client supplies the engine's products, so the
     same endpoint serves /react, a selected pathway branch, and
     /react-from-image — and a page reload can re-ask without server state.
     """
+    _log_usage_event("react/assess", user_id)
     _enforce_hosted_quota(req.engine, user_id)
 
     substrate = _canonical_smiles(req.substrate_smiles.strip())
@@ -3853,7 +3914,8 @@ async def react_assess(req: AssessRequest, user_id: str | None = Depends(require
 @app.post("/react-from-image")
 async def react_from_image(file: UploadFile = File(...),
                            engine: str | None = Form(default=None),
-                           user_id: str | None = Depends(require_auth)):
+                           user_id: str | None = Depends(optional_auth)):
+    _log_usage_event("react-from-image", user_id)
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")

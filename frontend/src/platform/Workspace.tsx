@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Bot, FlaskConical, FolderOpen, MessageSquare, Network, Trash2, X,
+  AlertTriangle, Bot, FlaskConical, FolderOpen, MessageSquare, Network, Trash2, X,
 } from 'lucide-react'
 import PathwayExplorer from '../components/PathwayExplorer'
 import ChatPanel from './ChatPanel'
@@ -11,25 +11,19 @@ import ChatsPage from './ChatsPage'
 import ProjectsPage from './ProjectsPage'
 import ProjectPage from './ProjectPage'
 import SettingsPage from './SettingsPage'
+import AccountPage from './AccountPage'
 import { dayLabel } from './format'
 import type { ChatContent, ChatMessage, ChatToolResult, SessionContent, Tool } from '../types'
 import {
   Project,
   Session,
   View,
-  clearAll,
-  createProject,
   createSession,
-  deleteProject,
-  deleteSession,
   hasRealContent,
-  loadProjects,
-  loadSessions,
   loadUiState,
-  saveSession,
   saveUiState,
-  updateProject,
 } from '../../lib/sessions'
+import { useAuth } from '../../lib/auth'
 
 const TOOLS: Array<{ tool: Tool; label: string; icon: typeof Network; blurb: string }> = [
   { tool: 'synthesis', label: 'Synthesis', icon: Network, blurb: 'Explore reagent routes from a starting molecule' },
@@ -48,35 +42,67 @@ export default function Workspace() {
   const [view, setView] = useState<View>('tool')
   const [active, setActive] = useState<Session | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  const [hydrateError, setHydrateError] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   // Live selection context pushed up by PathwayExplorer for the drawer.
   const [synthesisContext, setSynthesisContext] = useState<Record<string, unknown> | null>(null)
 
-  // localStorage isn't available during SSR — load once on mount and restore
-  // whatever the user was last looking at, so a refresh doesn't bounce them
-  // back to Chat. First-ever visit falls through to a fresh chat session.
+  const { user, store, loading: authLoading, migrating } = useAuth()
+
+  // localStorage/Supabase reads aren't available synchronously — load once
+  // on mount, and again whenever the active store changes (sign-in/sign-out
+  // swap it), restoring whatever the user was last looking at.
+  //
+  // Deferred while auth is still resolving (an already-signed-in user would
+  // otherwise flash this browser's local data before the cloud store arrives)
+  // and while migration is uploading local work into a just-signed-in account
+  // (reading mid-upload shows a half-migrated history that nothing re-reads).
+  // `migrating` flipping back to false re-fires this effect, so hydration then
+  // sees the finished account.
   useEffect(() => {
-    const storedSessions = loadSessions()
-    const storedProjects = loadProjects()
-    setSessions(storedSessions)
-    setProjects(storedProjects)
+    if (authLoading || migrating) return
+    let cancelled = false
+    async function hydrate() {
+      try {
+        const [storedSessions, storedProjects] = await Promise.all([
+          store.loadSessions(), store.loadProjects(),
+        ])
+        if (cancelled) return
+        setSessions(storedSessions)
+        setProjects(storedProjects)
 
-    const ui = loadUiState()
-    // A project that has since been deleted must not resurrect a filtered view.
-    const projectId = ui?.projectId && storedProjects.some(p => p.id === ui.projectId)
-      ? ui.projectId : null
-    // Empty sessions are never persisted, so a missing id just means the last
-    // session held no work — reopen its tool with a fresh one.
-    const restored = ui?.sessionId ? storedSessions.find(s => s.id === ui.sessionId) : undefined
+        const ui = loadUiState()
+        // A project that has since been deleted must not resurrect a filtered view.
+        const projectId = ui?.projectId && storedProjects.some(p => p.id === ui.projectId)
+          ? ui.projectId : null
+        // Empty sessions are never persisted, so a missing id just means the last
+        // session held no work — reopen its tool with a fresh one.
+        const restored = ui?.sessionId ? storedSessions.find(s => s.id === ui.sessionId) : undefined
 
-    setActiveProjectId(projectId)
-    // The project page needs a project; without one, fall back to the list.
-    setView(ui?.view === 'project' && !projectId ? 'projects' : ui?.view ?? 'tool')
-    setSidebarOpen(ui?.sidebarOpen ?? false)
-    setActive(restored ?? createSession(ui?.tool ?? 'chat', projectId))
-    setHydrated(true)
-  }, [])
+        setActiveProjectId(projectId)
+        // The project page needs a project; without one, fall back to the list.
+        setView(ui?.view === 'project' && !projectId ? 'projects' : ui?.view ?? 'tool')
+        setSidebarOpen(ui?.sidebarOpen ?? false)
+        setActive(restored ?? createSession(ui?.tool ?? 'chat', projectId))
+        setHydrateError(null)
+        setHydrated(true)
+      } catch (err) {
+        if (cancelled) return
+        // Every cloud-store method throws on a Supabase error, so a paused
+        // project, an RLS misconfiguration, or a dropped connection lands
+        // here. Rendering nothing would strand the user on a blank page with
+        // no way to reach Account and sign out — so hydrate to an empty (but
+        // usable) workspace and say so.
+        console.error('Failed to load sessions/projects', err)
+        setHydrateError(err instanceof Error ? err.message : String(err))
+        setActive(current => current ?? createSession('chat', null))
+        setHydrated(true)
+      }
+    }
+    hydrate()
+    return () => { cancelled = true }
+  }, [store, authLoading, migrating])
 
   const activeRef = useRef(active)
   activeRef.current = active
@@ -89,9 +115,9 @@ export default function Workspace() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, active?.id, active?.tool, view, activeProjectId, sidebarOpen])
 
-  function persistIfReal(session: Session) {
+  async function persistIfReal(session: Session): Promise<Session> {
     if (!hasRealContent(session)) return session
-    const saved = saveSession(session)
+    const saved = await store.saveSession(session)
     setSessions(prev => [saved, ...prev.filter(s => s.id !== saved.id)])
     return saved
   }
@@ -99,6 +125,9 @@ export default function Workspace() {
   // Debounced persist: chat streaming calls updateContent per token, and
   // serializing every session to localStorage on each delta would jank the UI.
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Guards mergeAndSave's optimistic update against out-of-order cloud-store
+  // responses — only the most recently *started* save may ever land in `active`.
+  const persistGeneration = useRef(0)
 
   function updateContent(content: SessionContent) {
     const current = activeRef.current
@@ -116,9 +145,10 @@ export default function Workspace() {
     if (persistTimer.current) {
       clearTimeout(persistTimer.current)
       const latest = activeRef.current
-      if (latest && hasRealContent(latest)) saveSession(latest)
+      // Fire-and-forget: a cleanup function can't be awaited.
+      if (latest && hasRealContent(latest)) store.saveSession(latest).catch(() => {})
     }
-  }, [])
+  }, [store])
 
   // Tool-save callback (PathwayExplorer calls onSave with partial data on
   // explicit saves; merge over the current content).
@@ -126,7 +156,11 @@ export default function Workspace() {
     const current = activeRef.current
     if (!current) return
     const next = { ...current, content: { ...(current.content as Record<string, unknown>), ...data } as SessionContent }
-    setActive(persistIfReal(next))
+    setActive(next)
+    const generation = ++persistGeneration.current
+    persistIfReal(next).then(saved => {
+      if (persistGeneration.current === generation) setActive(saved)
+    })
   }
 
   // PathwayExplorer owns its state after mount, so chat-driven changes to the
@@ -176,25 +210,25 @@ export default function Workspace() {
     setActive(session)
   }
 
-  function removeSession(session: Session) {
+  async function removeSession(session: Session) {
     if (!window.confirm(`Delete "${session.title || 'this session'}"?`)) return
-    deleteSession(session.id)
+    await store.deleteSession(session.id)
     setSessions(prev => prev.filter(s => s.id !== session.id))
     if (active?.id === session.id) setActive(createSession(session.tool, activeProjectId))
   }
 
-  function handleCreateProject(name: string, description: string) {
-    const project = createProject(name, description)
+  async function handleCreateProject(name: string, description: string) {
+    const project = await store.createProject(name, description)
     setProjects(prev => [project, ...prev])
     setActiveProjectId(project.id)
     setView('project')
   }
 
-  function handleDeleteProject(project: Project) {
+  async function handleDeleteProject(project: Project) {
     if (!window.confirm(`Delete project "${project.name}"? Its chats are kept in Chats.`)) return
-    deleteProject(project.id)
+    await store.deleteProject(project.id)
     setProjects(prev => prev.filter(p => p.id !== project.id))
-    setSessions(loadSessions())
+    setSessions(await store.loadSessions())
     if (activeProjectId === project.id) {
       setActiveProjectId(null)
       if (view === 'project') setView('projects')
@@ -206,9 +240,12 @@ export default function Workspace() {
     setView('project')
   }
 
-  function handleClearAll() {
-    if (!window.confirm('Delete every chat and project stored in this browser? This cannot be undone.')) return
-    clearAll()
+  async function handleClearAll() {
+    const message = user
+      ? 'Delete every chat and project in your account? This cannot be undone.'
+      : 'Delete every chat and project stored in this browser? This cannot be undone.'
+    if (!window.confirm(message)) return
+    await store.clearAll()
     setSessions([])
     setProjects([])
     setActiveProjectId(null)
@@ -260,6 +297,35 @@ export default function Workspace() {
 
   return (
     <div className="app-shell">
+      {hydrateError && (
+        <div className="hydrate-error" role="alert">
+          <div className="settings-note">
+            <AlertTriangle size={15} />
+            <p>
+              Couldn’t load your saved work{user ? ' from your account' : ''} ({hydrateError}).
+              Nothing has been lost, but this session may not save until it clears —
+              try reloading.
+              {user && (
+                <>
+                  {' '}You can also{' '}
+                  <button
+                    className="tool-context-link"
+                    onClick={() => { setDrawerOpen(false); setView('account') }}
+                  >
+                    sign out on the Account page
+                  </button>
+                  {' '}and fall back to this browser’s own storage.
+                </>
+              )}
+              {' '}
+              <button className="tool-context-link" onClick={() => setHydrateError(null)}>
+                Dismiss
+              </button>
+            </p>
+          </div>
+        </div>
+      )}
+
       <NavRail
         view={view}
         tool={active.tool}
@@ -371,8 +437,8 @@ export default function Workspace() {
             onOpen={openSession}
             onDeleteSession={removeSession}
             onNew={tool => startTool(tool, activeProject.id)}
-            onEdit={patch => {
-              const updated = updateProject(activeProject.id, patch)
+            onEdit={async patch => {
+              const updated = await store.updateProject(activeProject.id, patch)
               if (updated) setProjects(prev => prev.map(p => (p.id === updated.id ? updated : p)))
             }}
           />
@@ -382,6 +448,12 @@ export default function Workspace() {
       {view === 'settings' && (
         <main className="workspace-main page-main">
           <SettingsPage sessions={sessions} projects={projects} onClearAll={handleClearAll} />
+        </main>
+      )}
+
+      {view === 'account' && (
+        <main className="workspace-main page-main">
+          <AccountPage />
         </main>
       )}
 
