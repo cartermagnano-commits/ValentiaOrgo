@@ -1,3 +1,18 @@
+-- Orgo AI Supabase schema.
+--
+-- TREAT THIS FILE AS AN ONGOING MIGRATION FILE, NOT A FRESH-INSTALL SCRIPT.
+-- It is applied by hand against a LIVE database that already has these tables
+-- (SUPABASE_SETUP.md, step 2), and `create table if not exists` is a silent
+-- no-op there: editing a column, constraint, or default inside an existing
+-- `create table` block changes NOTHING on a database that already has that
+-- table. So every future schema change needs an explicit, idempotent
+-- `alter table ...` / `drop ... if exists` + recreate statement of its own,
+-- in addition to updating the `create table` block for fresh installs.
+-- Policies, triggers, and indexes below already follow that rule
+-- (`drop policy if exists` + `create policy`, `create index if not exists`).
+--
+-- The whole file must stay safe to re-run from top to bottom.
+
 create extension if not exists pgcrypto;
 
 create table if not exists public.projects (
@@ -13,9 +28,9 @@ create table if not exists public.chemistry_files (
   id uuid primary key default gen_random_uuid(),
   -- set null (not cascade): deleting a project must keep its sessions and
   -- just ungroup them — matches frontend/lib/sessions.ts's deleteProject,
-  -- which keeps sessions and clears their projectId. The original "on
-  -- delete cascade" here was never exercised (nothing wrote to this table
-  -- yet), so this fixes it before any real data exists.
+  -- which keeps sessions and clears their projectId. This clause only takes
+  -- effect on a FRESH database; see the alter table below, which is what
+  -- actually fixes an existing one.
   project_id uuid references public.projects(id) on delete set null,
   user_id uuid references auth.users(id) on delete cascade,
   title text not null,
@@ -34,6 +49,41 @@ create table if not exists public.chemistry_files (
   created_at timestamp with time zone default now(),
   updated_at timestamp with time zone default now()
 );
+
+-- Migration fix: chemistry_files.project_id was originally "on delete cascade"
+-- in an earlier version of this schema. This app wants deleting a project to
+-- PRESERVE its files (ungrouped), not delete them — see
+-- frontend/lib/cloudSessionStore.ts's deleteProject and the "Its chats are kept
+-- in Chats" confirm in frontend/src/platform/Workspace.tsx. The `create table if
+-- not exists` above is a no-op on a database that already has chemistry_files,
+-- so the corrected clause there never reaches such a database and this ALTER is
+-- what actually fixes the constraint. Idempotent: safe to re-run.
+--
+-- The constraint is looked up by column rather than assumed to carry Postgres's
+-- default name (chemistry_files_project_id_fkey), so this works even if the
+-- original constraint was named something else.
+do $$
+declare
+  fk_name text;
+begin
+  select con.conname into fk_name
+  from pg_constraint con
+  join pg_attribute att
+    on att.attrelid = con.conrelid and att.attnum = con.conkey[1]
+  where con.conrelid = 'public.chemistry_files'::regclass
+    and con.confrelid = 'public.projects'::regclass
+    and con.contype = 'f'
+    and array_length(con.conkey, 1) = 1
+    and att.attname = 'project_id';
+  if fk_name is not null then
+    execute format('alter table public.chemistry_files drop constraint %I', fk_name);
+  end if;
+end
+$$;
+
+alter table public.chemistry_files
+  add constraint chemistry_files_project_id_fkey
+  foreign key (project_id) references public.projects(id) on delete set null;
 
 -- Per-user, non-secret preferences (e.g. "Choose Your Engine" mode/provider/model/tier).
 -- BYOK API keys are NEVER stored here — they live client-side (sessionStorage) only.
