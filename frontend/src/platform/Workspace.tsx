@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Bot, FlaskConical, FolderOpen, MessageSquare, Network, Trash2, X,
+  AlertTriangle, Bot, FlaskConical, FolderOpen, MessageSquare, Network, Trash2, X,
 } from 'lucide-react'
 import PathwayExplorer from '../components/PathwayExplorer'
 import ChatPanel from './ChatPanel'
@@ -42,44 +42,67 @@ export default function Workspace() {
   const [view, setView] = useState<View>('tool')
   const [active, setActive] = useState<Session | null>(null)
   const [hydrated, setHydrated] = useState(false)
+  const [hydrateError, setHydrateError] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   // Live selection context pushed up by PathwayExplorer for the drawer.
   const [synthesisContext, setSynthesisContext] = useState<Record<string, unknown> | null>(null)
 
-  const { user, store } = useAuth()
+  const { user, store, loading: authLoading, migrating } = useAuth()
 
   // localStorage/Supabase reads aren't available synchronously — load once
   // on mount, and again whenever the active store changes (sign-in/sign-out
   // swap it), restoring whatever the user was last looking at.
+  //
+  // Deferred while auth is still resolving (an already-signed-in user would
+  // otherwise flash this browser's local data before the cloud store arrives)
+  // and while migration is uploading local work into a just-signed-in account
+  // (reading mid-upload shows a half-migrated history that nothing re-reads).
+  // `migrating` flipping back to false re-fires this effect, so hydration then
+  // sees the finished account.
   useEffect(() => {
+    if (authLoading || migrating) return
     let cancelled = false
     async function hydrate() {
-      const [storedSessions, storedProjects] = await Promise.all([
-        store.loadSessions(), store.loadProjects(),
-      ])
-      if (cancelled) return
-      setSessions(storedSessions)
-      setProjects(storedProjects)
+      try {
+        const [storedSessions, storedProjects] = await Promise.all([
+          store.loadSessions(), store.loadProjects(),
+        ])
+        if (cancelled) return
+        setSessions(storedSessions)
+        setProjects(storedProjects)
 
-      const ui = loadUiState()
-      // A project that has since been deleted must not resurrect a filtered view.
-      const projectId = ui?.projectId && storedProjects.some(p => p.id === ui.projectId)
-        ? ui.projectId : null
-      // Empty sessions are never persisted, so a missing id just means the last
-      // session held no work — reopen its tool with a fresh one.
-      const restored = ui?.sessionId ? storedSessions.find(s => s.id === ui.sessionId) : undefined
+        const ui = loadUiState()
+        // A project that has since been deleted must not resurrect a filtered view.
+        const projectId = ui?.projectId && storedProjects.some(p => p.id === ui.projectId)
+          ? ui.projectId : null
+        // Empty sessions are never persisted, so a missing id just means the last
+        // session held no work — reopen its tool with a fresh one.
+        const restored = ui?.sessionId ? storedSessions.find(s => s.id === ui.sessionId) : undefined
 
-      setActiveProjectId(projectId)
-      // The project page needs a project; without one, fall back to the list.
-      setView(ui?.view === 'project' && !projectId ? 'projects' : ui?.view ?? 'tool')
-      setSidebarOpen(ui?.sidebarOpen ?? false)
-      setActive(restored ?? createSession(ui?.tool ?? 'chat', projectId))
-      setHydrated(true)
+        setActiveProjectId(projectId)
+        // The project page needs a project; without one, fall back to the list.
+        setView(ui?.view === 'project' && !projectId ? 'projects' : ui?.view ?? 'tool')
+        setSidebarOpen(ui?.sidebarOpen ?? false)
+        setActive(restored ?? createSession(ui?.tool ?? 'chat', projectId))
+        setHydrateError(null)
+        setHydrated(true)
+      } catch (err) {
+        if (cancelled) return
+        // Every cloud-store method throws on a Supabase error, so a paused
+        // project, an RLS misconfiguration, or a dropped connection lands
+        // here. Rendering nothing would strand the user on a blank page with
+        // no way to reach Account and sign out — so hydrate to an empty (but
+        // usable) workspace and say so.
+        console.error('Failed to load sessions/projects', err)
+        setHydrateError(err instanceof Error ? err.message : String(err))
+        setActive(current => current ?? createSession('chat', null))
+        setHydrated(true)
+      }
     }
     hydrate()
     return () => { cancelled = true }
-  }, [store])
+  }, [store, authLoading, migrating])
 
   const activeRef = useRef(active)
   activeRef.current = active
@@ -274,6 +297,35 @@ export default function Workspace() {
 
   return (
     <div className="app-shell">
+      {hydrateError && (
+        <div className="hydrate-error" role="alert">
+          <div className="settings-note">
+            <AlertTriangle size={15} />
+            <p>
+              Couldn’t load your saved work{user ? ' from your account' : ''} ({hydrateError}).
+              Nothing has been lost, but this session may not save until it clears —
+              try reloading.
+              {user && (
+                <>
+                  {' '}You can also{' '}
+                  <button
+                    className="tool-context-link"
+                    onClick={() => { setDrawerOpen(false); setView('account') }}
+                  >
+                    sign out on the Account page
+                  </button>
+                  {' '}and fall back to this browser’s own storage.
+                </>
+              )}
+              {' '}
+              <button className="tool-context-link" onClick={() => setHydrateError(null)}>
+                Dismiss
+              </button>
+            </p>
+          </div>
+        </div>
+      )}
+
       <NavRail
         view={view}
         tool={active.tool}
