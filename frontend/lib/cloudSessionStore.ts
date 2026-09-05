@@ -112,7 +112,10 @@ export function makeCloudSessionStore(userId: string): SessionStore {
         .eq('id', id)
         .select()
         .single()
-      if (error) return null
+      if (error) {
+        if (error.code === 'PGRST116') return null
+        throw error
+      }
       return rowToProject(data as ProjectRow)
     },
 
