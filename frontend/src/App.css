@@ -4794,6 +4794,21 @@ header h1 {
   color: var(--warning);
 }
 
+/* Unverified AI-guess product: no template vouches for it, so it's drawn
+   with a badge rather than presented like a verified engine product. */
+.chat-tool-guess-badge {
+  margin-left: 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  border-radius: 999px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
 /* Deferred explanation: the product is the answer, prose is opt-in. */
 .chat-explain-btn {
   display: inline-flex;

@@ -124,13 +124,21 @@ function ToolResultCards({
           const data = result.data as {
             substrate_smiles?: string; reagent_smiles?: string; environment?: string
             products?: Array<{ smiles: string; reaction_name: string; steps_taken?: number }>
+            ai_guess?: { smiles: string; reaction_name?: string } | null
           }
           const products = data.products ?? []
+          const guess = !products.length ? (data.ai_guess ?? null) : null
+          // A substrate-only read: OSR got one molecule, the other (usually a
+          // text reagent over the arrow) was never recognized, so the engine
+          // did not run.
+          const reagentMissing = !data.reagent_smiles
           return (
             <div key={index} className="chat-tool-card">
               <div className="chat-tool-card-head">
                 <FlaskConical size={13} />
-                Engine reaction: <code>{data.substrate_smiles}</code> + <code>{data.reagent_smiles}</code>
+                {reagentMissing
+                  ? <>Recognized: <code>{data.substrate_smiles}</code></>
+                  : <>Engine reaction: <code>{data.substrate_smiles}</code> + <code>{data.reagent_smiles}</code></>}
                 {data.environment && <span className="chat-tool-tag">{data.environment}</span>}
               </div>
               {products.length ? (
@@ -143,9 +151,27 @@ function ToolResultCards({
                     </div>
                   ))}
                 </div>
+              ) : guess ? (
+                <>
+                  <div className="chat-tool-products">
+                    <div className="chat-tool-product">
+                      <StructureView smiles={guess.smiles} width={170} height={104} />
+                      <div className="chat-tool-product-name">
+                        {guess.reaction_name || 'Predicted product'}
+                        <span className="chat-tool-guess-badge">AI guess</span>
+                      </div>
+                      <code className="chat-tool-product-smiles">{guess.smiles}</code>
+                    </div>
+                  </div>
+                  <div className="chat-tool-miss">
+                    No verified template matched this pair — the structure above is an unverified AI guess.
+                  </div>
+                </>
               ) : (
                 <div className="chat-tool-miss">
-                  No verified template matched this pair — any product below is an unverified AI guess.
+                  {reagentMissing
+                    ? 'Only one molecule could be read from the image, so the engine did not run. Any product in the reply is unverified.'
+                    : 'No verified template matched this pair, and no AI guess was available — any product in the reply is unverified.'}
                 </div>
               )}
             </div>
@@ -383,6 +409,7 @@ export default function ChatPanel({
   function reactionContextFrom(result: Record<string, unknown>): Record<string, unknown> {
     const products = result?.products as Array<Record<string, unknown>> | undefined
     const top = products?.[0]
+    const guess = result?.ai_guess as Record<string, unknown> | null | undefined
     return {
       substrate_smiles: result?.substrate_smiles,
       reagent_smiles: result?.reagent_smiles,
@@ -390,6 +417,11 @@ export default function ChatPanel({
         product_smiles: top.smiles,
         reaction_name: top.reaction_name,
         execution_history: top.execution_history,
+      } : guess?.smiles ? {
+        // No verified product — carry the unverified guess so a follow-up
+        // question stays grounded, tagged so the backend never presents it
+        // as engine output.
+        ai_guess_smiles: guess.smiles,
       } : {}),
     }
   }

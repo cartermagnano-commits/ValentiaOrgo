@@ -222,5 +222,97 @@ try:
 finally:
     app._react_from_image, app._sse_stream = orig_react_from_image, orig_sse_stream
 
+# ── image chat grounds the model on every OSR outcome ───────────────────────
+# Regression: _image_reaction_then_explain used to emit a card + grounding ONLY
+# when OSR returned both a substrate and a reagent with products. Every other
+# outcome fell through to an ungrounded model answer that then invented a
+# reaction in prose (observed: benzyl isocyanide + H2O). Now each outcome gets
+# grounded, and a no-verified-product pair gets the same RDKit-validated
+# AI-guess fallback /react uses.
+import json as _json  # noqa: E402
+
+orig_rfi, orig_sse, orig_guess = (
+    app._react_from_image, app._sse_stream, app._maybe_blind_guess)
+
+
+def _run_image_chat(rfi_result, *, explain=True, guess=None):
+    """Drive _image_reaction_then_explain with a stubbed OSR result. Returns
+    (tool_event_datas, grounding_text, guess_call_args)."""
+    calls = []
+
+    def fake_rfi(raw, engine=None):
+        return dict(rfi_result)
+
+    captured = {}
+
+    async def fake_sse(system, messages, max_tokens, engine):
+        captured["system"] = system
+        yield "data: [DONE]\n\n"
+
+    async def fake_guess(substrate, reagent, user_id, api_key=None):
+        calls.append((substrate, reagent))
+        return guess
+
+    app._react_from_image, app._sse_stream, app._maybe_blind_guess = (
+        fake_rfi, fake_sse, fake_guess)
+    try:
+        image = base64.b64encode(b"img").decode()
+        messages = [{"role": "user", "content": "?",
+                     "images": [{"media_type": "image/png", "data": image}]}]
+        frames = asyncio.run(_collect(app._image_reaction_then_explain(
+            "SYSTEM", messages, app.EngineConfig(mode="hosted"), explain=explain)))
+    finally:
+        app._react_from_image, app._sse_stream, app._maybe_blind_guess = (
+            orig_rfi, orig_sse, orig_guess)
+
+    events = []
+    for f in frames:
+        if f.startswith("data: ") and f[6:].strip() not in ("[DONE]",):
+            payload = _json.loads(f[6:])
+            if "tool_event" in payload:
+                events.append(payload["tool_event"]["data"])
+    return events, captured.get("system", ""), calls
+
+
+async def _collect(agen):
+    return [x async for x in agen]
+
+
+# 1. Both molecules, no verified product → AI guess drawn + grounded as unverified.
+events, ground, guess_calls = _run_image_chat(
+    {"substrate_smiles": "[C-]#[N+]Cc1ccccc1", "reagent_smiles": "O",
+     "products": [], "error": None},
+    guess={"smiles": "NCc1ccccc1", "reaction_name": "Isocyanide hydrolysis",
+           "unverified": True})
+check("no-product pair: AI guess requested", guess_calls, [("[C-]#[N+]Cc1ccccc1", "O")])
+check("no-product pair: frame carries ai_guess",
+      (events[0].get("ai_guess") or {}).get("smiles") if events else None, "NCc1ccccc1")
+check("no-product pair: grounding names the guess as unverified",
+      "NCc1ccccc1" in ground and "unverified guess" in ground, True)
+
+# 2. One molecule only → card of what was read, engine did NOT run, no guess.
+events, ground, guess_calls = _run_image_chat(
+    {"substrate_smiles": "[C-]#[N+]Cc1ccccc1", "reagent_smiles": "",
+     "products": [], "error": "Only one molecule was recognized."})
+check("single component: frame still emitted", len(events), 1)
+check("single component: no blind guess attempted", guess_calls, [])
+check("single component: grounding says engine did not run",
+      "PARTIAL IMAGE RECOGNITION" in ground and "did not run" in ground, True)
+
+# 3. Nothing recognized → no card, grounding forbids inventing a reaction.
+events, ground, guess_calls = _run_image_chat(
+    {"error": "No structure recognized in the image.", "products": []})
+check("no recognition: no card emitted", events, [])
+check("no recognition: grounding forbids invented chemistry",
+      "IMAGE NOT RECOGNIZED" in ground, True)
+
+# 4. Verified product → unchanged: engine grounding, no guess.
+events, ground, guess_calls = _run_image_chat(
+    {"substrate_smiles": "CCBr", "reagent_smiles": "[OH-].[Na+]",
+     "products": [{"smiles": "CCO", "reaction_name": "Williamson"}], "error": None})
+check("verified product: no blind guess", guess_calls, [])
+check("verified product: engine-verified grounding",
+      "ENGINE-VERIFIED REACTION" in ground and "CCO" in ground, True)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

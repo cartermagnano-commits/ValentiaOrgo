@@ -3089,34 +3089,68 @@ class ChatRequest(BaseModel):
 def _reaction_ground_text(result: dict) -> str:
     """Grounding block appended to the chat system prompt when the engine ran on
     an attached reaction image — the LLM must explain this verified result, not
-    re-derive it."""
+    re-derive it. A card is shown for the partial-recognition cases too, so the
+    model has to be told exactly how much was actually verified."""
+    substrate = result.get("substrate_smiles", "")
+    reagent = result.get("reagent_smiles", "")
     products = result.get("products") or []
+    guess = result.get("ai_guess") or None
+
+    # OSR read one structure but not the second molecule (commonly a reagent
+    # written as text over the arrow). The engine never ran.
+    if substrate and not reagent:
+        return (
+            "\n--- PARTIAL IMAGE RECOGNITION (not an engine result — never present it as one) ---\n"
+            f"Recognized structure: {substrate}\n"
+            "The other molecule could not be read from the image, so Orgo AI's "
+            "reaction engine did not run and no product is verified. You may "
+            "explain the likely chemistry, but state plainly that this is your "
+            "own prediction, not a verified result."
+        )
+
     lines = [
         "\n--- ENGINE-VERIFIED REACTION (read from the attached image; never contradict) ---",
-        f"Substrate: {result.get('substrate_smiles', '')}",
-        f"Reagent: {result.get('reagent_smiles', '')}",
+        f"Substrate: {substrate}",
+        f"Reagent: {reagent}",
     ]
     if products:
         lines.append("Verified products:")
         for p in products[:4]:
             lines.append(f"  - {p.get('reaction_name', '')}: {p.get('smiles', '')}")
+    elif guess and guess.get("smiles"):
+        name = f" ({guess['reaction_name']})" if guess.get("reaction_name") else ""
+        lines.append(
+            "No curated template matched this pair, so the verified engine has "
+            f"no product for it. An unverified AI guess is shown to the user as a "
+            f"structure drawing: {guess['smiles']}{name}. Explain it explicitly "
+            "as an unverified guess — never as settled fact."
+        )
     else:
         lines.append(
-            "The verified engine found no matching template for this pair. Say so "
-            "plainly; any product you propose is an unverified general-chemistry guess."
+            "The verified engine found no matching template for this pair, and no "
+            "AI guess was available. Say plainly that the product is unverified; "
+            "any product you propose is a general-chemistry guess."
         )
     return "\n".join(lines)
 
 
 async def _image_reaction_then_explain(system: str, messages: list[dict],
                                        engine: Optional[EngineConfig],
-                                       explain: bool = True):
+                                       explain: bool = True,
+                                       user_id: str | None = None):
     """Image-bearing chats can't use the native tool path (the gateway drops
     image blocks on the tools endpoint). So run OSR + the deterministic engine
     on the newest attached image ourselves, emit a `reaction_result` frame — the
     same one the run_reaction tool emits, so the UI renders its banner/card —
-    then stream a grounded explanation that still carries the image."""
-    vision_key = engine.api_key if engine else None
+    then stream a grounded explanation that still carries the image.
+
+    Every OSR outcome grounds the model, so it can never silently fall back to
+    free-associating a reaction in prose:
+      - both molecules + verified product → explain the verified result
+      - both molecules, no product        → RDKit-validated AI guess, drawn + flagged
+      - one molecule only                 → card of what was read; engine did not run
+      - nothing recognized                → tell the user it couldn't be read
+    """
     newest_image: str | None = None
     for message in reversed(messages):
         images = message.get("images") or []
@@ -3139,17 +3173,45 @@ async def _image_reaction_then_explain(system: str, messages: list[dict],
         except Exception as exc:
             logger.warning("chat image-reaction OSR failed (%s): %s",
                            type(exc).__name__, exc)
-        if (result and not result.get("error")
-                and result.get("substrate_smiles") and result.get("reagent_smiles")):
-            if not result.get("products"):
-                _record_template_gap("chat_image", result["substrate_smiles"],
-                                     result["reagent_smiles"], [])
+
+        api_key = engine.api_key if engine else None
+        substrate = (result or {}).get("substrate_smiles") or ""
+        reagent = (result or {}).get("reagent_smiles") or ""
+
+        if substrate:
+            # Both molecules read but no deterministic product to stand behind —
+            # layer the same RDKit-validated AI-guess fallback /react and
+            # /react-from-image use, so the UI can draw a structure (flagged
+            # unverified) instead of leaving the chat with prose only.
+            if reagent and not result.get("products"):
+                _record_template_gap("chat_image", substrate, reagent, [])
+                result["ai_guess"] = await _maybe_blind_guess(
+                    substrate, reagent, user_id, api_key=api_key)
+            elif reagent and result.get("low_confidence"):
+                _record_template_gap("chat_image_low_confidence", substrate, reagent, [])
+                result["ai_guess"] = await _maybe_blind_guess(
+                    substrate, reagent, user_id, api_key=api_key)
+            # A substrate-only read (reagent written as text over the arrow,
+            # never recognized) still gets a card of what WAS read, so the chat
+            # isn't left with unexplained prose.
             yield f"data: {json.dumps({'tool_event': {'type': 'reaction_result', 'data': result}})}\n\n"
             if not explain:
                 # Card only. The Explanation button re-runs this turn.
                 yield "data: [DONE]\n\n"
                 return
             ground = _reaction_ground_text(result)
+        else:
+            # OSR produced nothing usable. Don't let the model invent a reaction
+            # from the picture — tell it to say it couldn't read the structures.
+            ground = (
+                "\n--- IMAGE NOT RECOGNIZED ---\n"
+                "Orgo AI's structure recognition could not read reliable structures "
+                "from the attached image, so nothing was verified. Do not present "
+                "any reaction or product as computed or verified. Tell the user the "
+                "image couldn't be read and suggest a clearer picture or typing the "
+                "molecules into the Reaction tool; you may still describe what you "
+                "see, clearly labeled as unverified."
+            )
 
     async for frame in _sse_stream(system + ground, messages, 800, engine):
         yield frame
@@ -3176,6 +3238,11 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(optional_auth)):
             lines.append(f"Reaction: {req.context['reaction_name']}")
         if req.context.get("product_smiles"):
             lines.append(f"Product: {req.context['product_smiles']}")
+        elif req.context.get("ai_guess_smiles"):
+            lines.append(
+                f"Unverified AI product guess: {req.context['ai_guess_smiles']} "
+                "(no template vouches for this — never present it as engine-verified)"
+            )
         if req.context.get("execution_history"):
             lines.append("History: " + " | ".join(req.context["execution_history"]))
         context_block = "\n".join(lines)
@@ -3233,7 +3300,7 @@ async def chat(req: ChatRequest, user_id: str | None = Depends(optional_auth)):
         # ourselves so the reaction still surfaces (banner/card + grounding).
         stream = _with_error_frames(
             _image_reaction_then_explain(system_prompt, messages, req.engine,
-                                         explain=req.explain))
+                                         explain=req.explain, user_id=user_id))
     else:
         stream = _sse_stream(system_prompt, messages, 800, req.engine)
 
@@ -3922,6 +3989,7 @@ async def react_from_image(file: UploadFile = File(...),
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Image too large (max 8 MB).")
     engine_cfg = _parse_engine_field(engine)
+    api_key = engine_cfg.api_key if engine_cfg else None
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(_executor, _react_from_image, contents, engine_cfg)
