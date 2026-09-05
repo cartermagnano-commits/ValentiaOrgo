@@ -3548,17 +3548,40 @@ def _react_from_image(raw_bytes: bytes, engine=None) -> dict:
     components = [Chem.MolToSmiles(f) for f in frags_sorted]
 
     if len(components) < 2:
-        return {
-            "recognized_smiles": recognized_smiles,
-            "components": components,
-            "substrate_smiles": components[0] if components else "",
-            "reagent_smiles": "",
-            "error": "Only one molecule was recognized. Upload an image containing both substrate and reagent.",
-            "products": [],
-            "recognition_confidence": _confidence_label(recognition_verified),
-            "recognition_verified": recognition_verified,
-            "source": "templates",
-        }
+        # DECIMER/MolScribe read the drawn structure, but a reagent written as
+        # plain text/formula over or beside the arrow (e.g. "+ H2O") isn't a
+        # structure they can parse, so it never becomes a fragment. Retry with
+        # vision before giving up — every other failure branch in this function
+        # already does this, and _ollama_reaction_smiles's prompt specifically
+        # asks for "reagents written above or below the arrow."
+        logger.info("Only one component recognized — calling vision for a second molecule")
+        retry_smiles = _ollama_reaction_smiles(_img_bytes, engine)
+        logger.info("Vision (single-component fallback) returned: %r", retry_smiles)
+        if retry_smiles and retry_smiles != recognized_smiles:
+            retry_mol = _mol_from_smiles_loose(retry_smiles)
+            if retry_mol is None:
+                retry_mol = Chem.MolFromSmiles(retry_smiles.replace("+", "."))
+            if retry_mol is not None:
+                retry_frags = Chem.GetMolFrags(retry_mol, asMols=True)
+                if len(retry_frags) >= 2:
+                    recognized_smiles = retry_smiles
+                    raw_mol = retry_mol
+                    frags = retry_frags
+                    frags_sorted = sorted(frags, key=lambda m: m.GetNumHeavyAtoms(), reverse=True)
+                    components = [Chem.MolToSmiles(f) for f in frags_sorted]
+
+        if len(components) < 2:
+            return {
+                "recognized_smiles": recognized_smiles,
+                "components": components,
+                "substrate_smiles": components[0] if components else "",
+                "reagent_smiles": "",
+                "error": "Only one molecule was recognized. Upload an image containing both substrate and reagent.",
+                "products": [],
+                "recognition_confidence": _confidence_label(recognition_verified),
+                "recognition_verified": recognition_verified,
+                "source": "templates",
+            }
 
     # 4. Assign substrate/reagent and run the engine — every fragment gets a
     # turn as the substrate; the first assignment that matches a template wins.
