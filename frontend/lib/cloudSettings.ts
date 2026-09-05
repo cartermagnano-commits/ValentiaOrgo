@@ -10,7 +10,8 @@ export async function loadCloudModel(userId: string): Promise<string | null> {
     .select('engine')
     .eq('user_id', userId)
     .maybeSingle()
-  if (error || !data) return null
+  if (error) throw error
+  if (!data) return null
   const engine = data.engine as { model?: string } | null
   return engine?.model ?? null
 }
