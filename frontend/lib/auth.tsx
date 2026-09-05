@@ -7,6 +7,8 @@ import { supabase } from './supabase'
 import { localSessionStore } from './localSessionStore'
 import { makeCloudSessionStore } from './cloudSessionStore'
 import { migrateLocalToCloud } from './migrate'
+import { loadCloudModel, saveCloudModel } from './cloudSettings'
+import { loadPreferredModel, savePreferredModel } from './engine'
 import type { SessionStore } from './sessionStore'
 
 type AuthContextValue = {
@@ -19,6 +21,21 @@ type AuthContextValue = {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
+
+// Account preference wins on sign-in if one was ever saved; otherwise this
+// browser's current local pick becomes the account's first saved preference.
+async function syncModelPreferenceOnSignIn(userId: string): Promise<void> {
+  try {
+    const cloudModel = await loadCloudModel(userId)
+    if (cloudModel) {
+      savePreferredModel(cloudModel)
+    } else {
+      await saveCloudModel(userId, loadPreferredModel())
+    }
+  } catch (err) {
+    console.error('Engine-preference sync failed', err)
+  }
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
@@ -38,6 +55,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (session?.user && migratingFor.current !== session.user.id) {
         migratingFor.current = session.user.id
         migrateLocalToCloud(makeCloudSessionStore(session.user.id))
+        syncModelPreferenceOnSignIn(session.user.id)
       }
       if (!session?.user) migratingFor.current = null
     })

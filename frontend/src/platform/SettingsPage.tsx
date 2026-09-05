@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react'
 import { Download, ShieldCheck, Trash2 } from 'lucide-react'
 import { STRENGTH, loadApiKey, loadPreferredModel, saveApiKey, savePreferredModel } from '../../lib/engine'
+import { useAuth } from '../../lib/auth'
+import { saveCloudModel } from '../../lib/cloudSettings'
 import type { Project, Session } from '../../lib/sessions'
 
 export default function SettingsPage({
@@ -15,6 +17,7 @@ export default function SettingsPage({
   onClearAll: () => void
 }) {
   const [model, setModel] = useState(() => loadPreferredModel())
+  const { user } = useAuth()
 
   const [apiKey, setApiKey] = useState('')
   const [keySaved, setKeySaved] = useState(false)
@@ -32,6 +35,7 @@ export default function SettingsPage({
   function pick(next: string) {
     setModel(next)
     savePreferredModel(next)
+    if (user) saveCloudModel(user.id, next).catch(() => {})
   }
 
   // Everything lives in localStorage, so an export is just the store itself —
