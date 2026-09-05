@@ -32,11 +32,13 @@ That creates:
 - `projects`
 - `chemistry_files`
 - `user_settings`
+- `profiles` (auto-created for every signed-up user by a trigger on `auth.users`)
+- `usage_events` (server-side analytics log)
 - indexes
 - timestamp triggers
 - Row Level Security policies for select, insert, update, and delete
 
-Ownership is enforced with `auth.uid() = user_id` on all three tables.
+Ownership is enforced with `auth.uid() = user_id` on all tables. The `profiles` table rows are created automatically on signup and never inserted directly by clients.
 
 ## 3. Configure Auth
 
@@ -81,9 +83,4 @@ Open the frontend at:
 http://localhost:3000
 ```
 
-Routes:
-
-- `/login`
-- `/signup`
-- `/dashboard`
-- `/projects/[projectId]`
+The frontend is a single-page workspace at `/`. Accounts (via Supabase Auth) are an optional overlay on the localStorage-only project storage — users can work keyless or log in to sync their projects across devices.
