@@ -23,6 +23,7 @@ type AuthContextValue = {
   store: SessionStore
   signUp: (email: string, password: string) => Promise<{ error: string | null }>
   signIn: (email: string, password: string) => Promise<{ error: string | null }>
+  signInWithGoogle: () => Promise<{ error: string | null }>
   signOut: () => Promise<void>
 }
 
@@ -102,12 +103,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: error?.message ?? null }
   }
 
+  // OAuth redirects this browser away to Google and back to the app root. The
+  // returning URL carries the session, which Supabase's detectSessionInUrl
+  // (on by default) consumes and turns into a SIGNED_IN event above — so the
+  // migration and model-preference sync run exactly as for password sign-in.
+  async function signInWithGoogle() {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin },
+    })
+    return { error: error?.message ?? null }
+  }
+
   async function signOut() {
     await supabase.auth.signOut()
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, migrating, store, signUp, signIn, signOut }}>
+    <AuthContext.Provider value={{ user, loading, migrating, store, signUp, signIn, signInWithGoogle, signOut }}>
       {children}
     </AuthContext.Provider>
   )

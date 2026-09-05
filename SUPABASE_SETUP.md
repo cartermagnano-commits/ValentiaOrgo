@@ -49,6 +49,27 @@ In Supabase Auth settings:
 - Enable Email provider.
 - For immediate local testing, disable email confirmations.
 - If confirmations stay enabled, users will need to confirm their email before logging in.
+- Under **URL Configuration**, add every origin the app runs on (e.g.
+  `http://localhost:3000`, your Vercel domain) to the redirect allowlist. The
+  "Continue with Google" button sends users back to `window.location.origin`.
+
+### Google sign-in
+
+The account page shows a "Continue with Google" button unconditionally; it only
+works once the Google provider is configured for the project. Until then it
+returns a "provider is not enabled" error, which the page surfaces inline.
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/apis/credentials),
+   create an **OAuth 2.0 Client ID** of type *Web application*.
+2. Add Supabase's callback URL as an **Authorized redirect URI**:
+   `https://your-project-ref.supabase.co/auth/v1/callback` (Supabase Auth →
+   Providers → Google shows the exact value).
+3. Copy the generated **Client ID** and **Client secret** into Supabase Auth →
+   Providers → **Google**, and enable the provider.
+
+No app config or redeploy is needed — the button is already wired to
+`supabase.auth.signInWithOAuth({ provider: 'google' })`. New Google users get a
+`profiles` row from the same `on_auth_user_created` trigger as email signups.
 
 ## 3b. Backend token verification (optional, any environment)
 
