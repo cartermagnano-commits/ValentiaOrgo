@@ -21,7 +21,6 @@ dashboard after running. Not automated here; out of scope for a one-time
 verification gate.
 """
 
-import json
 import os
 import sys
 import uuid
@@ -108,6 +107,14 @@ with rest(token_a) as client_a, rest(token_b) as client_b:
     others_profile = client_b.get("/profiles", params={"id": f"eq.{user_a}"})
     check("user B's read of user A's profile returns nothing",
           others_profile.status_code == 200 and others_profile.json() == [], others_profile.text)
+
+    own_profile_b = client_b.get("/profiles", params={"id": f"eq.{user_b}"})
+    check("signup's trigger created a profile row for user B",
+          own_profile_b.status_code == 200 and len(own_profile_b.json()) == 1, own_profile_b.text)
+
+    others_profile_from_a = client_a.get("/profiles", params={"id": f"eq.{user_b}"})
+    check("user A's read of user B's profile returns nothing",
+          others_profile_from_a.status_code == 200 and others_profile_from_a.json() == [], others_profile_from_a.text)
 
     client_a.delete("/projects", params={"id": f"eq.{project_a_id}"})
 
